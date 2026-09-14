@@ -10,13 +10,15 @@ and/or talking to the live Lua state inside `coromon.exe`.
 ## Quick start — starter Potential reader
 
 ```bash
-python tools/coromon_starter.py            # print the 3 starter Coromon potentials once
-python tools/coromon_starter.py --watch    # keep polling, print a new roll when it changes
+python tools/coromon_starter.py            # print the roll + draw it on screen
+python tools/coromon_starter.py --watch    # keep it live while you reload the save
 python tools/coromon_starter.py --verbose  # also show the object path + monster attributes
+python tools/coromon_starter.py --clear-overlay  # remove the on-screen overlay
+python tools/coromon_starter.py --no-overlay     # console output only
 ```
 
-Load a save that is just before the starter reveal, attach the tool, then reload the
-save until you get what you want. Example output:
+Load a save that is just before the starter reveal, run the tool, then reload the
+save until you get what you want. Console output:
 
 ```
 === starter roll ===
@@ -25,8 +27,13 @@ save until you get what you want. Example output:
   ICE_BEAR_1       potential 14
 ```
 
+…and the same numbers are drawn in the top-left corner **on top of the game**
+(works in fullscreen; the overlay survives scene changes and re-attaches itself
+above the game's UI). The overlay stays on screen after the tool exits, so use
+`--clear-overlay` when you are done; `--watch` keeps it in sync with each reload.
+
 In Coromon **Potential** goes 0–21: **20 = "potent"** (aura/shiny-style sprite),
-**21 = "perfect"**. The tool flags those automatically.
+**21 = "perfect"**. Those lines are highlighted in green/gold on the overlay.
 
 Requires `frida` (`pip install frida`) and the game running. It attaches read-only:
 no memory is patched, nothing is written to the save.
@@ -51,11 +58,31 @@ no memory is patched, nothing is written to the save.
 `consistentSaveProperties.potential` on the same spawnable object carries the same
 value; the tool prefers the actual monster object.
 
+### Drawing the overlay
+
+Coromon is a Solar2D game but it *wraps* the `display` global: the wrapper has no
+`newText`, and text is built through the game's own factory:
+
+```lua
+textHelper:new(parentGroup, 'outline_10_bold', { text = "..." })   -- then :setFillColor(r,g,b)
+```
+
+The overlay group is inserted into `display.getCurrentStage()`. Stage children are
+drawn *after* everything else (world, dialogs), so they end up on top. Two gotchas:
+
+* `#stage` always reports `0`; use `stage.numChildren` and `stage[i]` instead.
+* the group is removed from its parent and re-inserted on every refresh, because the
+  game appends its own groups to the stage when it changes scene, which would
+  otherwise cover the overlay.
+
+Content resolution is 485×283 and the window is scaled up from there, so overlay
+coordinates are in that space (not pixels).
+
 ## Other tools
 
 | file | purpose |
 |---|---|
-| `coromon_starter.py` | the useful one — read the 3 starter potentials |
+| `coromon_starter.py` | the useful one — read the 3 starter potentials and draw them on screen |
 | `coromon_lua.py` | generic Lua injection bridge (`--eval`, `--file`, or REPL) |
 | `car_extract.py` | Solar2D `resource.car` reader/extractor (`--list`, `--extract`) |
 | `luadis.py` | Lua 5.1 bytecode reader/disassembler/string dumper for `.lu` chunks |

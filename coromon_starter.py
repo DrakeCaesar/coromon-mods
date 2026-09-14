@@ -151,12 +151,115 @@ def fmt(name, pot, extra=""):
     return f"  {name:<16} potential {pot:>2}{tag}"
 
 
+# --------------------------------------------------------------------------
+# on-screen overlay
+#
+# Coromon's `display` global is a wrapper around Solar2D's display library and
+# has no newText; text is built through Coromon's own `textHelper`:
+#     textHelper:new(parentGroup, fontType, { text = "..." })
+# Objects added to `display.getCurrentStage()` are drawn on top of everything
+# (world, UI, dialogs), which is exactly what we want for an overlay.
+# --------------------------------------------------------------------------
+OVERLAY_LUA = r"""
+local FONT = 'outline_10_bold'
+local LINES = __LINES__
+local COLS = __COLS__
+local LINE_H, PAD_X, PAD_Y, TEXT_H = 17, 10, 7, 18
+
+local stage = display.getCurrentStage()
+local ov = _G.__coromon_overlay
+if ov and (not ov.group or not ov.group.parent) then
+  ov = nil; _G.__coromon_overlay = nil
+end
+if not ov then
+  local g = display.newGroup()
+  local bg = display.newRect(0, 0, 120, 60)
+  bg.anchorX, bg.anchorY = 0, 0
+  pcall(function() bg:setFillColor(0, 0, 0, 0.75) end)
+  g:insert(bg)
+  g.x, g.y = 6, 6
+  ov = {group = g, bg = bg, texts = {}, key = nil}
+  _G.__coromon_overlay = ov
+end
+
+local key = table.concat(LINES, '|')
+if ov.key ~= key then
+  for i = 1, #ov.texts do pcall(function() ov.texts[i]:removeSelf() end) end
+  ov.texts = {}
+  local maxw = 0
+  for i = 1, #LINES do
+    local t = textHelper:new(ov.group, FONT, {text = LINES[i]})
+    t.x, t.y = PAD_X, PAD_Y + (i - 1) * LINE_H
+    local c = COLS[i]
+    if c then pcall(function() t:setFillColor(c[1], c[2], c[3]) end) end
+    if (t.width or 0) > maxw then maxw = t.width end
+    ov.texts[#ov.texts + 1] = t
+  end
+  ov.bg.width = maxw + PAD_X * 2
+  ov.bg.height = PAD_Y * 2 + (#LINES - 1) * LINE_H + TEXT_H
+  ov.key = key
+end
+
+-- re-attach at the end of the stage so the game cannot draw over us
+local g = ov.group
+pcall(function() if g.parent then g:removeSelf() end end)
+stage:insert(g)
+return string.format('overlay ok (%d lines, %s)', #ov.texts, tostring(g))
+"""
+
+REMOVE_OVERLAY_LUA = r"""
+local ov = _G.__coromon_overlay
+if ov and ov.group then pcall(function() ov.group:removeSelf() end) end
+_G.__coromon_overlay = nil
+return 'overlay removed'
+"""
+
+
+def _lua_str(s):
+    return "'" + str(s).replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def overlay_code(lines, colors):
+    lines_lua = "{" + ", ".join(_lua_str(l) for l in lines) + "}"
+    cols_lua = "{" + ", ".join("{%s, %s, %s}" % tuple(c) for c in colors) + "}"
+    return OVERLAY_LUA.replace("__LINES__", lines_lua).replace("__COLS__", cols_lua)
+
+
+WHITE = (1, 1, 1)
+GREEN = (0.45, 1, 0.5)
+GOLD = (1, 0.85, 0.3)
+
+
+def overlay_lines(data):
+    """Turn the parsed roll into display lines + per-line colours."""
+    if not data:
+        return ["COROMON STARTERS", "waiting for the", "starter reveal ..."], [GOLD, WHITE, WHITE]
+    names = [n for n in ORDER if n in data] or sorted(data)
+    lines, cols = ["COROMON STARTERS"], [GOLD]
+    for n in names:
+        pot = data[n][0]
+        lines.append(f"{n:<14}{pot:>3}")
+        cols.append(GOLD if pot >= 21 else (GREEN if pot >= 20 else WHITE))
+    best = max(v[0] for v in data.values())
+    if best >= 21:
+        lines.append("PERFECT (21)!")
+        cols.append(GOLD)
+    elif best >= 20:
+        lines.append("potent (20)!")
+        cols.append(GREEN)
+    return lines, cols
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--process", default="coromon.exe")
     ap.add_argument("--watch", action="store_true", help="poll and report changes")
     ap.add_argument("--interval", type=float, default=1.0)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--no-overlay", action="store_true",
+                    help="do not draw the values on top of the game")
+    ap.add_argument("--clear-overlay", action="store_true",
+                    help="remove the on-screen overlay and exit")
     args = ap.parse_args()
 
     try:
@@ -178,6 +281,26 @@ def main():
         print("could not capture the game's lua_State (is the game paused?)")
         return 1
 
+    if args.clear_overlay:
+        r = b.eval(REMOVE_OVERLAY_LUA, timeout=15.0)
+        print(r.get("out") or r.get("err"))
+        b.detach()
+        return 0
+
+    use_overlay = not args.no_overlay
+    drew_overlay = False
+
+    def show_overlay(data):
+        nonlocal drew_overlay
+        if not use_overlay:
+            return
+        lines, cols = overlay_lines(data)
+        r = b.eval(overlay_code(lines, cols), timeout=15.0)
+        if r.get("err") and not r.get("out"):
+            print("[overlay] lua error:", r["err"])
+        else:
+            drew_overlay = True
+
     last = None
     first = True
     try:
@@ -192,9 +315,10 @@ def main():
                     print("Could not find the starter monsters.")
                     print("(are you at the starter reveal in the coromon lab?)")
                     print("lua said:", out.strip())
+                    show_overlay({})
                     return 1
-                if args.watch:
-                    print(".", end="", flush=True)
+                show_overlay({})
+                print(".", end="", flush=True)
             else:
                 data = parse(out)
                 sig = tuple(sorted((k, v[0]) for k, v in data.items()))
@@ -216,7 +340,8 @@ def main():
                     elif best >= 20:
                         print("  -> a 20 is on the table!")
                     sys.stdout.flush()
-                elif first and args.watch:
+                show_overlay(data)
+                if first and args.watch and sig == last and not data:
                     print(".", end="", flush=True)
             first = False
             if not args.watch:
@@ -226,6 +351,9 @@ def main():
         print("\nstopped")
         return 0
     finally:
+        if drew_overlay:
+            print("overlay left on screen - remove it with: "
+                  "python coromon_starter.py --clear-overlay")
         b.detach()
 
 
