@@ -97,7 +97,10 @@ while head <= #q and nodes < MAXN and (os.clock() - t0) < 5.0 do
         -- only count real monster objects here: the spawnable's saved copy is
         -- expected to be a separate value and must not raise a stale warning
         if score >= 2 then pots[name][pot] = true end
-        if rolled[name] == nil then rolled[name] = pot end
+        -- remember the natural roll: always trust a value we did not write
+        -- ourselves, so a world built while the tool was not running refreshes it
+        -- instead of reporting a stale number from the previous world
+        if FORCE == nil or pot ~= FORCE or rolled[name] == nil then rolled[name] = pot end
         if FORCE and pot ~= FORCE then
           if score >= 2 then
             pcall(function() t:setPotential(FORCE) end)
@@ -198,13 +201,14 @@ def parse_warnings(out):
     return warn
 
 
-def fmt(name, pot, rolled=None):
+def fmt(name, pot, rolled=None, always_rolled=False):
     tag = ""
     if pot >= 21:
         tag = "  <-- PERFECT"
     elif pot >= 20:
         tag = "  <-- potent"
-    note = f"   (natural roll {rolled})" if rolled is not None and rolled != pot else ""
+    show = rolled is not None and (always_rolled or rolled != pot)
+    note = f"   (natural roll {rolled})" if show else ""
     return f"  {name:<16} potential {pot:>2}{tag}{note}"
 
 
@@ -425,11 +429,15 @@ def main():
                     print(f"[{stamp()}] === starter roll #{rolls} ===")
                     for n in names:
                         pot, extra, path, rolled = data[n]
-                        print(fmt(n, pot, rolled))
+                        print(fmt(n, pot, rolled, always_rolled=bool(force)))
                         if args.verbose:
                             if extra:
                                 print(f"      {extra}")
                             print(f"      {path}")
+                    if force:
+                        nat = [n for n in names if data[n][3] == 21]
+                        if nat:
+                            print("  -> already rolled naturally perfect: " + ", ".join(nat))
                     best = max(v[0] for v in data.values())
                     if best >= 21:
                         print("  -> a PERFECT (21) is on the table!")
