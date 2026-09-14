@@ -10,27 +10,42 @@ and/or talking to the live Lua state inside `coromon.exe`.
 ## Quick start — starter Potential reader
 
 ```bash
-python tools/coromon_starter.py            # print the roll + draw it on screen
-python tools/coromon_starter.py --watch    # keep it live while you reload the save
-python tools/coromon_starter.py --verbose  # also show the object path + monster attributes
+python tools/coromon_starter.py                  # run it and leave it running
+python tools/coromon_starter.py --once           # read the roll a single time and exit
+python tools/coromon_starter.py --verbose        # also show the object path + attributes
 python tools/coromon_starter.py --clear-overlay  # remove the on-screen overlay
 python tools/coromon_starter.py --no-overlay     # console output only
 ```
 
-Load a save that is just before the starter reveal, run the tool, then reload the
-save until you get what you want. Console output:
+Start it any time — even at the title screen or before the starters exist. It keeps
+polling, so it picks the roll up as soon as it is available and reports a new one
+after every reload:
 
 ```
-=== starter roll ===
+[01:21:10] attached to coromon.exe (lua_State 0xcf313d8)
+[01:21:10] watching - values appear when the starters are rolled and update on
+           every reload; Ctrl+C to stop
+
+[01:21:10] === starter roll #1 ===
   FIRE_TURTLE_1    potential 15
   WATER_SHARK_1    potential  7
   ICE_BEAR_1       potential 14
+
+[01:21:32] === starter roll #2 ===
+  FIRE_TURTLE_1    potential 21  <-- PERFECT
+  WATER_SHARK_1    potential 20  <-- potent
+  ICE_BEAR_1       potential  3
+  -> a PERFECT (21) is on the table!
 ```
 
-…and the same numbers are drawn in the top-left corner **on top of the game**
-(works in fullscreen; the overlay survives scene changes and re-attaches itself
-above the game's UI). The overlay stays on screen after the tool exits, so use
-`--clear-overlay` when you are done; `--watch` keeps it in sync with each reload.
+While the starters are not rolled yet it prints `waiting for the starter reveal ...`
+(and shows that on the overlay) instead of reporting stale numbers.
+
+The same numbers are drawn in the top-left corner **on top of the game** (works in
+fullscreen; the overlay survives scene changes and re-attaches itself above the
+game's UI). The overlay stays on screen after the tool exits, so use
+`--clear-overlay` when you are done; while the tool runs it stays in sync with
+every reload.
 
 In Coromon **Potential** goes 0–21: **20 = "potent"** (aura/shiny-style sprite),
 **21 = "perfect"**. Those lines are highlighted in green/gold on the overlay.

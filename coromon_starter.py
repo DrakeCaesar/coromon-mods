@@ -53,7 +53,7 @@ local function push(v, p, d)
 end
 for _, r in ipairs(roots) do push(r.v, r.p, 0) end
 
-local found, order = {}, {}
+local found, pots, order = {}, {}, {}
 local head, nodes, MAXN, MAXD = 1, 0, 150000, 7
 local t0 = os.clock()
 while head <= #q and nodes < MAXN and (os.clock() - t0) < 5.0 do
@@ -85,9 +85,15 @@ while head <= #q and nodes < MAXN and (os.clock() - t0) < 5.0 do
           end
           extra = table.concat(ks, ',')
         end
-        if not found[name] or found[name].score < score then
-          if not found[name] then order[#order + 1] = name end
-          found[name] = {potential = pot, score = score, path = e.p, extra = extra}
+        if not found[name] then found[name] = {}; pots[name] = {}; order[#order + 1] = name end
+        -- only count real monster objects here: the spawnable's saved copy is
+        -- expected to be a separate value and must not raise a stale warning
+        if score >= 2 then pots[name][pot] = true end
+        local best = found[name][1]
+        -- prefer the real monster over the spawnable's saved copy, then the
+        -- shallowest hit (a freshly rolled world is reached first)
+        if not best or score > best.score or (score == best.score and e.d < best.depth) then
+          found[name][1] = {potential = pot, score = score, path = e.p, extra = extra, depth = e.d}
         end
       end
     end
@@ -113,8 +119,15 @@ table.sort(order)
 if #order == 0 then return '!NONE! nodes=' .. nodes end
 out[#out + 1] = 'RESULT'
 for _, name in ipairs(order) do
-  local f = found[name]
+  local f = found[name][1]
   out[#out + 1] = string.format('%s\t%d\t%s\t%s', name, f.potential, f.extra, f.path)
+  -- flag leftovers from a previous world (should not normally happen)
+  local vals = {}
+  for v in pairs(pots[name]) do vals[#vals + 1] = tostring(v) end
+  if #vals > 1 then
+    table.sort(vals)
+    out[#out + 1] = string.format('WARN\t%s\t%s', name, table.concat(vals, ','))
+  end
 end
 return table.concat(out, '\n')
 """
@@ -140,6 +153,16 @@ def parse(out):
         path = parts[3] if len(parts) > 3 else ""
         res[name] = (pot, extra, path)
     return res
+
+
+def parse_warnings(out):
+    """Lines flagged by the Lua side when several candidates disagree."""
+    warn = []
+    for line in (out or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[0] == "WARN":
+            warn.append((parts[1], parts[2]))
+    return warn
 
 
 def fmt(name, pot, extra=""):
@@ -168,8 +191,11 @@ local LINE_H, PAD_X, PAD_Y, TEXT_H = 17, 10, 7, 18
 
 local stage = display.getCurrentStage()
 local ov = _G.__coromon_overlay
-if ov and (not ov.group or not ov.group.parent) then
-  ov = nil; _G.__coromon_overlay = nil
+if ov then
+  -- the game can tear our group down when it reloads a save / changes scene
+  local alive = false
+  pcall(function() alive = ov.group ~= nil and ov.group.parent ~= nil end)
+  if not alive then ov = nil; _G.__coromon_overlay = nil end
 end
 if not ov then
   local g = display.newGroup()
@@ -202,8 +228,14 @@ end
 
 -- re-attach at the end of the stage so the game cannot draw over us
 local g = ov.group
-pcall(function() if g.parent then g:removeSelf() end end)
-stage:insert(g)
+local reattached = pcall(function()
+  if g.parent then g:removeSelf() end
+  stage:insert(g)
+end)
+if not reattached then
+  _G.__coromon_overlay = nil
+  return 'overlay lost, will be rebuilt'
+end
 return string.format('overlay ok (%d lines, %s)', #ov.texts, tostring(g))
 """
 
@@ -250,10 +282,16 @@ def overlay_lines(data):
     return lines, cols
 
 
+def stamp():
+    return time.strftime("%H:%M:%S")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--process", default="coromon.exe")
-    ap.add_argument("--watch", action="store_true", help="poll and report changes")
+    ap.add_argument("--once", action="store_true",
+                    help="read the roll a single time and exit")
+    ap.add_argument("--watch", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--interval", type=float, default=1.0)
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--no-overlay", action="store_true",
@@ -261,6 +299,7 @@ def main():
     ap.add_argument("--clear-overlay", action="store_true",
                     help="remove the on-screen overlay and exit")
     args = ap.parse_args()
+    continuous = not args.once
 
     try:
         b = Bridge(args.process)
@@ -302,7 +341,12 @@ def main():
             drew_overlay = True
 
     last = None
-    first = True
+    rolls = 0
+    waiting = False
+    print(f"[{stamp()}] attached to {args.process} (lua_State {state})")
+    if continuous:
+        print(f"[{stamp()}] watching - values appear when the starters are rolled "
+              f"and update on every reload; Ctrl+C to stop")
     try:
         while True:
             r = b.eval(FIND_STARTERS, timeout=30.0)
@@ -310,23 +354,30 @@ def main():
             if r.get("err") and not out:
                 print("lua error:", r["err"])
                 return 1
+            if "!ERROR!" in out:
+                print("[lua]", out.strip())
+                return 1
             if "!NOMAP!" in out or "!NONE!" in out:
-                if not args.watch:
+                if last is not None or not waiting:
+                    print(f"[{stamp()}] waiting for the starter reveal ...")
+                    waiting = True
+                last = None            # report the next roll even if it repeats
+                show_overlay({})
+                if not continuous:
                     print("Could not find the starter monsters.")
                     print("(are you at the starter reveal in the coromon lab?)")
                     print("lua said:", out.strip())
-                    show_overlay({})
                     return 1
-                show_overlay({})
-                print(".", end="", flush=True)
             else:
+                waiting = False
                 data = parse(out)
                 sig = tuple(sorted((k, v[0]) for k, v in data.items()))
-                if sig and (sig != last or first):
+                if sig and sig != last:
+                    rolls += 1
                     last = sig
                     names = [n for n in ORDER if n in data] or sorted(data)
                     print()
-                    print("=== starter roll ===" if first else "=== new roll ===")
+                    print(f"[{stamp()}] === starter roll #{rolls} ===")
                     for n in names:
                         pot, extra, path = data[n]
                         print(fmt(n, pot))
@@ -334,17 +385,17 @@ def main():
                             if extra:
                                 print(f"      {extra}")
                             print(f"      {path}")
-                    best = max(v[0] for v in data.values()) if data else 0
+                    best = max(v[0] for v in data.values())
                     if best >= 21:
                         print("  -> a PERFECT (21) is on the table!")
                     elif best >= 20:
                         print("  -> a 20 is on the table!")
+                    for name, vals in parse_warnings(out):
+                        print(f"  !! {name}: leftover monsters from an earlier reload "
+                              f"disagree ({vals}) - using the freshest")
                     sys.stdout.flush()
                 show_overlay(data)
-                if first and args.watch and sig == last and not data:
-                    print(".", end="", flush=True)
-            first = False
-            if not args.watch:
+            if not continuous:
                 return 0
             time.sleep(args.interval)
     except KeyboardInterrupt:
