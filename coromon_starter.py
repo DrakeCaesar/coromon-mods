@@ -37,6 +37,14 @@ for k, v in pairs(package.loaded) do
 end
 if #roots == 0 then return '!NOMAP!' end
 
+-- FORCE = target potential (or nil). Written with `setPotential`, which is just
+-- `self.potential = v`: getPotential() clamps that field to 1..21 and the stat
+-- points themselves are handed out by the game as the Coromon reaches
+-- potential levels, so a forced value behaves exactly like a natural roll.
+local FORCE = __FORCE__
+local rolled = _G.__coromon_rolled
+if type(rolled) ~= 'table' then rolled = {}; _G.__coromon_rolled = rolled end
+
 local seen, seenF, q = {}, {}, {}
 local function push(v, p, d)
   local tv = type(v)
@@ -89,11 +97,22 @@ while head <= #q and nodes < MAXN and (os.clock() - t0) < 5.0 do
         -- only count real monster objects here: the spawnable's saved copy is
         -- expected to be a separate value and must not raise a stale warning
         if score >= 2 then pots[name][pot] = true end
+        if rolled[name] == nil then rolled[name] = pot end
+        if FORCE and pot ~= FORCE then
+          if score >= 2 then
+            pcall(function() t:setPotential(FORCE) end)
+            if rawget(t, 'potential') ~= FORCE then rawset(t, 'potential', FORCE) end
+          else
+            rawset(t, 'potential', FORCE)   -- spawnable's saved copy
+          end
+        end
+        local shown = FORCE or pot
         local best = found[name][1]
         -- prefer the real monster over the spawnable's saved copy, then the
         -- shallowest hit (a freshly rolled world is reached first)
         if not best or score > best.score or (score == best.score and e.d < best.depth) then
-          found[name][1] = {potential = pot, score = score, path = e.p, extra = extra, depth = e.d}
+          found[name][1] = {potential = shown, score = score, path = e.p, extra = extra,
+                            depth = e.d, rolled = rolled[name]}
         end
       end
     end
@@ -116,11 +135,15 @@ while head <= #q and nodes < MAXN and (os.clock() - t0) < 5.0 do
 end
 
 table.sort(order)
-if #order == 0 then return '!NONE! nodes=' .. nodes end
+if #order == 0 then
+  _G.__coromon_rolled = nil          -- forget the roll so a reload reports afresh
+  return '!NONE! nodes=' .. nodes
+end
 out[#out + 1] = 'RESULT'
 for _, name in ipairs(order) do
   local f = found[name][1]
-  out[#out + 1] = string.format('%s\t%d\t%s\t%s', name, f.potential, f.extra, f.path)
+  out[#out + 1] = string.format('%s\t%d\t%s\t%s\t%s', name, f.potential, f.extra, f.path,
+                                tostring(f.rolled))
   -- flag leftovers from a previous world (should not normally happen)
   local vals = {}
   for v in pairs(pots[name]) do vals[#vals + 1] = tostring(v) end
@@ -135,8 +158,15 @@ return table.concat(out, '\n')
 ORDER = ["FIRE_TURTLE_1", "WATER_SHARK_1", "ICE_BEAR_1"]
 
 
+def find_code(force=None):
+    """FIND_STARTERS with the FORCE target substituted in."""
+    if force is None:
+        return FIND_STARTERS.replace("__FORCE__", "nil")
+    return FIND_STARTERS.replace("__FORCE__", str(int(force)))
+
+
 def parse(out):
-    """Parse the Lua result into {name: (potential, extra, path)}."""
+    """Parse the Lua result into {name: (potential, extra, path, rolled)}."""
     res = {}
     for line in (out or "").splitlines():
         if line.startswith("!") or line == "RESULT":
@@ -151,7 +181,10 @@ def parse(out):
             continue
         extra = parts[2] if len(parts) > 2 else ""
         path = parts[3] if len(parts) > 3 else ""
-        res[name] = (pot, extra, path)
+        rolled = None
+        if len(parts) > 4 and parts[4].isdigit():
+            rolled = int(parts[4])
+        res[name] = (pot, extra, path, rolled)
     return res
 
 
@@ -165,13 +198,14 @@ def parse_warnings(out):
     return warn
 
 
-def fmt(name, pot, extra=""):
+def fmt(name, pot, rolled=None):
     tag = ""
     if pot >= 21:
         tag = "  <-- PERFECT"
     elif pot >= 20:
         tag = "  <-- potent"
-    return f"  {name:<16} potential {pot:>2}{tag}"
+    note = f"   (natural roll {rolled})" if rolled is not None and rolled != pot else ""
+    return f"  {name:<16} potential {pot:>2}{tag}{note}"
 
 
 # --------------------------------------------------------------------------
@@ -262,12 +296,13 @@ GREEN = (0.45, 1, 0.5)
 GOLD = (1, 0.85, 0.3)
 
 
-def overlay_lines(data):
+def overlay_lines(data, force=None):
     """Turn the parsed roll into display lines + per-line colours."""
+    head = "COROMON STARTERS" if not force else f"COROMON STARTERS -> {force}"
     if not data:
-        return ["COROMON STARTERS", "waiting for the", "starter reveal ..."], [GOLD, WHITE, WHITE]
+        return [head, "waiting for the", "starter reveal ..."], [GOLD, WHITE, WHITE]
     names = [n for n in ORDER if n in data] or sorted(data)
-    lines, cols = ["COROMON STARTERS"], [GOLD]
+    lines, cols = [head], [GOLD]
     for n in names:
         pot = data[n][0]
         lines.append(f"{n:<14}{pot:>3}")
@@ -298,8 +333,16 @@ def main():
                     help="do not draw the values on top of the game")
     ap.add_argument("--clear-overlay", action="store_true",
                     help="remove the on-screen overlay and exit")
+    ap.add_argument("--perfect", action="store_true",
+                    help="force every starter to potential 21")
+    ap.add_argument("--force-potential", type=int, default=None, metavar="N",
+                    help="force every starter to potential N (1-21)")
     args = ap.parse_args()
     continuous = not args.once
+
+    if args.force_potential is not None and not 1 <= args.force_potential <= 21:
+        ap.error("--force-potential must be between 1 and 21")
+    force = args.force_potential if args.force_potential is not None else (21 if args.perfect else None)
 
     try:
         b = Bridge(args.process)
@@ -333,7 +376,7 @@ def main():
         nonlocal drew_overlay
         if not use_overlay:
             return
-        lines, cols = overlay_lines(data)
+        lines, cols = overlay_lines(data, force)
         r = b.eval(overlay_code(lines, cols), timeout=15.0)
         if r.get("err") and not r.get("out"):
             print("[overlay] lua error:", r["err"])
@@ -344,12 +387,14 @@ def main():
     rolls = 0
     waiting = False
     print(f"[{stamp()}] attached to {args.process} (lua_State {state})")
+    if force:
+        print(f"[{stamp()}] forcing every starter to potential {force} on sight")
     if continuous:
         print(f"[{stamp()}] watching - values appear when the starters are rolled "
               f"and update on every reload; Ctrl+C to stop")
     try:
         while True:
-            r = b.eval(FIND_STARTERS, timeout=30.0)
+            r = b.eval(find_code(force), timeout=30.0)
             out = r.get("out") or ""
             if r.get("err") and not out:
                 print("lua error:", r["err"])
@@ -379,8 +424,8 @@ def main():
                     print()
                     print(f"[{stamp()}] === starter roll #{rolls} ===")
                     for n in names:
-                        pot, extra, path = data[n]
-                        print(fmt(n, pot))
+                        pot, extra, path, rolled = data[n]
+                        print(fmt(n, pot, rolled))
                         if args.verbose:
                             if extra:
                                 print(f"      {extra}")

@@ -11,6 +11,8 @@ and/or talking to the live Lua state inside `coromon.exe`.
 
 ```bash
 python tools/coromon_starter.py                  # run it and leave it running
+python tools/coromon_starter.py --perfect        # force all three starters to 21
+python tools/coromon_starter.py --force-potential 20   # ... or any value 1-21
 python tools/coromon_starter.py --once           # read the roll a single time and exit
 python tools/coromon_starter.py --verbose        # also show the object path + attributes
 python tools/coromon_starter.py --clear-overlay  # remove the on-screen overlay
@@ -49,6 +51,29 @@ every reload.
 
 In Coromon **Potential** goes 0–21: **20 = "potent"** (aura/shiny-style sprite),
 **21 = "perfect"**. Those lines are highlighted in green/gold on the overlay.
+
+### Forcing the roll (`--perfect`)
+
+`--perfect` (or `--force-potential N`) rewrites the three starters to that value as
+soon as they appear, so whichever one you pick is perfect. The natural roll is still
+reported:
+
+```
+[01:41:23] forcing every starter to potential 21 on sight
+[01:41:23] === starter roll #1 ===
+  FIRE_TURTLE_1    potential 21  <-- PERFECT   (natural roll 10)
+  WATER_SHARK_1    potential 21  <-- PERFECT   (natural roll 9)
+  ICE_BEAR_1       potential 21  <-- PERFECT   (natural roll 12)
+```
+
+This is not a cosmetic edit. `Monster:setPotential()` is literally `self.potential = v`,
+`getPotential()` clamps that field to 1..21, and the *stat points* are handed out by the
+game itself as the Coromon reaches its potential levels — so a forced value behaves
+exactly like a natural roll (same granted-point count at level 1, same potential
+category, and it is what gets written to the save when you pick). The tool also writes
+the value back to the spawnable's `consistentSaveProperties` so a later re-creation
+uses it. Category tiers: potential 1–16 = A, 17–20 = B, **21 = C** (the only value in
+the top tier).
 
 Requires `frida` (`pip install frida`) and the game running. It attaches read-only:
 no memory is patched, nothing is written to the save.
