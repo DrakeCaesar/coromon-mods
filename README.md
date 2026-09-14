@@ -70,10 +70,34 @@ This is not a cosmetic edit. `Monster:setPotential()` is literally `self.potenti
 `getPotential()` clamps that field to 1..21, and the *stat points* are handed out by the
 game itself as the Coromon reaches its potential levels — so a forced value behaves
 exactly like a natural roll (same granted-point count at level 1, same potential
-category, and it is what gets written to the save when you pick). The tool also writes
-the value back to the spawnable's `consistentSaveProperties` so a later re-creation
-uses it. Category tiers: potential 1–16 = A, 17–20 = B, **21 = C** (the only value in
-the top tier).
+category, and it is what gets written to the save when you pick).
+
+Where the value actually lives (from the shipped bytecode):
+
+```
+abstractMonster:resolvePotential()          -- called when the Monster is first built
+    if csp.potential == nil then
+        csp.potential = monsterUtility:rollPotential(self)   -- the RNG roll, cached
+    end
+    return csp.potential
+
+spawnables/monster.lua:182  getOrCreateMonster()
+    if createdMonster then return createdMonster end         -- lazy + cached
+    createdMonster = Monster.new{ level = ..., traitUID = ...,
+                                  potential      = self:resolvePotential(),
+                                  potentialStats = self.consistentSaveProperties.potentialStats,
+                                  ... }
+```
+
+So each starter's potential is rolled **lazily** — on the first `resolvePotential()` call —
+and then cached in the spawnable's `consistentSaveProperties.potential`; the Monster
+object itself is only built on the first `getOrCreateMonster()`. The tool overwrites that
+cached roll (and any Monster that already exists), so the Monster is normally *created*
+with the forced value rather than corrected afterwards. If you start the tool while
+already standing at the reveal, the existing objects get edited in place instead — the
+end state is the same either way.
+
+Category tiers: potential 1–16 = A, 17–20 = B, **21 = C** (the only value in the top tier).
 
 Requires `frida` (`pip install frida`) and the game running. It attaches read-only:
 no memory is patched, nothing is written to the save.
