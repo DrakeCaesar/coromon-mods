@@ -889,6 +889,11 @@ local function playerSprite()
     if i and type(i.shadow) == 'table' then sh = i.shadow end
   end)
   s.sprite, s.shadow = spr, sh
+  -- the world node: tiledWorld.x + shadow.x came out pinned at a constant, but
+  -- that is because BOTH are fed from the transition's progress every frame, not
+  -- because the camera reads the shadow. Measure the constant anyway - it is what
+  -- ties a world position to a player position - and place the world from it.
+  s.tw = upval(MTE.getTiledWorld, 'tiledWorld')
 end
 playerSprite()
 
@@ -913,6 +918,18 @@ local function place(x, y)
   else
     put(s.sprite, x, y)          -- no shadow object: the sprite is all we have
   end
+
+  -- The SCROLL is the thing being watched, and it is animated by the transition's
+  -- own progress, so placing the player alone cannot pin it. Place the world node
+  -- from the same integer schedule instead. Both integers, so every frame of the
+  -- scroll is a whole pixel. Skipped when the engine's own value is not close by:
+  -- at a map edge the engine clamps the camera, and the clamp must win.
+  local tw = s.tw
+  if s.twx and type(tw) == 'table' and type(tw.x) == 'number' then
+    local wx, wy = s.twx - x, s.twy - y
+    if math.abs(wx - tw.x) <= 4 then tw.x = wx end
+    if math.abs(wy - tw.y) <= 4 then tw.y = wy end
+  end
 end
 
 local function arm(inst)
@@ -936,6 +953,12 @@ local function arm(inst)
   s.dox, s.doy = spr.x - src.x, spr.y - src.y
   if math.abs(s.dox) > 40 or math.abs(s.doy) > 40 then s.dox, s.doy = -8, 0 end
   s.px, s.py = src.x, src.y
+  local tw = s.tw
+  if type(tw) == 'table' and type(tw.x) == 'number' and type(tw.y) == 'number' then
+    s.twx, s.twy = math.round(tw.x + src.x), math.round(tw.y + src.y)
+  else
+    s.twx, s.twy = nil, nil
+  end
   s.n, s.step = 0, nil
   s.dirx, s.diry = 0, 0
   s.active = true
@@ -1402,7 +1425,17 @@ SELFTEST_LOCK = r"""
 -- frame count governs and not the clock.
 local s = { on = true, DIST = 16, moves = 0, moved = 0, released = 0, frames = 0,
             active = false, chist = {}, nominal = 16.9491525 }
-local MTE = { setSpriteLocation = function(spr, x, y) spr.x, spr.y = x, y end }
+local function upval(fn, name)      -- the PRELUDE's helper, which the real install has
+  if type(fn) ~= 'function' then return nil end
+  for i = 1, 120 do
+    local n, v = debug.getupvalue(fn, i)
+    if not n then return nil end
+    if n == name then return v end
+  end
+end
+local tiledWorld = { x = 122.0, y = 52.0 }
+local MTE = { setSpriteLocation = function(spr, x, y) spr.x, spr.y = x, y end,
+              getTiledWorld = function() return tiledWorld end }
 local timer = { performWithDelay = function() return 1 end }
 local fake = { sprite = { x = 100.0, y = 100.0 }, shadow = { x = 108.0, y = 100.0 } }
 local originalMove = function() return { normal = 271 } end
@@ -1419,8 +1452,10 @@ local function reset()
   s.on, s.DIST, s.moves, s.moved, s.released, s.frames = true, 16, 0, 0, 0, 0
   s.active, s.chist, s.nominal = false, {}, 16.9491525
   s.tick = tick          -- the loop above clears it; the wrapper refuses without it
+  s.tw = tiledWorld      -- ... and this one, or the world placement is skipped
   fake.sprite.x, fake.sprite.y = 100.0, 100.0
   fake.shadow.x, fake.shadow.y = 108.0, 100.0
+  tiledWorld.x, tiledWorld.y = 122.0, 52.0      -- the constant: tw + shadow = 230, 152
   fake.getGridMoveTimeBySpeed = originalMove    -- do not nest wrappers
   s.wrapped = nil
   apply()
@@ -1436,13 +1471,17 @@ local function sim(name, dx, dy, frames, expectX, expectY)
     -- from, and the one the lock reads its direction and step from
     fake.shadow.x = 108.0 + dx * (f * 1.03)
     fake.shadow.y = 100.0 + dy * (f * 1.03)
+    tiledWorld.x = 122.0 - dx * (f * 1.03)      -- the engine scrolls the world too
+    tiledWorld.y = 52.0 - dy * (f * 1.03)
     tick()
     local ex, ey = 100.0 + expectX * f, 100.0 + expectY * f
     local exsh = 108.0 + expectX * f, 100.0 + expectY * f
     if f <= frames and (math.abs(fake.sprite.x - ex) > 1e-9
                         or math.abs(fake.sprite.y - ey) > 1e-9
                         or math.abs(fake.shadow.x - exsh) > 1e-9
-                        or math.abs(fake.shadow.y - (100.0 + expectY * f)) > 1e-9) then
+                        or math.abs(fake.shadow.y - (100.0 + expectY * f)) > 1e-9
+                        or math.abs(tiledWorld.x - (122.0 - expectX * f)) > 1e-9
+                        or math.abs(tiledWorld.y - (52.0 - expectY * f)) > 1e-9) then
       bad = string.format('frame %d: got (%.2f,%.2f) wanted (%.2f,%.2f)',
         f, fake.sprite.x, fake.sprite.y, ex, ey)
       break
