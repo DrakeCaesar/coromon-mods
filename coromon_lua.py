@@ -61,8 +61,10 @@ var pending = [];          /* queued requests */
 var busy = false;
 
 /* Hook entry points that every C->Lua transition uses; all take L as arg0. */
-var hookTargets = ['lua_gettop', 'lua_pushnumber', 'lua_pushstring', 'lua_pushvalue',
-                   'lua_getfield', 'lua_settop', 'lua_type', 'lua_pcall'];
+/* Only `lua_gettop` is strictly needed to capture the state and run code; the
+   rest are extra chances to catch the Lua thread, but they are extremely hot
+   functions, so `--perf` style callers may want to trim this list. */
+var hookTargets = __HOOK_TARGETS__;
 var total = 0;
 hookTargets.forEach(function (name) {
     var a = exp(name);
@@ -144,10 +146,21 @@ rpc.exports = {
 """
 
 
+DEFAULT_HOOKS = ["lua_gettop", "lua_pushnumber", "lua_pushstring", "lua_pushvalue",
+                 "lua_getfield", "lua_settop", "lua_type", "lua_pcall"]
+MINIMAL_HOOKS = ["lua_gettop"]
+
+
+def build_js(hooks=None):
+    """BRIDGE JS with the hook list substituted in."""
+    import json as _json
+    return JS.replace("__HOOK_TARGETS__", _json.dumps(list(hooks or DEFAULT_HOOKS)))
+
+
 class Bridge:
-    def __init__(self, target="coromon.exe"):
+    def __init__(self, target="coromon.exe", hooks=None):
         self.session = frida.attach(target)
-        self.script = self.session.create_script(JS)
+        self.script = self.session.create_script(build_js(hooks))
         self.script.on("message", self._on_message)
         self._results = {}
         self._events = []

@@ -264,15 +264,22 @@ if ov.key ~= key then
   ov.key = key
 end
 
--- re-attach at the end of the stage so the game cannot draw over us
+-- re-attach at the end of the stage so the game cannot draw over us, but only
+-- when something was actually placed after us: touching the display list every
+-- poll would force the game to re-sort it once per second
 local g = ov.group
-local reattached = pcall(function()
-  if g.parent then g:removeSelf() end
-  stage:insert(g)
-end)
-if not reattached then
-  _G.__coromon_overlay = nil
-  return 'overlay lost, will be rebuilt'
+local n = stage.numChildren or 0
+local needs = (g.parent ~= stage)
+if not needs and n > 0 then needs = (stage[n] ~= g) end
+if needs then
+  local reattached = pcall(function()
+    if g.parent then g:removeSelf() end
+    stage:insert(g)
+  end)
+  if not reattached then
+    _G.__coromon_overlay = nil
+    return 'overlay lost, will be rebuilt'
+  end
 end
 return string.format('overlay ok (%d lines, %s)', #ov.texts, tostring(g))
 """
