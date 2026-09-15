@@ -202,6 +202,20 @@ if sn then
   lines[#lines + 1] = 'restored snap: ' .. table.concat(sn.names, ', ')
 end
 
+local sp = _G.__spawntrace
+if sp then
+  for k, fn in pairs(sp.orig) do sp.inst[k] = fn end
+  _G.__spawntrace = nil
+  lines[#lines + 1] = 'restored player spawnable methods'
+end
+
+local ws = _G.__walkscale
+if ws then
+  ws.inst.getGridMoveTimeBySpeed = ws.orig
+  _G.__walkscale = nil
+  lines[#lines + 1] = 'restored getGridMoveTimeBySpeed'
+end
+
 return table.concat(lines, '\n')
 """
 
@@ -255,8 +269,36 @@ local MTE = _G.MTE
 if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
 if _G.__snap then return 'already installed' end
 
-local st = { orig = {}, names = {}, calls = 0, rounded = 0, touched = {} }
+local st = { orig = {}, names = {}, calls = 0, rounded = 0, touched = {}, seen = {}, distinct = 0 }
 _G.__snap = st
+
+-- describe an argument: numbers verbatim, tables by key=value (values as numbers
+-- or their type). This is how we learn the real field names instead of guessing.
+local function shape(v)
+  local t = type(v)
+  if t == 'number' then return tostring(v) end
+  if t == 'string' or t == 'boolean' then return t .. '(' .. tostring(v) .. ')' end
+  if t ~= 'table' then return t end
+  local bits, n = {}, 0
+  for k, vv in pairs(v) do
+    n = n + 1
+    if n <= 14 then
+      bits[#bits + 1] = tostring(k) .. '=' .. (type(vv) == 'number' and tostring(vv) or type(vv))
+    end
+  end
+  return '{' .. table.concat(bits, ', ') .. (n > 14 and ', ...' or '') .. '}'
+end
+
+-- keys/types only, so repeated calls with the same shape collapse together.
+-- Without this, NPC pathing floods the log and hides the player's call.
+local function sig(v)
+  local t = type(v)
+  if t ~= 'table' then return t end
+  local ks = {}
+  for k in pairs(v) do ks[#ks + 1] = tostring(k) end
+  table.sort(ks)
+  return '{' .. table.concat(ks, ',') .. '}'
+end
 
 -- round to whole content pixels; a non-zero never collapses to zero
 local function snapVal(v)
@@ -297,6 +339,15 @@ local function wrap(name)
     if snapArg(c) then ch = true end
     if snapArg(d) then ch = true end
     if ch then st.rounded = st.rounded + 1 end
+    local key = name .. '(' .. sig(a) .. ',' .. sig(b) .. ',' .. sig(c) .. ',' .. sig(d) .. ')'
+    local e = st.seen[key]
+    if e then
+      e.n = e.n + 1
+    elseif st.distinct < 24 then
+      st.seen[key] = { n = 1, ex = string.format('%s , %s , %s , %s',
+        shape(a), shape(b), shape(c), shape(d)) }
+      st.distinct = st.distinct + 1
+    end
     return orig(a, b, c, d)
   end
 end
@@ -323,6 +374,336 @@ local keys = {}
 for k, c in pairs(st.touched) do keys[#keys + 1] = string.format('%s=%d', k, c) end
 table.sort(keys)
 out[#out + 1] = 'keys hit  : ' .. (#keys > 0 and table.concat(keys, '  ') or '(none)')
+if st.seen then
+  local rows = {}
+  for k, e in pairs(st.seen) do rows[#rows + 1] = { k, e } end
+  table.sort(rows, function(x, y) return x[2].n > y[2].n end)
+  out[#out + 1] = string.format('distinct call shapes = %d', #rows)
+  for _, r in ipairs(rows) do
+    out[#out + 1] = string.format('  x%-5d %s', r[2].n, r[1])
+    out[#out + 1] = '        ex: ' .. r[2].ex
+  end
+end
+return table.concat(out, '\n')
+"""
+
+# ---------------------------------------------------------------------------
+# Option B: change the RATE instead of the rounding.
+#
+# classes.spawnables.abstractEightDirectionalMovingSpawnable computes the walk
+# step every frame as roughly
+#
+#     step = movementSpeed * (dt_ms / 1000) * <constant>
+#
+# and movementSpeed is a plain Lua LOCAL (an upvalue of that function), seeded
+# from a 114.0 constant. With dt = 18.18 ms the fit is exact:
+#
+#     114 * 0.01818 * 0.5 = 1.0363 px/frame   (measured: 1.036)
+#
+# Because the step is `speed * dt`, the pixels-per-frame the engine produces is
+# movementSpeed/2 per SECOND divided by the frame rate - so a step of exactly
+# one pixel needs movementSpeed = 2 * fps:
+#
+#     step = (movementSpeed / 2) / fps  = 1   =>   movementSpeed = 2 * fps
+#
+#   ~55 fps (165 Hz panel) -> 110        60 fps -> 120
+#
+# That makes every frame advance exactly 1 content pixel, so the game's own
+# math.round() has nothing to alternate between and the scroll is uniform.
+# ---------------------------------------------------------------------------
+FIND_SPEED = PRELUDE + r"""
+local out = {}
+local hits, seen = {}, {}
+
+local function check(fn, label)
+  if type(fn) ~= 'function' or seen[fn] then return end
+  seen[fn] = true
+  for i = 1, 60 do
+    local n, v = debug.getupvalue(fn, i)
+    if not n then return end
+    if n == 'movementSpeed' then
+      hits[#hits + 1] = { fn = fn, idx = i, old = v, label = label }
+    end
+  end
+end
+
+local function scanTable(t, label, depth)
+  if type(t) ~= 'table' or depth > 2 then return end
+  for k, v in pairs(t) do
+    if type(v) == 'function' then
+      check(v, label .. '.' .. tostring(k))
+    elseif type(v) == 'table' and depth < 2 then
+      scanTable(v, label .. '.' .. tostring(k), depth + 1)
+    end
+  end
+end
+
+for _, name in ipairs({
+  'classes.spawnables.abstractEightDirectionalMovingSpawnable',
+  'classes.spawnables.worldObjectSpawnable',
+  'classes.spawnables.plugins.spriteSpawnablePlugin',
+}) do
+  local m = package.loaded[name]
+  if type(m) == 'table' then scanTable(m, name, 0) end
+end
+
+local inst
+pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+if type(inst) == 'table' then
+  scanTable(inst, 'playerSpawnable', 0)
+  local cls = inst._class
+  if type(cls) ~= 'table' then
+    local mt = getmetatable(inst)
+    cls = mt and mt.__index
+  end
+  if type(cls) == 'table' then scanTable(cls, 'playerSpawnable._class', 0) end
+end
+
+out[#out + 1] = 'playerSpawnable = ' .. tostring(inst)
+out[#out + 1] = 'functions carrying a movementSpeed upvalue = ' .. tostring(#hits)
+for _, h in ipairs(hits) do
+  out[#out + 1] = string.format('  %s   current movementSpeed = %s', h.label, tostring(h.old))
+end
+return table.concat(out, '\n')
+"""
+
+SET_SPEED = PRELUDE + r"""
+local target = __SPEED__
+local out = {}
+local hits, seen = {}, {}
+
+local function check(fn, label)
+  if type(fn) ~= 'function' or seen[fn] then return end
+  seen[fn] = true
+  for i = 1, 60 do
+    local n, v = debug.getupvalue(fn, i)
+    if not n then return end
+    if n == 'movementSpeed' then
+      hits[#hits + 1] = { fn = fn, idx = i, old = v, label = label }
+    end
+  end
+end
+
+local function scanTable(t, label, depth)
+  if type(t) ~= 'table' or depth > 2 then return end
+  for k, v in pairs(t) do
+    if type(v) == 'function' then
+      check(v, label .. '.' .. tostring(k))
+    elseif type(v) == 'table' and depth < 2 then
+      scanTable(v, label .. '.' .. tostring(k), depth + 1)
+    end
+  end
+end
+
+for _, name in ipairs({
+  'classes.spawnables.abstractEightDirectionalMovingSpawnable',
+  'classes.spawnables.worldObjectSpawnable',
+  'classes.spawnables.plugins.spriteSpawnablePlugin',
+}) do
+  local m = package.loaded[name]
+  if type(m) == 'table' then scanTable(m, name, 0) end
+end
+
+local inst
+pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+if type(inst) == 'table' then
+  scanTable(inst, 'playerSpawnable', 0)
+  local cls = inst._class
+  if type(cls) ~= 'table' then
+    local mt = getmetatable(inst)
+    cls = mt and mt.__index
+  end
+  if type(cls) == 'table' then scanTable(cls, 'playerSpawnable._class', 0) end
+end
+
+if #hits == 0 then return '!no movementSpeed upvalue found!' end
+for _, h in ipairs(hits) do
+  local ok = debug.setupvalue(h.fn, h.idx, target)
+  out[#out + 1] = string.format('  %s : %s -> %s  (%s)', h.label, tostring(h.old),
+    tostring(target), ok and 'ok' or 'FAILED')
+end
+return string.format('set movementSpeed to %s on %d function(s):\n%s',
+  tostring(target), #hits, table.concat(out, '\n'))
+"""
+
+# The player spawnable does NOT use abstractEightDirectionalMovingSpawnable's
+# dt-based movement (its methods carry no movementSpeed upvalue anywhere we can
+# reach, and its own methods are grid-step names: getGridMoveStack,
+# untilLocationXY, hasReachedNewTile, isGridMoveBlocked, executeNowOrAfterMove).
+# So trace the player spawnable's own methods to find the per-frame mover.
+SPAWN_TRACE_INSTALL = PRELUDE + r"""
+local inst
+pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+if type(inst) ~= 'table' then return '!no player spawnable found!' end
+if _G.__spawntrace then return 'already tracing' end
+
+local t = { inst = inst, orig = {}, counts = {} }
+_G.__spawntrace = t
+local n = 0
+for k, v in pairs(inst) do
+  if type(v) == 'function' then
+    t.orig[k] = v
+    t.counts[k] = 0
+    inst[k] = (function(name, fn)
+      return function(...)
+        t.counts[name] = t.counts[name] + 1
+        return fn(...)
+      end
+    end)(k, v)
+    n = n + 1
+  end
+end
+return 'tracing ' .. n .. ' methods on the player spawnable - now walk around'
+"""
+
+SPAWN_TRACE_REPORT = PRELUDE + r"""
+local t = _G.__spawntrace
+if not t then return '!not tracing!' end
+local rows = {}
+for k, c in pairs(t.counts) do rows[#rows + 1] = { k, c } end
+table.sort(rows, function(a, b) return a[2] > b[2] end)
+local out = { 'player spawnable method calls:' }
+local shown = 0
+for i = 1, #rows do
+  if rows[i][2] > 0 then
+    shown = shown + 1
+    if shown <= 30 then
+      out[#out + 1] = string.format('  %-40s %d', rows[i][1], rows[i][2])
+    end
+  end
+end
+if shown == 0 then out[#out + 1] = '  (nothing called yet)' end
+out[#out + 1] = '  ' .. shown .. ' of ' .. #rows .. ' methods were called'
+return table.concat(out, '\n')
+"""
+
+# ---------------------------------------------------------------------------
+# OPTION B, final form. The trace showed the player moves one tile per
+# `gridMove`, with the duration supplied by `getGridMoveTimeBySpeed`, and
+# `whileMovingOnGrid` interpolating the offset each frame. So
+#
+#     pixels per frame = tilewidth / step_duration_in_frames
+#
+# With a 16 px tile that is 16 / 15.4 = 1.04 today. Making the duration exactly
+# 16 frames gives exactly 1 px per frame, which the game's math.round() then
+# cannot alternate - the scroll becomes uniform.
+#
+# getGridMoveTimeBySpeed is a plain method on the live player spawnable, so we
+# can wrap it and scale its result. factor 1.0 = observe only.
+# ---------------------------------------------------------------------------
+WALK_SCALE = PRELUDE + r"""
+local factor = __FACTOR__
+local inst
+pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+if type(inst) ~= 'table' then return '!no player spawnable - are you in the overworld?!' end
+
+if _G.__walkscale then
+  _G.__walkscale.factor = factor
+  return 'factor now ' .. tostring(factor) .. ' (calls so far ' .. _G.__walkscale.calls .. ')'
+end
+
+local orig = inst.getGridMoveTimeBySpeed
+if type(orig) ~= 'function' then return '!getGridMoveTimeBySpeed not found on the spawnable!' end
+
+local st = { factor = factor, orig = orig, inst = inst, calls = 0, samples = {} }
+_G.__walkscale = st
+inst.getGridMoveTimeBySpeed = function(self, ...)
+  local r = orig(self, ...)
+  st.calls = st.calls + 1
+  if #st.samples < 6 then
+    local desc = tostring(r)
+    if type(r) == 'table' then
+      local bits = {}
+      for k, v in pairs(r) do
+        if #bits < 20 then
+          bits[#bits + 1] = tostring(k) .. '=' .. tostring(v) .. ':' .. type(v)
+        end
+      end
+      desc = '{' .. table.concat(bits, ', ') .. '}'
+    end
+    st.samples[#st.samples + 1] = string.format('nargs=%d  ->  %s', select('#', ...), desc)
+  end
+  if factor ~= 1 and type(r) == 'table' then
+    -- scale whichever duration-ish field this descriptor carries
+    for _, k in ipairs({ 'time', 'duration', 'moveTime', 'ms', 'speed' }) do
+      if type(r[k]) == 'number' then r[k] = r[k] * factor end
+    end
+  end
+  return r
+end
+return 'wrapped getGridMoveTimeBySpeed, factor ' .. tostring(factor)
+"""
+
+WALK_FIX = PRELUDE + r"""
+-- per-key duration multipliers. normal -> 1 px/frame, fast -> 2 px/frame.
+-- slow is left alone: its current step is ~0.67 px/frame, and the only way to
+-- make THAT whole is 1 px/frame, which would erase the distinction from normal.
+local factors = { normal = __FN__, fast = __FF__ }
+local inst
+pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+if type(inst) ~= 'table' then return '!no player spawnable - are you in the overworld?!' end
+
+local st = _G.__walkscale
+if st then
+  st.factors = factors
+  return string.format('factors updated: normal x%.4f  fast x%.4f', factors.normal, factors.fast)
+end
+
+local orig = inst.getGridMoveTimeBySpeed
+if type(orig) ~= 'function' then return '!getGridMoveTimeBySpeed not found!' end
+st = { factors = factors, orig = orig, inst = inst, calls = 0, samples = {} }
+_G.__walkscale = st
+inst.getGridMoveTimeBySpeed = function(self, ...)
+  local r = orig(self, ...)
+  st.calls = st.calls + 1
+  if #st.samples < 4 and type(r) == 'table' then
+    local bits = {}
+    for k, v in pairs(r) do bits[#bits + 1] = tostring(k) .. '=' .. tostring(v) end
+    table.sort(bits)
+    st.samples[#st.samples + 1] = '{' .. table.concat(bits, ', ') .. '}'
+  end
+  if type(r) == 'table' then
+    for k, f in pairs(st.factors) do
+      if type(r[k]) == 'number' then r[k] = r[k] * f end
+    end
+  end
+  return r
+end
+return 'walk fix installed'
+"""
+
+DT_INSTALL = r"""
+local s = { n = 0, t0 = 0, t1 = 0 }
+_G.__dt = s
+s.l = function()
+  if s.n == 0 then s.t0 = system.getTimer() end
+  s.t1 = system.getTimer()
+  s.n = s.n + 1
+  return false
+end
+Runtime:addEventListener('enterFrame', s.l)
+return 'sampling frame times'
+"""
+
+DT_COLLECT = r"""
+local s = _G.__dt
+if not s then return '!none!' end
+Runtime:removeEventListener('enterFrame', s.l)
+_G.__dt = nil
+local n = s.n - 1
+if n <= 0 then return '0\t0' end
+return string.format('%d\t%.4f', s.n, (s.t1 - s.t0) / n)
+"""
+
+WALK_REPORT = PRELUDE + r"""
+local st = _G.__walkscale
+if not st then return '!not wrapped - run --walk-fix first!' end
+local out = { 'calls     : ' .. tostring(st.calls), 'baseline descriptors returned:' }
+if st.factors then
+  for k, f in pairs(st.factors) do out[#out + 1] = '  factor ' .. k .. ' = ' .. tostring(f) end
+end
+for _, s in ipairs(st.samples) do out[#out + 1] = '   ' .. s end
+if #st.samples == 0 then out[#out + 1] = '   (not called yet - walk to trigger a step)' end
 return table.concat(out, '\n')
 """
 
@@ -456,6 +837,20 @@ def main():
                     help="round the per-frame movement delta to whole content pixels")
     ap.add_argument("--snap-report", action="store_true",
                     help="show what the snap wrapper has been catching")
+    ap.add_argument("--find-speed", action="store_true",
+                    help="locate the movementSpeed upvalue in the walk code")
+    ap.add_argument("--trace-spawn", action="store_true",
+                    help="count calls into the player spawnable's own methods")
+    ap.add_argument("--trace-spawn-report", action="store_true",
+                    help="print the player spawnable method counts")
+    ap.add_argument("--walk-scale", type=float, default=None,
+                    help="scale getGridMoveTimeBySpeed uniformly (1.0 = observe)")
+    ap.add_argument("--walk-fix", action="store_true",
+                    help="measure the frame time and set the tile durations for a whole-pixel step")
+    ap.add_argument("--walk-report", action="store_true",
+                    help="show the baseline getGridMoveTimeBySpeed descriptors")
+    ap.add_argument("--set-speed", type=float, default=None,
+                    help="set movementSpeed (want 2 * fps: 110 at 55 fps, 120 at 60 fps)")
     ap.add_argument("--seconds", type=float, default=6.0, help="seconds per measurement")
     args = ap.parse_args()
 
@@ -477,6 +872,39 @@ def main():
             print(_eval(b, SNAP_INSTALL))
         elif args.snap_report:
             print(_eval(b, SNAP_REPORT))
+        elif args.find_speed:
+            print(_eval(b, FIND_SPEED))
+        elif args.trace_spawn:
+            print(_eval(b, SPAWN_TRACE_INSTALL))
+        elif args.trace_spawn_report:
+            print(_eval(b, SPAWN_TRACE_REPORT))
+        elif args.walk_scale is not None:
+            print(_eval(b, WALK_SCALE.replace("__FACTOR__", repr(args.walk_scale))))
+        elif args.walk_fix:
+            print(_eval(b, REMOVE))
+            print("measuring frame time (stand still) ...")
+            print(_eval(b, DT_INSTALL))
+            time.sleep(1.5)
+            r = _eval(b, DT_COLLECT)
+            try:
+                dt = float(r.strip().split("\t")[1])
+            except Exception:
+                dt = 1000.0 / 60.0
+            if dt <= 0:
+                dt = 1000.0 / 60.0
+            # px/frame = (tilewidth / duration_ms) * dt_ms.  Want exactly 1 for
+            # normal and exactly 2 for fast => 16*dt and 8*dt.
+            fn = (16.0 * dt) / 280.0
+            ff = (8.0 * dt) / 133.0
+            print(f"avg frame time = {dt:.4f} ms  ({1000.0 / dt:.2f} fps)")
+            print(f"  normal 280 ms -> {280.0 * fn:.2f} ms   = 1 px/frame")
+            print(f"  fast   133 ms -> {133.0 * ff:.2f} ms   = 2 px/frame")
+            print(f"  slow   400 ms unchanged (0.67 px/frame; making it whole would equal normal)")
+            code = WALK_FIX.replace("__FN__", repr(fn)).replace("__FF__", repr(ff))
+            print(_eval(b, code))
+            print(_eval(b, WALK_REPORT))
+        elif args.set_speed is not None:
+            print(_eval(b, SET_SPEED.replace("__SPEED__", repr(args.set_speed))))
         elif args.off:
             print(_eval(b, REMOVE))
         elif args.on:

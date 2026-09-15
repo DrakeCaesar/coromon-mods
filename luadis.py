@@ -196,6 +196,9 @@ def main():
     ap.add_argument("--globals", action="store_true")
     ap.add_argument("--proto", type=int, default=None, help="index into flattened proto list")
     ap.add_argument("--tree", action="store_true")
+    ap.add_argument("--consts", action="store_true",
+                    help="print every constant with its index (numbers included). "
+                         "In Lua 5.1 an RK operand of C>=256 refers to k[C-256].")
     args = ap.parse_args()
 
     root, info = load(args.file)
@@ -229,7 +232,13 @@ def main():
         path, pr = protos[args.proto]
         print("=== proto", path)
         disasm(pr, protos)
-    if not (args.strings or args.globals or args.tree or args.proto is not None):
+    if args.consts:
+        for path, pr in protos:
+            tag = ".".join(map(str, path))
+            for i, k in enumerate(pr.k):
+                print(f"{tag}\tk[{i}]\t{k!r}")
+    if not (args.strings or args.globals or args.tree or args.proto is not None
+            or args.consts):
         print(info)
         print("protos:", len(protos))
         for path, pr in protos:
