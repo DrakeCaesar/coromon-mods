@@ -821,6 +821,273 @@ if #st.samples == 0 then out[#out + 1] = '   (not called yet - walk to trigger a
 return table.concat(out, '\n')
 """
 
+# ---------------------------------------------------------------------------
+# Sub-content-pixel camera.
+#
+# The game writes the camera focus as math.round(...) - see
+# classes.modules.mte.mte proto at lines 1141-1152:
+#
+#     posX = sprite.x + sprite.width * 0.5 + sprite.cameraFocusOffsetX
+#     return math.round(posX), math.round(posY)
+#
+# That is the ONLY integer quantization on the scroll path (the transition sets
+# sprite.x to a float). So the world can only ever advance in whole content
+# pixels - at this window size, 3 screen pixels at a time.
+#
+# This nudges the camera between those integers by re-adding the fraction the
+# game threw away. It never guesses the game's offset formula or its rounding
+# rule. Instead it self-calibrates the invariant
+#
+#     tw.x + tx  =  C + frac,    frac in [-0.5, +0.5),  C constant per map
+#
+# from the observed min/max of (tw.x + tx) while you walk: the midpoint of that
+# range is C, and the exact target is then just C - tx.
+#
+# Safety: the correction is clamped to +-0.75 content px from the value the game
+# itself wrote, so anything the game does deliberately (map-edge clamping, a
+# camera locked for a cutscene) still wins. We can nudge the world by a fraction
+# of a pixel; we can never override the game's intent.
+# ---------------------------------------------------------------------------
+SUBPIXEL_INSTALL = PRELUDE + r"""
+local MTE, tw = world()
+if type(tw) ~= 'table' then return '!no tiledWorld - are you in the overworld?!' end
+
+local s = _G.__subpix_live or {}
+_G.__subpix_live = s
+-- Earlier installs of this listener may still be registered in this game process
+-- (Solar2D has no way to enumerate or remove them selectively), and all of those
+-- copies consult _G.__subpix. So the global is deliberately left switched OFF:
+-- any stale copy sees on=false and bails out immediately, while our own state
+-- lives privately under _G.__subpix_live.
+if type(_G.__subpix) ~= 'table' or _G.__subpix == s then
+  _G.__subpix = { on = false }
+else
+  _G.__subpix.on = false
+end
+s.on = true
+s.n = 0
+s.tw = tw
+s.frames = 0
+-- 0 = continuous.  N > 0 = snap the world to whole DEVICE pixels, i.e. to
+-- multiples of 1/N content px. With nearest filtering that keeps every source
+-- texel mapped to exactly N x N device pixels (crisp, no crawl) while letting
+-- the pan advance one device pixel at a time instead of N at a time.
+s.grid = __GRID__
+s.latches = s.latches or 0
+s.unstable = s.unstable or 0
+s.sat = s.sat or 0
+s.snapped = 0
+s.devN, s.devSum, s.devAbsSum = 0, 0, 0
+s.devMin, s.devMax = nil, nil
+s.latches, s.unstable, s.sat, s.skipped, s.snapped = 0, 0, 0, 0, 0
+s.phMax = nil
+s.x, s.y = {}, {}
+
+-- One axis: derive C, then hand back the game's value plus the fraction it
+-- discarded. Returns the value to write.
+--
+-- The game writes   g = C - math.round(t)   (mte.lu, camera focus functions), and
+-- t is a positive content coordinate, so for t >= 0 math.round(t) is exactly
+-- math.floor(t + 0.5). Measured live: C = 240 for x and 135 for y - the screen
+-- centre - and it never changes.
+--
+-- The camera is only written WHEN IT CHANGES, so most frames read back whatever
+-- was there before (which may be our own value). A latch taken on such a frame is
+-- garbage, and a wrong C silently disables the whole feature. So C is (re)taken
+-- only on a frame where math.round(t) changed: that is exactly when the camera
+-- moved, so the game is guaranteed to have refreshed it and g is trustworthy.
+-- Taking it there on every such frame also makes it self-healing across map
+-- changes, with no calibration period and nothing to reset.
+local function axis(e, t, g)
+  local r = math.floor(t + 0.5)        -- the game's own rounding, for t >= 0
+  local crossed = (e.r ~= nil) and (r ~= e.r)
+  e.r = r
+  if crossed then
+    e.C = g + r                        -- trustworthy: the game just wrote it
+    s.latches = s.latches + 1
+  end
+  if not e.C then return g end         -- nothing to correct yet
+  local want = e.C - t                 -- the exact, unrounded camera target
+  if s.grid and s.grid > 0 then
+    -- whole device pixels: the world offset * grid becomes an integer again, so
+    -- every source texel still maps to exactly grid x grid device pixels
+    local q = want * s.grid
+    local rq = math.floor(q + 0.5)
+    if rq ~= q then s.snapped = s.snapped + 1 end
+    want = rq / s.grid
+  end
+  local dev = want - g
+  if dev > 0.75 or dev < -0.75 then
+    -- we disagree with the game by more than any rounding could explain (a
+    -- camera locked for a cutscene, a map-edge clamp): stand down rather than
+    -- shove the world sideways. It re-latches on the next pixel crossing.
+    s.sat = s.sat + 1
+    return g
+  end
+  local res = g + dev
+  s.devN = s.devN + 1
+  s.devSum = s.devSum + dev
+  s.devAbsSum = s.devAbsSum + math.abs(dev)
+  if not s.devMin or dev < s.devMin then s.devMin = dev end
+  if not s.devMax or dev > s.devMax then s.devMax = dev end
+  if s.grid and s.grid > 0 then
+    -- how far the world still is from a whole device pixel: 0 = perfectly crisp
+    local q = res * s.grid
+    local fr = math.abs(q - math.floor(q + 0.5))
+    if not s.phMax or fr > s.phMax then s.phMax = fr end
+  end
+  return res
+end
+
+local function tick()
+  local st = _G.__subpix_live
+  if not st or not st.on then return false end
+  st.n = st.n + 1
+  if st.n % 60 == 0 then
+    local _, tw2 = world()
+    if type(tw2) == 'table' and tw2 ~= st.tw then
+      st.tw = tw2
+      st.x, st.y = {}, {}
+      st.latches = st.latches + 1
+    end
+    pcall(function()
+      local i = spawnableHelper:getPlayerSpawnable()
+      if i and i.sprite then st.spr = i.sprite end
+    end)
+  end
+  local spr, twc = st.spr, st.tw
+  if type(spr) ~= 'table' or type(twc) ~= 'table' then return false end
+  local gx, gy = twc.x, twc.y
+  if type(gx) ~= 'number' or type(gy) ~= 'number' then return false end
+  local tx = spr.x + (spr.width or 0) * 0.5 + (spr.cameraFocusOffsetX or 0)
+  local ty = spr.y - (spr.height or 0) * 0.5 + (spr.cameraFocusOffsetY or 0)
+  if type(tx) ~= 'number' or type(ty) ~= 'number' then return false end
+  st.frames = st.frames + 1
+  twc.x = axis(st.x, tx, gx)
+  twc.y = axis(st.y, ty, gy)
+  return false
+end
+s.l = tick
+Runtime:addEventListener('enterFrame', tick)
+return string.format('sub-pixel camera ON (grid=%s) (listener registered last, so it runs after the game)',
+  s.grid and s.grid > 0 and ('1/' .. tostring(s.grid) .. ' content px') or 'continuous')
+"""
+
+SUBPIXEL_REPORT = PRELUDE + r"""
+local s = _G.__subpix_live
+if not s then return '!sub-pixel camera not installed!' end
+local function c(e)
+  if e and e.C then return string.format('%.4f', e.C) end
+  return '(not calibrated yet - walk a few steps)'
+end
+local out = {
+  string.format('active=%s  grid=%s  frames=%d  C latched=%d  C changed=%d  saturated=%d',
+    tostring(s.on), s.grid and s.grid > 0 and tostring(s.grid) or 'continuous',
+    s.frames or 0, s.latches or 0, s.unstable or 0, s.sat or 0),
+  'calibrated C: x=' .. c(s.x) .. '  y=' .. c(s.y),
+}
+do
+  local keys = {}
+  for k, v in pairs(display) do
+    if type(k) == 'string' and k:find('pixel') or (type(k) == 'string' and k:find('cale')) then
+      keys[#keys + 1] = k .. '(' .. type(v) .. ')'
+    end
+  end
+  table.sort(keys)
+  if #keys > 0 then out[#out + 1] = 'display scale keys: ' .. table.concat(keys, '  ') end
+end
+if (s.devN or 0) > 0 then
+  out[#out + 1] = string.format(
+    'offset applied on %d frames (skipped %d): range %.4f .. %.4f   mean |offset| %.4f   mean offset %+.4f',
+    s.devN, s.skipped or 0, s.devMin or 0, s.devMax or 0,
+    s.devAbsSum / s.devN, s.devSum / s.devN)
+  out[#out + 1] = '   (mean offset ~0 means our t reproduces the game\'s exactly; a steady\n'
+    .. '    bias instead means one term of the camera formula is not what we think)'
+  if s.grid and s.grid > 0 and s.phMax then
+    out[#out + 1] = string.format(
+      'crispness: worst distance from a whole device pixel = %.9f device px (0 = perfect)',
+      s.phMax)
+  end
+else
+  out[#out + 1] = 'no offset applied yet'
+end
+return table.concat(out, '\n')
+"""
+
+SUBPIXEL_REMOVE = r"""
+local s = _G.__subpix_live
+if not s then return 'sub-pixel camera was not installed' end
+s.on = false
+if s.l then Runtime:removeEventListener('enterFrame', s.l); s.l = nil end
+_G.__subpix_live = nil
+return 'sub-pixel camera OFF - the game owns tw.x/tw.y again'
+"""
+
+# ---------------------------------------------------------------------------
+# Pure-math self test for the sub-pixel camera: replays a simulated walk against
+# the REAL axis() source lifted out of SUBPIXEL_INSTALL (so the test cannot drift
+# from the code), models the game only writing the camera when it changes, and
+# checks the resulting world offsets in whole device pixels. Touches no game
+# state and needs no input.
+# ---------------------------------------------------------------------------
+SELFTEST_SUBPIXEL = r"""
+local s = { grid = __GRID__, latches = 0, snapped = 0, devN = 0, devSum = 0,
+            devAbsSum = 0, skipped = 0, sat = 0 }__AXIS__
+
+local C = 240                      -- screen centre, as measured live
+local step = 1.00054               -- content px/frame of the fixed walk at 59 fps
+local t = 100.0
+local e = {}
+local world = C - math.floor(t + 0.5)
+local lastGame = world
+local n, stepMin, stepMax, stepSum = 0, nil, nil, 0
+local crisp, negSteps, bigSteps = 0, 0, 0
+local prev
+for f = 1, 900 do
+  t = t + step
+  local exp = C - math.floor(t + 0.5)
+  if exp ~= lastGame then
+    lastGame = exp              -- the game refreshed the camera this frame
+    world = exp
+  end
+  world = axis(e, t, world)     -- read it, correct it, write it back
+  if prev then
+    local d = (world - prev) * 3
+    n = n + 1
+    stepSum = stepSum + d
+    if not stepMin or d < stepMin then stepMin = d end
+    if not stepMax or d > stepMax then stepMax = d end
+    if d < 0 then negSteps = negSteps + 1 end
+    if d > 4.0001 then bigSteps = bigSteps + 1 end
+  end
+  local q = world * 3
+  local fr = math.abs(q - math.floor(q + 0.5))
+  if fr > crisp then crisp = fr end
+  prev = world
+end
+return string.format(
+  'grid=%-10s frames=%d  device px/frame: min %.4f  mean %.4f  max %.4f  backwards steps=%d  steps > 4px=%d',
+  s.grid > 0 and tostring(s.grid) or 'continuous', n, stepMin, stepSum / n, stepMax, negSteps, bigSteps)
+  .. string.format('\n   worst distance from a whole device pixel: %.9f device px', crisp)
+  .. string.format('\n   applied=%d skipped=%d saturated=%d  latched C=%.6f (want 240)',
+       s.devN, s.skipped, s.sat, e.C or -1)
+"""
+
+
+def _axis_source():
+    """Lift the real axis() implementation out of SUBPIXEL_INSTALL."""
+    txt = SUBPIXEL_INSTALL
+    start = txt.index("local function axis(")
+    end = txt.index("\nlocal function tick()")
+    return txt[start:end]
+
+
+def selftest_subpixel(b):
+    for grid in (3, 0):
+        print(_eval(b, SELFTEST_SUBPIXEL.replace("__GRID__", str(grid))
+                    .replace("__AXIS__", _axis_source()), timeout=30.0))
+        print()
+
 TRACE_REPORT = PRELUDE + r"""
 local t = _G.__mtetrace
 if not t then return '!not tracing!' end
@@ -912,6 +1179,291 @@ describe('tiledWorld.y', s.fy)
 return table.concat(out, '\n')
 """
 
+# ---------------------------------------------------------------------------
+# Per-frame forensics. Records the frame time, the camera step and the sprite's
+# sub-pixel phase on the SAME frame, which is what separates the two remaining
+# explanations for "it holds for a frame, then jumps 2 px":
+#
+#   * rounding-driven: the camera target is math.round(sprite.x + offset).
+#     sprite.x creeps up by slightly more than 1 px per frame, so every N frames
+#     the rounded value skips a whole pixel. The double step then ALWAYS lands at
+#     the same sub-pixel phase (just after the fractional part wraps), whatever
+#     the frame time was.
+#
+#   * pacing-driven: the game missed a vsync, so one frame interval was ~2x
+#     normal (33 ms). The interpolation correctly advances 2 px because two
+#     frames of wall clock really did pass. The double step then lands on a
+#     LONG frame, at any phase.
+# ---------------------------------------------------------------------------
+WALK_DIAG_INSTALL = PRELUDE + r"""
+local MTE, tw = world()
+if type(tw) ~= 'table' then return '!no tiledWorld - are you in the overworld?!' end
+local spr
+pcall(function()
+  local i = spawnableHelper:getPlayerSpawnable()
+  spr = i and i.sprite
+end)
+local s = { n = 0, tw = tw, spr = spr, t = {}, cx = {}, cy = {}, sx = {} }
+if _G.__wdiag and _G.__wdiag.l then
+  Runtime:removeEventListener('enterFrame', _G.__wdiag.l)
+end
+_G.__wdiag = s
+local function tick()
+  s.n = s.n + 1
+  local f = s.n
+  if f > 40000 then return false end
+  if f % 120 == 0 then
+    pcall(function()
+      local i = spawnableHelper:getPlayerSpawnable()
+      if i and i.sprite then s.spr = i.sprite end
+    end)
+  end
+  s.t[f] = system.getTimer()
+  s.cx[f] = tw.x
+  s.cy[f] = tw.y
+  if s.spr then s.sx[f] = s.spr.x end
+  return false
+end
+s.l = tick
+Runtime:addEventListener('enterFrame', tick)
+return 'recording (about 11 minutes of frames). Play normally, then run --walk-diag report'
+"""
+
+# Stop recording without producing a report.
+WALK_DIAG_OFF = r"""
+local s = _G.__wdiag
+if not s then return 'diagnostic was not recording' end
+if s.l then Runtime:removeEventListener('enterFrame', s.l) end
+_G.__wdiag = nil
+return 'diagnostic stopped'
+"""
+
+# Progress readout so the caller can wait for real walking instead of guessing.
+WALK_DIAG_PEEK = r"""
+local s = _G.__wdiag
+if not s then return '0\t0' end
+local walk = 0
+for f = 2, s.n do
+  if math.abs(s.cx[f] - s.cx[f - 1]) + math.abs(s.cy[f] - s.cy[f - 1]) > 0 then
+    walk = walk + 1
+  end
+end
+return string.format('%d\t%d', s.n, walk)
+"""
+
+WALK_DIAG_COLLECT = r"""
+local s = _G.__wdiag
+if not s then return '!none!' end
+Runtime:removeEventListener('enterFrame', s.l)
+_G.__wdiag = nil
+local n = s.n
+if n < 20 then return 'only ' .. tostring(n) .. ' frames captured' end
+
+local out = {}
+
+-- a frame counts as "walking" if the camera moved within +-3 frames of it
+local inRun = {}
+for f = 2, n do
+  local a = math.max(math.abs(s.cx[f] - s.cx[f - 1]), math.abs(s.cy[f] - s.cy[f - 1]))
+  if a > 0 then
+    for g = math.max(2, f - 3), math.min(n, f + 3) do inRun[g] = true end
+  end
+end
+
+local dtAll, dtRun = {}, {}
+for f = 2, n do
+  local d = s.t[f] - s.t[f - 1]
+  dtAll[#dtAll + 1] = d
+  if inRun[f] then dtRun[#dtRun + 1] = d end
+end
+
+local function stats(t, label)
+  if #t == 0 then return label .. ': (no frames)' end
+  local mn, mx, sum, o24, o30 = t[1], t[1], 0, 0, 0
+  for i = 1, #t do
+    local v = t[i]
+    if v < mn then mn = v end
+    if v > mx then mx = v end
+    sum = sum + v
+    if v > 24 then o24 = o24 + 1 end
+    if v > 30 then o30 = o30 + 1 end
+  end
+  return string.format('%s: n=%d  min %.2f  mean %.3f  max %.2f   >24ms:%d  >30ms:%d',
+    label, #t, mn, sum / #t, mx, o24, o30)
+end
+
+out[#out + 1] = stats(dtAll, 'frame time (all frames)')
+out[#out + 1] = stats(dtRun, 'frame time (while walking)')
+
+local hist, walkN, odd = {}, 0, {}
+for f = 2, n do
+  if inRun[f] then
+    walkN = walkN + 1
+    local d = math.max(math.abs(s.cx[f] - s.cx[f - 1]), math.abs(s.cy[f] - s.cy[f - 1]))
+    local k = math.floor(d + 0.5)
+    hist[k] = (hist[k] or 0) + 1
+    odd[#odd + 1] = { f = f, k = k, dt = s.t[f] - s.t[f - 1] }
+  end
+end
+local keys = {}
+for k in pairs(hist) do keys[#keys + 1] = k end
+table.sort(keys)
+local parts = {}
+for _, k in ipairs(keys) do parts[#parts + 1] = string.format('%dpx=%d', k, hist[k]) end
+out[#out + 1] = 'camera step while walking: ' .. table.concat(parts, '  ')
+
+-- Fractional steps are the proof that the world stopped advancing in whole
+-- pixels: with the sub-pixel camera on, these become ~1.0000 everywhere instead
+-- of a mix of 0 and 1 (or 1 and 2).
+do
+  local dmin, dmax, dsum, fN = nil, nil, 0, 0
+  for f = 2, n do
+    if inRun[f] then
+      local d = math.max(math.abs(s.cx[f] - s.cx[f - 1]), math.abs(s.cy[f] - s.cy[f - 1]))
+      if d > 0 then
+        fN = fN + 1
+        dsum = dsum + d
+        if not dmin or d < dmin then dmin = d end
+        if not dmax or d > dmax then dmax = d end
+      end
+    end
+  end
+  if fN > 0 then
+    out[#out + 1] = string.format(
+      'step over moving frames: min %.4f  mean %.4f  max %.4f   (n=%d)',
+      dmin, dsum / fN, dmax, fN)
+  end
+end
+
+-- How far does the player drift on screen while walking? If the camera and the
+-- sprite are quantized differently (round() on one, not the other) the player
+-- wobbles by up to half a content pixel = 1.5 screen pixels. Pinned is best.
+do
+  local px = {}
+  for f = 2, n do
+    if inRun[f] and s.sx[f] then px[#px + 1] = s.sx[f] + s.cx[f] end
+  end
+  if #px > 4 then
+    local lo, hi, sum = px[1], px[1], 0
+    for i = 1, #px do
+      if px[i] < lo then lo = px[i] end
+      if px[i] > hi then hi = px[i] end
+      sum = sum + px[i]
+    end
+    out[#out + 1] = string.format(
+      'player screen offset (sprite.x + tiledWorld.x): range %.4f content px = %.2f screen px',
+      hi - lo, (hi - lo) * 3)
+  end
+end
+
+-- The interesting frames are the ones that disagree with the DOMINANT step, not
+-- the ones that disagree with 1: when the run key is held the correct step is 2,
+-- and reporting all of those as anomalies buries the real events.
+local mode, modeN = 0, -1
+for _, k in ipairs(keys) do
+  if hist[k] > modeN then mode, modeN = k, hist[k] end
+end
+out[#out + 1] = string.format('dominant step = %d px/frame (%d of %d walking frames)',
+  mode, modeN, walkN)
+
+local anom = {}
+for _, r in ipairs(odd) do
+  if r.k ~= mode then anom[#anom + 1] = r end
+end
+out[#out + 1] = string.format('frames that disagreed with %d px: %d of %d',
+  mode, #anom, walkN)
+
+if #anom > 0 then
+  -- group them: a halt one frame after a normal step is a rounding/pacing artefact,
+  -- a halt at the START or END of a run is just the game starting/stopping to walk
+  local halts, overs, gaps = 0, 0, {}
+  local prevF = nil
+  for _, r in ipairs(anom) do
+    if r.k < mode then halts = halts + 1 else overs = overs + 1 end
+    if prevF then gaps[#gaps + 1] = r.f - prevF end
+    prevF = r.f
+  end
+  local gsum, gmax, gmin = 0, 0, nil
+  for _, g in ipairs(gaps) do
+    gsum = gsum + g
+    if g > gmax then gmax = g end
+    if not gmin or g < gmin then gmin = g end
+  end
+  out[#out + 1] = string.format(
+    '   halts (< %d px): %d    overshoots (> %d px): %d    gaps between them: min %s max %d (~%s of a tile)',
+    mode, halts, mode, overs, gmin and tostring(gmin) or '-', gmax,
+    gmin and string.format('%.2f', (gsum / #gaps) / 16) or '-')
+  out[#out + 1] = '   frame   step   dt(ms)  prev dt(ms)  prev step   sprite frac'
+  for i = 1, math.min(#anom, 16) do
+    local f = anom[i].f
+    local dtp, pk = 0, 0
+    if f >= 3 then
+      dtp = s.t[f - 1] - s.t[f - 2]
+      pk = math.floor(math.max(math.abs(s.cx[f - 1] - s.cx[f - 2]),
+                               math.abs(s.cy[f - 1] - s.cy[f - 2])) + 0.5)
+    end
+    local ph = -1
+    if s.sx and s.sx[f] then ph = s.sx[f] - math.floor(s.sx[f]) end
+    out[#out + 1] = string.format('   %5d   %4d   %7.2f   %10.2f   %9d   %11.4f',
+      f, anom[i].k, anom[i].dt, dtp, pk, ph)
+  end
+end
+
+-- where in the sprite's sub-pixel phase do the anomalies land?
+local phMin, phMax = nil, nil
+if s.sx then
+  for f = 2, n do
+    local v = s.sx[f]
+    if inRun[f] and v then
+      local ph = v - math.floor(v)
+      if not phMin or ph < phMin then phMin = ph end
+      if not phMax or ph > phMax then phMax = ph end
+    end
+  end
+end
+if phMin then
+  out[#out + 1] = string.format('sprite.x fractional part spans %.4f .. %.4f', phMin, phMax)
+end
+if #anom > 0 then
+  -- a tight phase cluster means the camera rounding did it; a spread means the
+  -- frame time did (or that the walk simply started/stopped inside the window)
+  local lo, hi = 1, 0
+  local dtsum, nbig = 0, 0
+  for _, r in ipairs(anom) do
+    local f = r.f
+    if s.sx and s.sx[f] then
+      local ph = s.sx[f] - math.floor(s.sx[f])
+      if ph < lo then lo = ph end
+      if ph > hi then hi = ph end
+    end
+    dtsum = dtsum + r.dt
+    if r.dt > 24 then nbig = nbig + 1 end
+  end
+  out[#out + 1] = string.format(
+    '   verdict inputs: phase cluster %.3f wide, mean dt on anomalies %.2f ms, anomalies on a >24ms frame: %d',
+    hi - lo, dtsum / #anom, nbig)
+end
+
+local okd, dinfo = pcall(function()
+  local function g(f)
+    local ok, v = pcall(f)
+    return ok and v or nil
+  end
+  return string.format(
+    'display: content %s x %s   pixel %s x %s   contentScale %s / %s   fps %s   msPerFrame %s',
+    tostring(g(function() return display.contentWidth end)),
+    tostring(g(function() return display.contentHeight end)),
+    tostring(g(function() return display.pixelWidth end)),
+    tostring(g(function() return display.pixelHeight end)),
+    tostring(g(function() return display.contentScaleX end)),
+    tostring(g(function() return display.contentScaleY end)),
+    tostring(g(function() return display.fps end)),
+    tostring(g(function() return display.msPerFrame end)))
+end)
+out[#out + 1] = okd and dinfo or ('display info unavailable: ' .. tostring(dinfo))
+return table.concat(out, '\n')
+"""
+
 
 def _bridge():
     b = Bridge("coromon.exe", hooks=MINIMAL_HOOKS)
@@ -932,6 +1484,22 @@ def measure(b, seconds, label):
     print(_eval(b, MEASURE_INSTALL))
     time.sleep(seconds)
     print(_eval(b, MEASURE_COLLECT, timeout=60.0))
+
+
+def diag(b, mode):
+    """Install / report / stop the per-frame camera-step recorder.
+
+    Nothing here waits on you: 'on' just starts recording in the background while
+    you play, and 'report' analyses whatever it has buffered so far, whenever you
+    feel like running it.
+    """
+    if mode == "off":
+        print(_eval(b, WALK_DIAG_OFF))
+        return
+    if mode == "report":
+        print(_eval(b, WALK_DIAG_COLLECT, timeout=60.0))
+        return
+    print(_eval(b, WALK_DIAG_INSTALL))
 
 
 def _lua_factors(d):
@@ -1002,10 +1570,27 @@ def main():
                     help="max calibration passes (0 = until it converges, default)")
     ap.add_argument("--walk-report", action="store_true",
                     help="show the baseline getGridMoveTimeBySpeed descriptors")
+    ap.add_argument("--walk-diag", nargs="?", const="on", default=None,
+                    choices=["on", "off", "report"],
+                    help="camera-step recorder: 'on' records in the background while you play "
+                         "(no waiting on you), 'report' prints the analysis, 'off' stops it")
+    ap.add_argument("--walk-subpixel", nargs="?", const="on", default=None,
+                    choices=["on", "off", "report", "grid"],
+                    help="re-inject the fraction math.round() discards: 'on' = continuous, "
+                         "'grid' = snap to whole device pixels (crisp pixel art, 1 device px "
+                         "of motion granularity), off/report")
+    ap.add_argument("--subpixel-grid", type=float, default=3.0,
+                    help="device pixels per content pixel for --walk-subpixel grid (default 3)")
+    ap.add_argument("--selftest-subpixel", action="store_true",
+                    help="replay a simulated walk against the real sub-pixel camera code "
+                         "(pure math, touches no game state, needs no input)")
     ap.add_argument("--set-speed", type=float, default=None,
                     help="set movementSpeed (want 2 * fps: 110 at 55 fps, 120 at 60 fps)")
-    ap.add_argument("--seconds", type=float, default=6.0, help="seconds per measurement")
+    ap.add_argument("--seconds", type=float, default=None,
+                    help="seconds per measurement (default 6, and 90 as the walking wait "
+                         "budget for --walk-diag)")
     args = ap.parse_args()
+    secs = args.seconds if args.seconds is not None else 6.0
 
     try:
         import frida  # noqa: F401
@@ -1061,14 +1646,14 @@ def main():
             print(_eval(b, WALK_REPORT))
             print()
             print("Calibrating indefinitely - KEEP WALKING. Press Ctrl+C to stop")
-            print(f"and print the durations to lock in. Each pass samples {args.seconds:g}s.")
+            print(f"and print the durations to lock in. Each pass samples {secs:g}s.")
             print()
             print("  pass  frames  walk%     step px/frame    normal_x     fast_x   action")
             hist = []
             try:
                 for it in range(1, (args.iters if args.iters > 0 else 10 ** 9) + 1):
                     print(_eval(b, RATE_INSTALL))
-                    time.sleep(args.seconds)
+                    time.sleep(secs)
                     raw = _eval(b, RATE_COLLECT).strip()
                     try:
                         parts = raw.split("\t")
@@ -1146,21 +1731,35 @@ def main():
             print(_eval(b, WALK_REPORT))
         elif args.set_speed is not None:
             print(_eval(b, SET_SPEED.replace("__SPEED__", repr(args.set_speed))))
+        elif args.walk_report:
+            print(_eval(b, WALK_REPORT))
+        elif args.walk_diag is not None:
+            diag(b, args.walk_diag)
+        elif args.walk_subpixel is not None:
+            if args.walk_subpixel == "off":
+                print(_eval(b, SUBPIXEL_REMOVE))
+            else:
+                if args.walk_subpixel in ("on", "grid"):
+                    grid = args.subpixel_grid if args.walk_subpixel == "grid" else 0.0
+                    print(_eval(b, SUBPIXEL_INSTALL.replace("__GRID__", repr(float(grid)))))
+                print(_eval(b, SUBPIXEL_REPORT))
+        elif args.selftest_subpixel:
+            selftest_subpixel(b)
         elif args.off:
             print(_eval(b, REMOVE))
         elif args.on:
             print(_eval(b, INSTALL))
             print(_eval(b, STATUS))
         elif args.ab:
-            measure(b, args.seconds, "BASELINE (game as shipped)")
+            measure(b, secs, "BASELINE (game as shipped)")
             print()
             print(_eval(b, INSTALL))
-            measure(b, args.seconds, "FIXED (constant step)")
+            measure(b, secs, "FIXED (constant step)")
             print()
             print("The fix is left installed. Run --off to restore, or close the game.")
         elif args.measure:
             print(_eval(b, STATUS))
-            measure(b, args.seconds, "current")
+            measure(b, secs, "current")
         else:
             print(__doc__.strip())
             print()
@@ -1175,7 +1774,16 @@ def main():
             print("                                 the durations to lock in")
             print("  --walk-const NORMAL FAST       apply fixed durations (no measurement)")
             print()
-            print("DIAGNOSTICS")
+            print("DIAGNOSTICS (none of these wait on you)")
+            print("  --walk-diag on|report|off")
+            print("                              records camera step, sprite sub-pixel phase")
+            print("                              and frame time per frame while you play;")
+            print("                              'report' analyses whatever it captured")
+            print("  --walk-subpixel on|grid|off|report")
+            print("                              fractional camera: 'on' scrolls between whole")
+            print("                              content pixels; 'grid' snaps to whole device")
+            print("                              pixels instead (1/3 content px here), which stays")
+            print("                              crisp under nearest filtering")
             print("  --measure --seconds 8   per-frame world step histogram, to verify it worked")
             print()
             print("Leftovers from the investigation, not needed for normal use:")
