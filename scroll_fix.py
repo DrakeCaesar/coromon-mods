@@ -850,198 +850,102 @@ return table.concat(out, '\n')
 WALK_LOCK_INSTALL = PRELUDE + r"""
 local MTE, tw = world()
 if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
+local trans = MTE.transition
+if type(trans) ~= 'table' or type(trans.to) ~= 'function' then
+  return '!MTE.transition.to not found - MTE not loaded?!'
+end
 
 local s = _G.__walklock or {}
 _G.__walklock = s
--- older copies of this listener (from a previous install in this process) bail out
 if type(_G.__walklock_old) == 'table' then _G.__walklock_old.on = false end
 s.on = true
 s.moves = s.moves or 0
-s.driven = s.driven or 0
-s.released = s.released or 0
-s.active = false
-s.DIST = 16                     -- content px in one grid move (tilewidth)
+s.adj = s.adj or 0
+s.arrived = s.arrived or 0
+s.n = 0
+s.DIST = 16
+s.dt = 16.95
 
-local function playerInstance()
-  local inst
-  pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
-  return inst
+-- The transition module keeps its list of live transitions in an upvalue of .to.
+local list
+for i = 1, 10 do
+  local nm, v = debug.getupvalue(trans.to, i)
+  if not nm then break end
+  if nm == 't' and type(v) == 'table' then list = v end
 end
+if not list then return '!could not find the live transition list!' end
+s.list = list
 
--- Every positioned object belonging to the player spawnable: the character sprite,
--- its shadow, and anything else the game moves with it.
---
--- The shadow matters. It is a SEPARATE object with its own animation, and on this
--- build the camera focus is tied to it rather than to the sprite. So driving only
--- the sprite desynchronises the two: the character walks off its own shadow, and
--- the camera (following the shadow) stops tracking the character.
---
--- Rather than guess which object is the important one, snapshot all candidates and
--- drive the ones the game actually animates, each from its own start position and
--- its own direction.
-local function candidates(inst)
-  local list, seen = {}, {}
-  local function add(name, o)
-    if type(o) ~= 'table' or seen[o] then return end
-    if type(o.x) ~= 'number' or type(o.y) ~= 'number' then return end
-    seen[o] = true
-    list[#list + 1] = { name = name, obj = o, sx = o.x, sy = o.y, px = o.x, py = o.y }
-  end
-  if type(inst) ~= 'table' then return list end
-  for k, v in pairs(inst) do
-    if type(v) == 'table' then add(tostring(k), v) end
-  end
-  local cls = inst._class
-  if type(cls) ~= 'table' then
-    local mt = getmetatable(inst)
-    cls = mt and mt.__index
-  end
-  if type(cls) == 'table' then
-    for k, v in pairs(cls) do
-      if type(v) == 'table' and not seen[v] then add(tostring(k), v) end
-    end
-  end
-  return list
+local function playerSprite()
+  local spr
+  pcall(function()
+    local i = spawnableHelper:getPlayerSpawnable()
+    if i and i.sprite then spr = i.sprite end
+  end)
+  s.sprite = spr
 end
+playerSprite()
 
-local function arm(inst)
-  s.inst = inst
-  s.list = candidates(inst)
-  s.keep = {}
-  s.primary = nil
-  s.active = true
-  s.n, s.step = 0, nil
-  s.dirx, s.diry = 0, 0
-  s.moves = s.moves + 1
-end
-
-local function wrap(inst)
-  if type(inst) ~= 'table' then return false end
-  local inner = inst.getGridMoveTimeBySpeed
-  if type(inner) ~= 'function' then return false end
-  inst.getGridMoveTimeBySpeed = function(self, ...)
-    local r = inner(self, ...)
-    arm(self or inst)
-    return r
-  end
-  s.wrapped = inst
-  return true
-end
-
-local function apply()
-  local inst = playerInstance()
-  if type(inst) ~= 'table' or inst == s.wrapped then return end
-  if wrap(inst) then s.reapplies = (s.reapplies or 0) + 1 end
-end
-apply()
-if not s.timer then s.timer = timer.performWithDelay(1000, apply, 0) end
-
-local function handBack()
-  s.released = s.released + 1
-  s.active = false
-end
-
+local last = system.getTimer()
 local function tick()
   local st = _G.__walklock
-  if not st or not st.on or not st.active or st.tick ~= tick then return false end
-  if st.n > 64 then handBack(); return false end
-
-  if not st.step then
-    -- First frame of the move: find whichever object the game is animating fastest
-    -- and read the step off its own interpolation, unrounded (sprite.x is a float
-    -- even though the camera is rounded).
-    local best, mag = nil, 0
-    for _, c in ipairs(st.list or {}) do
-      c.dx, c.dy = c.obj.x - c.px, c.obj.y - c.py
-      local m = math.max(math.abs(c.dx), math.abs(c.dy))
-      if m > mag then best, mag = c, m end
-    end
-    if not best or mag < 0.25 then return false end   -- not moving yet
-    local step = math.floor(mag + 0.5)
-    if step < 1 or step > st.DIST - 1 then handBack(); return false end
-    st.step = step
-    st.primary = best.name
-    -- Keep every object whose own delta matches: the sprite and the shadow move
-    -- together, anything that happens to be elsewhere in the table does not.
-    local keep, names = {}, {}
-    for _, c in ipairs(st.list or {}) do
-      local m = math.max(math.abs(c.dx), math.abs(c.dy))
-      if m >= mag - 0.3 and m <= mag + 0.3 then
-        -- Each axis independently, and an axis that is NOT moving must stay 0.
-        -- Deriving one from the other drove y as well on a purely horizontal
-        -- move, so our write fought the game's on the very next frame: the
-        -- sprite quivered diagonally and walked off, taking the camera with it.
-        c.dirx = (math.abs(c.dx) > 0.25) and ((c.dx > 0) and 1 or -1) or 0
-        c.diry = (math.abs(c.dy) > 0.25) and ((c.dy > 0) and 1 or -1) or 0
-        -- NOTE: do not re-baseline sx/sy here. The candidate scan already captured
-        -- the position at arm time, which is the tile centre, and this frame is
-        -- already counted as n=1. Re-baselining to the position the game has just
-        -- moved TO double-counts the first frame: every move would run one pixel
-        -- past the tile and be snapped back at the boundary.
-        c.px, c.py = c.obj.x, c.obj.y
-        keep[#keep + 1] = c
-        names[#names + 1] = c.name
-      end
-    end
-    st.keep = keep
-    st.names = names
-  else
-    -- Hand the move back only if the PRIMARY object disagrees (cancelled move,
-    -- turn, warp, map change). A secondary object that stops moving with us is just
-    -- dropped - it may have been an unrelated table that matched once.
-    local keep = {}
-    local primaryBad = false
-    for _, c in ipairs(st.keep or {}) do
-      local dx, dy = c.obj.x - c.px, c.obj.y - c.py
-      c.px, c.py = c.obj.x, c.obj.y
-      local drop = math.abs(dx) > 4.5 or math.abs(dy) > 4.5
-      if c.dirx ~= 0 and dx * c.dirx < -0.25 then drop = true end
-      if c.diry ~= 0 and dy * c.diry < -0.25 then drop = true end
-      if drop then
-        if c.name == st.primary then primaryBad = true else st.dropped = (st.dropped or 0) + 1 end
-      else
-        keep[#keep + 1] = c
-      end
-    end
-    st.keep = keep
-    if primaryBad or #keep == 0 then handBack(); return false end
-  end
-
+  if not st or not st.on or st.tick ~= tick then return false end
+  local now = system.getTimer()
+  local d = now - last
+  last = now
+  if d > 4 and d < 60 then st.dt = st.dt * 0.9 + d * 0.1 end
   st.n = st.n + 1
-  local k = math.min(st.n * st.step, st.DIST)
-  for _, c in ipairs(st.keep) do
-    c.obj.x = c.sx + c.dirx * k
-    c.obj.y = c.sy + c.diry * k
+  if st.n % 120 == 0 then playerSprite() end
+  local spr = st.sprite
+  if type(spr) ~= 'table' then return false end
+  for _, tr in ipairs(st.list) do
+    if tr.target == spr and type(tr.duration) == 'number' and tr.duration > 0 then
+      if tr.__lockFrames == nil then
+        -- How many frames this move SHOULD take. The engine rounds the duration to
+        -- whole ms, so duration/frame_time is 16 for walking and 8 for running, and
+        -- a tile is 16 px: 16/frames px per frame, i.e. exactly 1 or exactly 2.
+        tr.__lockFrames = math.max(1, math.floor(tr.duration / st.dt + 0.5))
+        tr.__lockN = 0
+        st.moves = st.moves + 1
+      end
+      tr.__lockN = tr.__lockN + 1
+      local f = tr.__lockFrames
+      local k = math.min(tr.__lockN, f)
+      -- Hand the transition its own timeline one frame at a time. The engine then
+      -- computes the position itself, exactly as it always does - so MTE's
+      -- setSpriteLocation still runs, child sprites (the character's shadow) still
+      -- follow, and the camera, which focuses on the sprite, still tracks it.
+      tr.startTime = now - (k / f) * tr.duration
+      st.adj = st.adj + 1
+      if k >= f then st.arrived = st.arrived + 1 end
+    end
   end
-  st.driven = st.driven + 1
   return false
 end
 s.l = tick
 s.tick = tick
 Runtime:addEventListener('enterFrame', tick)
-return string.format('walk lock ON (%d moves already queued by the watchdog)', s.reapplies or 0)
+return string.format('walk lock ON (timeline): %d live transitions, frame time %.2f ms',
+  #list, s.dt)
 """
 
 WALK_LOCK_REPORT = PRELUDE + r"""
 local s = _G.__walklock
 if not s then return '!walk lock not installed!' end
-local out = {
-  string.format('active=%s  moves armed=%d  frames driven=%d  handed back=%d  re-applies=%d',
-    tostring(s.on), s.moves or 0, s.driven or 0, s.released or 0, s.reapplies or 0),
-  string.format('current move: frame %s  step=%s px/frame  primary=%s',
-    tostring(s.n or 0), tostring(s.step), tostring(s.primary)),
-}
-if s.names and #s.names > 0 then
-  out[#out + 1] = 'driving ' .. #s.names .. ' object(s): ' .. table.concat(s.names, ', ')
-else
-  out[#out + 1] = 'nothing driven yet'
+local live = 0
+for _, tr in ipairs(s.list or {}) do
+  if tr.__lockFrames then live = live + 1 end
 end
-if (s.dropped or 0) > 0 then
-  out[#out + 1] = string.format('%d secondary object(s) dropped (stopped moving with us)', s.dropped)
-end
-out[#out + 1] = 'expect the sprite AND its shadow in the list: the camera is tied to the shadow'
-return table.concat(out, '\n')
+local f = math.max(1, math.floor(271 / (s.dt or 16.95) + 0.5))
+return table.concat({
+  string.format('active=%s  moves=%d  frames adjusted=%d  arrived=%d  live transitions now=%d',
+    tostring(s.on), s.moves or 0, s.adj or 0, s.arrived or 0, live),
+  string.format('frame time %.2f ms  ->  a 271 ms tile takes %d frames = %.2f px/frame',
+    s.dt or 0, f, 16 / f),
+  'expect live transitions 0 while standing still, 1 while a tile move runs',
+}, '\n')
 """
+
 
 WALK_LOCK_REMOVE = r"""
 local s = _G.__walklock
@@ -1356,93 +1260,66 @@ return string.format(
 # Touches no game state and needs no input.
 # ---------------------------------------------------------------------------
 SELFTEST_LOCK = r"""
-local s = { moves = 0, driven = 0, released = 0, DIST = 16 }
-local spawnableHelper = nil
-local timer = { performWithDelay = function() return 1 end }
+local s = { on = true, n = 0, dt = 16.9491525, DIST = 16, adj = 0, arrived = 0,
+            moves = 0, list = {} }
+local now = 1000
+local system = { getTimer = function() return now end }
+local spr = {}
+local fakeInst = { sprite = spr }
+local spawnableHelper = { getPlayerSpawnable = function() return fakeInst end }
 
 __LOCK__
 
--- the real tick() reads the state out of _G.__walklock and refuses to run unless
--- st.tick is itself, so wire both up exactly as the install does
 _G.__walklock = s
 s.tick = tick
 
--- fake player: sprite at (100,100), shadow at (100,104)
-local fake = { sprite = { x = 100.0, y = 100.0 }, shadow = { x = 100.0, y = 104.0 } }
-local originalMove = function() return { normal = 271 } end
-fake.getGridMoveTimeBySpeed = originalMove
-spawnableHelper = { getPlayerSpawnable = function() return fake end }
-
-local out = {}
-local function state()
-  return string.format(' [moves=%s list=%s step=%s primary=%s keep=%s driven=%s released=%s]',
-    tostring(s.moves), tostring(s.list and #s.list), tostring(s.step), tostring(s.primary),
-    tostring(s.keep and #s.keep), tostring(s.driven), tostring(s.released))
-end
-local function reset()
-  for k in pairs(s) do s[k] = nil end
-  s.moves, s.driven, s.released, s.DIST = 0, 0, 0, 16
-  s.tick = tick            -- cleared by the loop above; tick() refuses without it
-  s.on = true              -- likewise set by the install header we did not extract
-  fake.sprite.x, fake.sprite.y = 100.0, 100.0
-  fake.shadow.x, fake.shadow.y = 100.0, 104.0
-  fake.getGridMoveTimeBySpeed = originalMove   -- unwrap: do not nest wrappers
-  s.wrapped = nil
-  apply()
-end
-
--- one tile move: the game interpolates 1.03 px/frame (fractional on purpose, to
--- prove the step is taken from the frame count and not from the clock)
-local function sim(name, dx, dy, frames, expectX, expectY)
-  reset()
-  fake.getGridMoveTimeBySpeed()          -- the game signals a new tile move
-  local bad = nil
-  for f = 1, frames do
-    fake.sprite.x = 100.0 + dx * (f * 1.03)
-    fake.sprite.y = 100.0 + dy * (f * 1.03)
-    fake.shadow.x = 100.0 + dx * (f * 1.03)
-    fake.shadow.y = 104.0 + dy * (f * 1.03)
+-- Replays a tile move the way the engine does it: the transition is a table with
+-- target/duration/startTime, and what matters is the PROGRESS the engine reads out
+-- of it (timePassed / duration), because that times 16 px is the position.
+local function sim(name, duration, frames)
+  local tr = { target = spr, duration = duration, startTime = now }
+  s.list = { tr }
+  local out, bad = {}, nil
+  for k = 1, frames + 3 do
+    now = now + s.dt
     tick()
-    local ex, ey = 100.0 + expectX * f, 100.0 + expectY * f
-    if math.abs(fake.sprite.x - ex) > 1e-9 or math.abs(fake.sprite.y - ey) > 1e-9 then
-      bad = string.format('frame %d: sprite (%.2f,%.2f) wanted (%.2f,%.2f)',
-        f, fake.sprite.x, fake.sprite.y, ex, ey)
-      break
-    end
-    if math.abs(fake.shadow.x - (100.0 + expectX * f)) > 1e-9
-       or math.abs(fake.shadow.y - (104.0 + expectY * f)) > 1e-9 then
-      bad = string.format('frame %d: shadow (%.2f,%.2f) drifted from sprite',
-        f, fake.shadow.x, fake.shadow.y)
+    local px = ((now - tr.startTime) / tr.duration) * 16
+    out[#out + 1] = string.format('%.2f', px)
+    if k <= frames then
+      if math.abs(px - k * (16 / frames)) > 0.02 then
+        bad = string.format('frame %d: %.3f px, wanted %.3f', k, px, k * (16 / frames))
+        break
+      end
+    elseif math.abs(px - 16) > 0.02 then
+      bad = string.format('frame %d: %.3f px, wanted the tile to be finished at 16', k, px)
       break
     end
   end
-  out[#out + 1] = string.format('%-28s -> %s   (sprite %.2f,%.2f  shadow %.2f,%.2f)'
-    , name, bad and ('FAIL: ' .. bad .. state()) or ('PASS ' .. s.driven .. ' frames driven'),
-    fake.sprite.x, fake.sprite.y, fake.shadow.x, fake.shadow.y)
+  local per = 16 / frames
+  out[#out + 1] = string.format('picked %d frames', tr.__lockFrames or -1)
+  return string.format('%-30s %s  %s px/frame   [%s]', name,
+    bad and ('FAIL: ' .. bad) or 'PASS', per, table.concat(out, ' '))
 end
 
-sim('right (1,0) x16', 1, 0, 16, 1, 0)
-sim('left  (-1,0) x16', -1, 0, 16, -1, 0)
-sim('down  (0,1) x16', 0, 1, 16, 0, 1)
-sim('up    (0,-1) x16', 0, -1, 16, 0, -1)
-sim('diagonal (1,1) x16', 1, 1, 16, 1, 1)
-sim('diagonal (-1,-1) x16', -1, -1, 16, -1, -1)
-sim('running (2,0) x8', 2, 0, 8, 2, 0)
-return table.concat(out, '\n')
+return table.concat({
+  sim('walking  (271 ms tile)', 271, 16),
+  sim('running  (136 ms tile)', 135.59, 8),
+}, '\n')
 """
 
 
 def _lock_source():
-    """Lift the real lock body (candidates/arm/wrap/apply/handBack/tick) out of
-    WALK_LOCK_INSTALL, excluding the PRELUDE header and the listener registration."""
+    """Lift the real lock body (playerSprite + tick) out of WALK_LOCK_INSTALL,
+    excluding the PRELUDE header and the listener registration."""
     txt = WALK_LOCK_INSTALL
-    start = txt.index("local function playerInstance()")
+    start = txt.index("local function playerSprite()")
     end = txt.index("\ns.l = tick")
     return txt[start:end]
 
 
 def selftest_lock(b):
     print(_eval(b, SELFTEST_LOCK.replace("__LOCK__", _lock_source()), timeout=30.0))
+
 
 
 def _axis_source():
