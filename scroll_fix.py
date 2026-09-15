@@ -910,7 +910,10 @@ local function arm(inst)
   end)
   if type(spr) ~= 'table' then return end
   s.sprite = spr
-  s.sx, s.sy = spr.x, spr.y      -- a tile move starts on the tile centre
+  -- A tile move starts on a tile centre, so both are whole numbers in the normal
+  -- case. Snap them anyway: if the engine ever hands us a fractional position, one
+  -- fractional baseline would make the whole move jittery.
+  s.sx, s.sy = math.round(spr.x), math.round(spr.y)
   s.px, s.py = spr.x, spr.y
   s.n, s.step = 0, nil
   s.dirx, s.diry = 0, 0
@@ -928,6 +931,7 @@ local function wrap(inst)
     return r
   end
   s.wrapped = inst
+  s.origMove = inner          -- so --walk-lock off can hand the method back
   return true
 end
 
@@ -1037,14 +1041,14 @@ return table.concat({
   string.format(
     'active=%s  tile moves=%d  frames placed=%d  handed back=%d  re-applies=%d',
     tostring(s.on), s.moves or 0, s.moved or 0, s.released or 0, s.reapplies or 0),
-  string.format('current move: frame %s  step=%s px/frame  dir=(%s,%s)',
-    tostring(s.n or 0), tostring(s.step), tostring(s.dirx), tostring(s.diry)),
+  string.format('current move: frame %s  step=%s px/frame  dir=(%s,%s)  baseline=(%s,%s)',
+    tostring(s.n or 0), tostring(s.step), tostring(s.dirx), tostring(s.diry),
+    tostring(s.sx), tostring(s.sy)),
   string.format('CAMERA step: %d frames, min %.4f, max %.4f   histogram %s',
     s.cn or 0, s.cmin or 0, s.cmax or 0,
     (#o > 0) and table.concat(o, '  ') or '(nothing yet - walk a few steps)'),
-  'PERFECT reads: min 1.0000, max 1.0000, single 1px= bin',
-}, '
-')
+  'camera: exact by construction - baseline and step are integers, so the camera',
+}, '\n')
 """
 
 WALK_LOCK_REMOVE = r"""
@@ -1060,6 +1064,8 @@ if s.easeInst and s.origEasing then s.easeInst.getEasing = s.origEasing end
 if s.gridEaseInst and s.origGridEasing then
   s.gridEaseInst.getGridMoveEasing = s.origGridEasing
 end
+if s.wrapped and s.origMove then s.wrapped.getGridMoveTimeBySpeed = s.origMove end
+s.wrapped, s.origMove = nil, nil
 _G.__walklock_old = s
 _G.__walklock = nil
 return 'walk lock OFF - the game drives the sprite position again'
@@ -1851,6 +1857,39 @@ def _bridge():
     return b
 
 
+def _lua_quote(text):
+    """Render Python text as a Lua short string literal."""
+    out = (text.replace('\\', '\\\\').replace('"', '\\"')
+               .replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t'))
+    return '"' + out + '"'
+
+
+def luacheck(b):
+    """Loadstring every Lua chunk we may send, and report the ones that do not parse.
+
+    A chunk that fails to parse would otherwise be discovered the hard way: an
+    error inside a per-frame listener froze this process once. Nothing here runs.
+    """
+    chunks = [('WALK_FIX', WALK_FIX), ('WALK_LOCK_INSTALL', WALK_LOCK_INSTALL),
+              ('WALK_LOCK_REPORT', WALK_LOCK_REPORT),
+              ('WALK_LOCK_REMOVE', WALK_LOCK_REMOVE),
+              ('WALK_DIAG_INSTALL', WALK_DIAG_INSTALL),
+              ('WALK_DIAG_COLLECT', WALK_DIAG_COLLECT), ('WALK_DIAG_OFF', WALK_DIAG_OFF),
+              ('WALK_REPORT', WALK_REPORT)]
+    bad = 0
+    for name, text in chunks:
+        code = ("local f, e = loadstring(%s, '%s')\n"
+                "return f and 'ok' or (' ' .. tostring(e))" % (_lua_quote(text), name))
+        r = _eval(b, code)
+        if r is None or r.strip() != 'ok':
+            bad += 1
+            print('  FAIL %-18s %s' % (name, (r or '').strip()))
+        else:
+            print('  ok   %-18s (%d lines)' % (name, text.count('\n') + 1))
+    print('%d of %d chunks parse in the game\'s Lua' % (len(chunks) - bad, len(chunks)))
+    return bad
+
+
 def _eval(b, code, timeout=30.0):
     r = b.eval(code, timeout=timeout)
     return r.get("out") or r.get("err")
@@ -1953,7 +1992,7 @@ def main():
     ap.add_argument("--no-record", action="store_true",
                     help="with --apply, skip starting the frame recorder")
     ap.add_argument("--walk-lock", nargs="?", const="on", default=None,
-                    choices=["on", "off", "report"],
+                    choices=["on", "off", "report", "check"],
                     help="drive the sprite from the frame count so it advances a whole number "
                          "of pixels every frame, with no 0 or 2 px steps (on|off|report)")
     ap.add_argument("--walk-diag", nargs="?", const="on", default=None,
@@ -2146,7 +2185,9 @@ def main():
             print()
             print(_eval(b, WALK_REPORT))
         elif args.walk_lock is not None:
-            if args.walk_lock == "off":
+            if args.walk_lock == "check":
+                luacheck(b)
+            elif args.walk_lock == "off":
                 print(_eval(b, WALK_LOCK_REMOVE))
             else:
                 if args.walk_lock == "on":
