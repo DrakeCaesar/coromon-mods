@@ -266,12 +266,99 @@ def camera(seconds, wait=60.0):
     b.detach()
 
 
+FINDER_INSTALL = r"""
+local stage = display.getCurrentStage()
+local objs, paths = {}, {}
+local function walk(o, path, d)
+  if not o or d > 6 or #objs > 2000 then return end
+  local n = 0
+  pcall(function() n = o.numChildren or #o end)
+  if n and n > 0 then
+    objs[#objs + 1] = o
+    paths[#paths + 1] = path .. ' (' .. tostring(o) .. ')'
+  end
+  for i = 1, math.min(n, 60) do
+    local c = nil
+    pcall(function() c = o[i] end)
+    if c then walk(c, path .. '[' .. i .. ']', d + 1) end
+  end
+end
+walk(stage, 'stage', 0)
+local s = { objs = objs, paths = paths, rows = {}, ticks = 0 }
+_G.__find = s
+-- sample at 10 Hz: cheap enough not to disturb the game, plenty to spot what moves
+s.timer = timer.performWithDelay(100, function()
+  s.ticks = s.ticks + 1
+  for i = 1, #objs do
+    local ok, x, y = pcall(function() return objs[i].x, objs[i].y end)
+    if ok then
+      local row = s.rows[i]
+      if not row then row = {}; s.rows[i] = row end
+      row[#row + 1] = { x, y }
+    end
+  end
+end, 0)
+return 'scanned ' .. #objs .. ' groups/objects (depth<=6)'
+"""
+
+FINDER_COLLECT = r"""
+local s = _G.__find
+if not s then return '!none!' end
+if s.timer then timer.cancel(s.timer) end
+_G.__find = nil
+local out, report = {}, {}
+for i = 1, #s.rows do
+  local row = s.rows[i]
+  if row and #row > 1 then
+    local moved, seq = 0, {}
+    for k = 2, #row do
+      local dx = row[k][1] - row[k - 1][1]
+      local dy = row[k][2] - row[k - 1][2]
+      if dx ~= 0 or dy ~= 0 then moved = moved + 1 end
+      if #seq < 25 then seq[#seq + 1] = string.format('%d,%d', dx, dy) end
+    end
+    if moved > 0 then
+      report[#report + 1] = {path = s.paths[i], moved = moved, n = #row - 1,
+                             span = string.format('(%d,%d)', row[#row][1] - row[1][1],
+                                                  row[#row][2] - row[1][2]),
+                             seq = seq}
+    end
+  end
+end
+table.sort(report, function(a, b) return a.moved > b.moved end)
+out[#out + 1] = string.format('ticks=%d  objects that moved=%d', s.ticks, #report)
+for r = 1, math.min(#report, 6) do
+  local e = report[r]
+  out[#out + 1] = string.format('MOVER %s  moved %d/%d samples  span=%s', e.path, e.moved, e.n, e.span)
+  out[#out + 1] = '   10Hz deltas: ' .. table.concat(e.seq, ' ')
+end
+return table.concat(out, '\n')
+"""
+
+
+def finder(seconds):
+    b = Bridge("coromon.exe", hooks=MINIMAL_HOOKS)
+    for _ in range(150):
+        if b.status().get("state"):
+            break
+        time.sleep(0.2)
+    r = b.eval(FINDER_INSTALL, timeout=30.0)
+    print("install:", r.get("out") or r.get("err"))
+    print(f"walk in-game for {seconds:g}s ...")
+    time.sleep(seconds)
+    res = b.eval(FINDER_COLLECT, timeout=30.0)
+    print(res.get("out") or res.get("err"))
+    b.detach()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--process", default="coromon.exe")
     ap.add_argument("--seconds", type=float, default=6.0, help="seconds per mode")
     ap.add_argument("--camera", action="store_true",
                     help="sample the stage/background position every frame instead")
+    ap.add_argument("--finder", action="store_true",
+                    help="find which display object scrolls the world")
     args = ap.parse_args()
 
     try:
@@ -279,6 +366,10 @@ def main():
     except ImportError:
         print("frida is not installed")
         return 1
+
+    if args.finder:
+        finder(args.seconds)
+        return 0
 
     if args.camera:
         camera(args.seconds)
