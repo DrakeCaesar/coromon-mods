@@ -897,6 +897,27 @@ local function playerSprite()
 end
 playerSprite()
 
+-- The player's sprite and shadow are recreated on a map change, and a stale handle
+-- means the lock writes an object that is no longer the player - which moved a
+-- character sprite off-screen and then threw. Drop every cached handle the moment the
+-- player's objects are not the ones we were holding.
+local function refresh()
+  local i
+  pcall(function() i = spawnableHelper:getPlayerSpawnable() end)
+  if type(i) ~= 'table' then return false end
+  local spr = (type(i.sprite) == 'table') and i.sprite or nil
+  local sh = (type(i.shadow) == 'table') and i.shadow or nil
+  if spr ~= s.sprite or sh ~= s.shadow then
+    s.sprite, s.shadow = spr, sh
+    s.armed, s.hold, s.n = false, nil, nil
+    s.dox, s.doy = nil, nil
+    s.twx, s.twy, s.wx, s.wy, s.tail = nil, nil, nil, nil, nil
+    pcall(function() s.tw = upval(MTE.getTiledWorld, 'tiledWorld') end)
+    return true
+  end
+  return false
+end
+
 local function put(obj, x, y)
   if type(obj) ~= 'table' then return false end
   local set = s.origSet or MTE.setSpriteLocation     -- never the hook: no recursion
@@ -1043,6 +1064,10 @@ local function drive(spr, x, y)
   -- one tile move would run straight into the next and never land.
   if st.hold then return true end
   local mag = math.max(math.abs(dx), math.abs(dy))
+  -- more than a tile and a half: a warp, a map change, a scripted move. Not a tile
+  -- walk, and not ours to drive - hands off.
+  if mag > 24 then return false end
+  refresh()
   local step = math.floor(mag + 0.5)
   if step < 1 then step = 1 end
   if step > st.DIST / 2 then step = st.DIST / 2 end
@@ -1111,7 +1136,7 @@ local function tickBody()
   local st = _G.__walklock
   if not st then return false end
   st.frames = (st.frames or 0) + 1
-  if st.frames % 120 == 0 then playerSprite() end
+  if st.frames % 30 == 0 then refresh() end
   if st.armed or st.tail then placeWorld() end
   return false
 end
