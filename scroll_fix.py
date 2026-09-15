@@ -648,10 +648,9 @@ return 'wrapped getGridMoveTimeBySpeed, factor ' .. tostring(factor)
 """
 
 WALK_FIX = PRELUDE + r"""
--- Duration multipliers. normal -> 1 px/frame, fast -> 2 px/frame.
--- slow is left alone: its step is ~0.67 px/frame and the only whole-pixel value
--- is 1 px/frame, which would make it indistinguishable from normal.
-local factors = { normal = __FN__, fast = __FF__ }
+-- Duration multipliers, e.g. { normal = 0.968, fast = 1.019 }. A value below 1
+-- shortens the tile crossing, i.e. makes the player walk faster.
+local factors = __FACTORS__
 
 local st = _G.__walkscale or { calls = 0, samples = {}, reapplies = 0 }
 _G.__walkscale = st
@@ -702,6 +701,56 @@ if not st.patched then
 end
 return string.format('walk fix active: normal x%.4f  fast x%.4f  (watchdog re-applies every 1s)',
   factors.normal, factors.fast)
+"""
+
+# Closed-loop calibration. Sums the world's actual per-frame displacement over a
+# walking window, so the measured rate includes the game's own rounding. Using
+# TOTAL frames as the denominator (not "frames that moved") matters: at a true
+# rate below 1 the game emits occasional 0-px frames, and excluding those would
+# bias the estimate upward and hide the error.
+RATE_INSTALL = PRELUDE + r"""
+local MTE, tw = world()
+if type(tw) ~= 'table' then return '!no tiledWorld - are you in the overworld?!' end
+local s = { tw = tw, n = 0, sx = 0, sy = 0, mx = 0, my = 0 }
+_G.__rate = s
+local function f()
+  s.n = s.n + 1
+  if s.n > 4000 then return false end
+  local x, y = tw.x, tw.y
+  if s.lx and x ~= s.lx then s.sx = s.sx + math.abs(x - s.lx); s.mx = s.mx + 1 end
+  if s.ly and y ~= s.ly then s.sy = s.sy + math.abs(y - s.ly); s.my = s.my + 1 end
+  s.lx, s.ly = x, y
+  return false
+end
+s.l = f
+Runtime:addEventListener('enterFrame', f)
+return 'sampling tiledWorld displacement'
+"""
+
+RATE_COLLECT = r"""
+local s = _G.__rate
+if not s then return '!none!' end
+Runtime:removeEventListener('enterFrame', s.l)
+_G.__rate = nil
+local n = s.n - 1
+if n <= 0 then return '0\t0\t0\t0\t0' end
+return string.format('%d\t%.4f\t%d\t%.4f\t%d', n, s.sx, s.mx, s.sy, s.my)
+"""
+
+WALK_ADJUST = PRELUDE + r"""
+-- Multiply the current duration multipliers by `rate`. The step is inversely
+-- proportional to the duration, so multiplying by the MEASURED step drives the
+-- measured step towards 1 over successive passes.
+local rate = __RATE__
+local st = _G.__walkscale
+if not st or not st.factors then return '!walk fix not installed!' end
+local out = {}
+for k, f in pairs(st.factors) do
+  st.factors[k] = f * rate
+  out[#out + 1] = string.format('%s x%.5f', k, st.factors[k])
+end
+table.sort(out)
+return 'adjusted by x' .. string.format('%.5f', rate) .. ':  ' .. table.concat(out, '  ')
 """
 
 DT_INSTALL = r"""
@@ -854,6 +903,23 @@ def measure(b, seconds, label):
     print(_eval(b, MEASURE_COLLECT, timeout=60.0))
 
 
+def _lua_factors(d):
+    return "{" + ", ".join(f"{k} = {v!r}" for k, v in d.items()) + "}"
+
+
+def _measure_dt(b):
+    """Average enterFrame interval in ms. Falls back to 60 fps."""
+    print("measuring frame time (stand still) ...")
+    print(_eval(b, DT_INSTALL))
+    time.sleep(1.5)
+    r = _eval(b, DT_COLLECT)
+    try:
+        dt = float(r.strip().split("\t")[1])
+    except Exception:
+        dt = 1000.0 / 60.0
+    return dt if dt > 0 else 1000.0 / 60.0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--process", default="coromon.exe")
@@ -881,6 +947,11 @@ def main():
                     help="scale getGridMoveTimeBySpeed uniformly (1.0 = observe)")
     ap.add_argument("--walk-fix", action="store_true",
                     help="measure the frame time and set the tile durations for a whole-pixel step")
+    ap.add_argument("--walk-speed", type=float, default=None,
+                    help="sanity check: force a specific px/frame (e.g. 10). Restore with --walk-fix")
+    ap.add_argument("--walk-calibrate", action="store_true",
+                    help="closed loop: measure the real step and correct until it is exactly 1 px/frame")
+    ap.add_argument("--iters", type=int, default=4, help="max calibration passes")
     ap.add_argument("--walk-report", action="store_true",
                     help="show the baseline getGridMoveTimeBySpeed descriptors")
     ap.add_argument("--set-speed", type=float, default=None,
@@ -916,16 +987,7 @@ def main():
             print(_eval(b, WALK_SCALE.replace("__FACTOR__", repr(args.walk_scale))))
         elif args.walk_fix:
             print(_eval(b, REMOVE))
-            print("measuring frame time (stand still) ...")
-            print(_eval(b, DT_INSTALL))
-            time.sleep(1.5)
-            r = _eval(b, DT_COLLECT)
-            try:
-                dt = float(r.strip().split("\t")[1])
-            except Exception:
-                dt = 1000.0 / 60.0
-            if dt <= 0:
-                dt = 1000.0 / 60.0
+            dt = _measure_dt(b)
             # px/frame = (tilewidth / duration_ms) * dt_ms.  Want exactly 1 for
             # normal and exactly 2 for fast => 16*dt and 8*dt.
             fn = (16.0 * dt) / 280.0
@@ -934,7 +996,65 @@ def main():
             print(f"  normal 280 ms -> {280.0 * fn:.2f} ms   = 1 px/frame")
             print(f"  fast   133 ms -> {133.0 * ff:.2f} ms   = 2 px/frame")
             print(f"  slow   400 ms unchanged (0.67 px/frame; making it whole would equal normal)")
-            code = WALK_FIX.replace("__FN__", repr(fn)).replace("__FF__", repr(ff))
+            code = WALK_FIX.replace("__FACTORS__", _lua_factors({"normal": fn, "fast": ff}))
+            print(_eval(b, code))
+            print(_eval(b, WALK_REPORT))
+        elif args.walk_calibrate:
+            # Pure closed loop: start from whatever is installed (stock = no
+            # change), then correct using the MEASURED step. No feed-forward
+            # guess, so there is no assumption about tile size, frame time or
+            # the shape of the formula that could be wrong.
+            print(_eval(b, WALK_FIX.replace(
+                "__FACTORS__", _lua_factors({"normal": 1.0, "fast": 1.0}))))
+            print(_eval(b, WALK_REPORT))
+            for it in range(1, args.iters + 1):
+                print()
+                print(f"pass {it}/{args.iters}: walk continuously for {args.seconds:g}s ...")
+                print(_eval(b, RATE_INSTALL))
+                time.sleep(args.seconds)
+                raw = _eval(b, RATE_COLLECT).strip()
+                try:
+                    parts = raw.split("\t")
+                    n = int(parts[0])
+                    sx, mx = float(parts[1]), int(parts[2])
+                    sy, my = float(parts[3]), int(parts[4])
+                except Exception:
+                    print(f"  unparsable: {raw!r}")
+                    break
+                if n <= 0:
+                    print("  no frames")
+                    break
+                if mx >= my:
+                    total, moved, axis = sx, mx, "x"
+                else:
+                    total, moved, axis = sy, my, "y"
+                ratio = moved / n
+                rate = total / n
+                print(f"  frames={n}  axis={axis}  moved on {ratio * 100:.1f}% of frames")
+                print(f"  measured step = {rate:.5f} px/frame   (want 1.00000)")
+                if ratio < 0.7:
+                    print("  not enough continuous walking - walk without stopping")
+                    continue
+                if abs(rate - 1.0) < 0.002:
+                    print("  within tolerance - done")
+                    break
+                # step is inversely proportional to duration, so multiplying the
+                # current multipliers by the measured error drives step -> 1
+                print("  " + _eval(b, WALK_ADJUST.replace("__RATE__", repr(rate))))
+            print()
+            print(_eval(b, WALK_REPORT))
+        elif args.walk_speed is not None:
+            # Deliberately wrong on purpose: a big obvious speed change proves the
+            # wrapper really is driving the walk speed. Restore with --walk-fix.
+            print(_eval(b, REMOVE))
+            dt = _measure_dt(b)
+            f = (16.0 * dt / args.walk_speed) / 280.0
+            print(f"avg frame time = {dt:.4f} ms")
+            print(f"  target {args.walk_speed} px/frame -> all durations x{f:.5f}")
+            print(f"  normal 280 -> {280.0 * f:.3f} ms, fast 133 -> {133.0 * f:.3f} ms, "
+                  f"slow 400 -> {400.0 * f:.3f} ms")
+            code = WALK_FIX.replace(
+                "__FACTORS__", _lua_factors({"normal": f, "fast": f, "slow": f}))
             print(_eval(b, code))
             print(_eval(b, WALK_REPORT))
         elif args.set_speed is not None:
