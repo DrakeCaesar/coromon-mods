@@ -232,6 +232,112 @@ end
 return table.concat(lines, '\n')
 """
 
+
+# ---------------------------------------------------------------------------
+# Frame-counted walk. One writer, one clock.
+#
+# The engine animates a tile move by asking its easing for a 0..1 progress each
+# frame and placing the player (and, from the same progress, the world) at
+# start + delta * progress. That progress is computed from ELAPSED TIME, so every
+# frame step is a different fraction of a pixel - 1.03, 0.97, 1.04 - which is the
+# original jitter and the 0 px / 2 px frames.
+#
+# Replace that one function with `frame / N`. Progress is then a function of the
+# frame counter alone: 16 frames of walking are 16 steps of exactly 1 px, whatever
+# the clock or the framerate does. Nothing else writes a position, so the player,
+# the shadow and the world cannot separate - they all read this one number.
+# ---------------------------------------------------------------------------
+WALK_STEP = PRELUDE + r"""
+local s = _G.__walkstep
+if s and s.on then return 'frame-counted walk already on' end
+s = { on = true, n = 0, N = 16, calls = 0, moves = 0 }
+_G.__walkstep = s
+
+local inst
+pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+if type(inst) ~= 'table' then return '!no player spawnable - are you in the overworld?!' end
+if type(inst.getGridMoveEasing) ~= 'function' then
+  return '!the spawnable has no getGridMoveEasing - nothing to hook!'
+end
+s.inst = inst
+
+local mt = 16.949152542373
+pcall(function()
+  if type(display.msPerFrame) == 'number' and display.msPerFrame > 1 then
+    mt = display.msPerFrame
+  end
+end)
+
+-- Does the method return the progress itself, or an easing FUNCTION? One benign
+-- call answers it, and getting this wrong is the whole difference between working
+-- and doing nothing.
+local returnsFunction = false
+pcall(function()
+  local r = inst.getGridMoveEasing(inst, 0, 1, 0, 1)
+  returnsFunction = (type(r) == 'function')
+end)
+s.returnsFunction = returnsFunction
+
+-- getGridMoveTimeBySpeed is called once per tile move; its duration says whether
+-- this move is a walk (16 frames) or a run (8), so N comes from the game itself.
+local origTime = inst.getGridMoveTimeBySpeed
+if type(origTime) == 'function' then
+  s.origTime = origTime
+  inst.getGridMoveTimeBySpeed = function(self, ...)
+    local r = origTime(self, ...)
+    local ms = (type(r) == 'table') and (r.normal or r.slow or r.fast) or r
+    local frames = 16
+    if type(ms) == 'number' and ms > 1 then frames = math.floor(ms / mt + 0.5) end
+    if frames < 2 then frames = 2 end
+    s.N, s.n = frames, 0
+    s.moves = s.moves + 1
+    return r
+  end
+end
+
+local origEase = inst.getGridMoveEasing
+s.origEase = origEase
+local function progress()
+  s.n = s.n + 1
+  s.calls = s.calls + 1
+  local p = s.n / s.N
+  if p > 1 then p = 1 end
+  return p
+end
+inst.getGridMoveEasing = function(self, ...)
+  local p = progress()
+  if returnsFunction then return function() return p end end
+  return p
+end
+return 'frame-counted walk ON - progress = frame / ' .. tostring(s.N)
+"""
+
+WALK_STEP_REMOVE = r"""
+local s = _G.__walkstep
+if not s then return 'frame-counted walk was not installed' end
+s.on = false
+if s.inst then
+  if s.origEase then s.inst.getGridMoveEasing = s.origEase end
+  if s.origTime then s.inst.getGridMoveTimeBySpeed = s.origTime end
+end
+_G.__walkstep = nil
+_G.__walkstep_old = s
+return 'frame-counted walk OFF - the engine times the walk again'
+"""
+
+WALK_STEP_REPORT = PRELUDE + r"""
+local s = _G.__walkstep
+if not s then return '!frame-counted walk not installed!' end
+return string.format(
+  'on=%s  frames per tile=%s  frames this move=%s  moves=%d  easing calls=%d\n' ..
+  'progress this frame = %s  ->  pixels this frame = %s\n' ..
+  'method shape: %s',
+  tostring(s.on), tostring(s.N), tostring(s.n), s.moves or 0, s.calls or 0,
+  s.N and string.format('%.4f', (s.n or 0) / s.N) or '?',
+  s.N and string.format('%.4f', 16 / s.N) or '?',
+  s.returnsFunction and 'returns an easing function' or 'returns the progress number')
+"""
+
 # ---------------------------------------------------------------------------
 # Empirical tracer. Static analysis guessed the wrong funnel once already, so
 # instead of guessing again, count calls into EVERY public MTE function and see
@@ -2073,6 +2179,10 @@ def main():
                     # + recorder
     ap.add_argument("--no-record", action="store_true",
                     help="with --apply, skip starting the frame recorder")
+    ap.add_argument("--walk-step", nargs="?", const="on", default=None,
+                    choices=["on", "off", "report"],
+                    help="frame-counted walk: progress = frame/N, so walking is "
+                         "exactly 1 px per frame whatever the framerate does")
     ap.add_argument("--walk-lock", nargs="?", const="on", default=None,
                     choices=["on", "off", "report", "check"],
                     help="drive the sprite from the frame count so it advances a whole number "
@@ -2266,6 +2376,13 @@ def main():
             print(_eval(b, WALK_LOCK_REPORT))
             print()
             print(_eval(b, WALK_REPORT))
+        elif args.walk_step is not None:
+            if args.walk_step == "on":
+                print(_eval(b, WALK_STEP))
+            elif args.walk_step == "off":
+                print(_eval(b, WALK_STEP_REMOVE))
+            else:
+                print(_eval(b, WALK_STEP_REPORT))
         elif args.walk_lock is not None:
             if args.walk_lock == "check":
                 luacheck(b)
