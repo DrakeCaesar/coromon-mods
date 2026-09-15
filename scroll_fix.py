@@ -898,7 +898,8 @@ local function findList()
       return v
     end
   end
-  s.listInfo = 'not found; upvalues of transitions.to = {' .. table.concat(seen, ', ') .. '}'
+  s.listInfo = 'not bound yet - the list is EMPTY until a tile move starts, so it binds'
+    .. ' on your first step (upvalues of transitions.to = {' .. table.concat(seen, ', ') .. '})'
   return nil
 end
 
@@ -975,6 +976,7 @@ return table.concat({
   string.format('frame time %.2f ms  ->  a 271 ms tile takes %d frames = %.2f px/frame',
     s.dt or 0, f, 16 / f),
   'transition list: ' .. tostring(s.listInfo),
+  'counters are cumulative since the lock was first installed in this game run',
   'expect live transitions 0 while standing still, 1 while a tile move runs',
 }, '\n')
 """
