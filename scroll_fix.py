@@ -882,24 +882,37 @@ pcall(function()
 end)
 
 local function playerSprite()
-  local spr
+  local spr, sh
   pcall(function()
     local i = spawnableHelper:getPlayerSpawnable()
     if i and i.sprite then spr = i.sprite end
+    if i and type(i.shadow) == 'table' then sh = i.shadow end
   end)
-  s.sprite = spr
+  s.sprite, s.shadow = spr, sh
 end
 playerSprite()
 
+local function put(obj, x, y)
+  if type(obj) ~= 'table' then return false end
+  local ok = pcall(MTE.setSpriteLocation, obj, x, y)
+  if not ok then obj.x, obj.y = x, y end
+  return true
+end
+
 local function place(x, y)
-  local spr = s.sprite
-  if type(spr) ~= 'table' then return end
-  -- MTE's OWN entry point, not a raw sprite.x write. This is what updates MTE's
-  -- record of where the sprite is and carries child sprites (the character's
-  -- shadow) along with it. Writing sprite.x directly was the earlier mistake: the
-  -- shadow was left behind and MTE's bookkeeping went stale.
-  local ok = pcall(MTE.setSpriteLocation, spr, x, y)
-  if not ok then spr.x, spr.y = x, y end
+  -- x, y is where the SHADOW goes, because the scroll is derived from the shadow:
+  -- tiledWorld.x + i.shadow.x is pinned at a constant (measured 230, and 152 in y),
+  -- while the character sprite is a separate object the engine animates on its own.
+  -- Driving the sprite is what made the world and the shadow wander off on their
+  -- own - the two were simply being moved by different clocks.
+  local sh = s.shadow
+  if type(sh) ~= 'table' or type(sh.x) ~= 'number' then sh = nil end
+  if sh then
+    put(sh, x, y)
+    put(s.sprite, x + (s.dox or 0), y + (s.doy or 0))
+  else
+    put(s.sprite, x, y)          -- no shadow object: the sprite is all we have
+  end
 end
 
 local function arm(inst)
@@ -907,14 +920,22 @@ local function arm(inst)
   pcall(function()
     local i = inst or spawnableHelper:getPlayerSpawnable()
     spr = i and i.sprite
+    if i and type(i.shadow) == 'table' then s.shadow = i.shadow end
   end)
   if type(spr) ~= 'table' then return end
   s.sprite = spr
-  -- A tile move starts on a tile centre, so both are whole numbers in the normal
-  -- case. Snap them anyway: if the engine ever hands us a fractional position, one
-  -- fractional baseline would make the whole move jittery.
-  s.sx, s.sy = math.round(spr.x), math.round(spr.y)
-  s.px, s.py = spr.x, spr.y
+  local src = s.shadow
+  if type(src) ~= 'table' or type(src.x) ~= 'number' then src = spr; s.shadow = nil end
+  -- A tile move starts on a tile centre, so this is a whole number in the normal
+  -- case. Snap it anyway: the scroll is C - position, so a fractional baseline
+  -- would make the whole move jittery and every frame of it wrong.
+  s.sx, s.sy = math.round(src.x), math.round(src.y)
+  -- Carry the character at a fixed offset from the shadow, so the two never drift
+  -- apart, and fall back to the offset the two objects have when the engine is left
+  -- alone (-8, 0) if we were ever handed a desynced pair.
+  s.dox, s.doy = spr.x - src.x, spr.y - src.y
+  if math.abs(s.dox) > 40 or math.abs(s.doy) > 40 then s.dox, s.doy = -8, 0 end
+  s.px, s.py = src.x, src.y
   s.n, s.step = 0, nil
   s.dirx, s.diry = 0, 0
   s.active = true
@@ -955,7 +976,10 @@ local function tickBody()
   st.n = st.n + 1
   st.frames = st.frames + 1
   if st.frames % 120 == 0 then playerSprite() end
-  local spr = st.sprite
+  -- read the engine's own per-frame motion off the SHADOW: that is the object the
+  -- engine animates on its own, and the one the scroll is derived from
+  local spr = st.shadow
+  if type(spr) ~= 'table' or type(spr.x) ~= 'number' then spr = st.sprite end
   if type(spr) ~= 'table' or type(spr.x) ~= 'number' then handBack(); return false end
 
   local x, y = spr.x, spr.y
@@ -1396,6 +1420,7 @@ local function reset()
   s.active, s.chist, s.nominal = false, {}, 16.9491525
   s.tick = tick          -- the loop above clears it; the wrapper refuses without it
   fake.sprite.x, fake.sprite.y = 100.0, 100.0
+  fake.shadow.x, fake.shadow.y = 108.0, 100.0
   fake.getGridMoveTimeBySpeed = originalMove    -- do not nest wrappers
   s.wrapped = nil
   apply()
@@ -1407,12 +1432,17 @@ local function sim(name, dx, dy, frames, expectX, expectY)
   fake.getGridMoveTimeBySpeed()          -- the engine signals a new tile move
   local bad = nil
   for f = 1, frames + 2 do
-    fake.sprite.x = 100.0 + dx * (f * 1.03)
-    fake.sprite.y = 100.0 + dy * (f * 1.03)
+    -- the ENGINE animates the SHADOW: that is the object the scroll is derived
+    -- from, and the one the lock reads its direction and step from
+    fake.shadow.x = 108.0 + dx * (f * 1.03)
+    fake.shadow.y = 100.0 + dy * (f * 1.03)
     tick()
     local ex, ey = 100.0 + expectX * f, 100.0 + expectY * f
+    local exsh = 108.0 + expectX * f, 100.0 + expectY * f
     if f <= frames and (math.abs(fake.sprite.x - ex) > 1e-9
-                        or math.abs(fake.sprite.y - ey) > 1e-9) then
+                        or math.abs(fake.sprite.y - ey) > 1e-9
+                        or math.abs(fake.shadow.x - exsh) > 1e-9
+                        or math.abs(fake.shadow.y - (100.0 + expectY * f)) > 1e-9) then
       bad = string.format('frame %d: got (%.2f,%.2f) wanted (%.2f,%.2f)',
         f, fake.sprite.x, fake.sprite.y, ex, ey)
       break
