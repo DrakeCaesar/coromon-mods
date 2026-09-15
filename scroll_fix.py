@@ -48,12 +48,24 @@ its direction (both components are scaled by the same factor).
 Everything here is reversible: `--off` restores the original functions, and the change
 lives only in the running process - it is gone when the game closes.
 
-Usage (game running, standing in the overworld):
-    python tools/scroll_fix.py --status
-    python tools/scroll_fix.py --ab                 # measure 6s, install, measure 6s
-    python tools/scroll_fix.py --on                 # install only
-    python tools/scroll_fix.py --off                # restore
-    python tools/scroll_fix.py --measure --seconds 8
+USAGE
+-----
+    python tools/scroll_fix.py --walk-fix
+
+Run that once per game launch, while the game is open and you are standing in
+the overworld. It measures your frame time, computes the durations, and applies
+them. You do NOT need to re-run it for map changes or save loads - a watchdog
+re-applies it whenever the game rebuilds the player object.
+
+    --walk-report   show whether it is active, plus call/re-apply counts
+    --off           undo it immediately
+    --measure       verify: per-frame world step histogram
+
+Changing refresh rate changes the frame time, so re-run --walk-fix afterwards.
+
+The rest of the flags (--on, --snap, --trace, --trace-spawn, --find-speed,
+--set-speed, --walk-scale, and the matching -report flags) are the instruments
+used to find the cause and are not needed for normal use.
 """
 import argparse
 import sys
