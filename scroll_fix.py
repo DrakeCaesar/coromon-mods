@@ -852,18 +852,24 @@ SUBPIXEL_INSTALL = PRELUDE + r"""
 local MTE, tw = world()
 if type(tw) ~= 'table' then return '!no tiledWorld - are you in the overworld?!' end
 
-local s = _G.__subpix_live or {}
-_G.__subpix_live = s
--- Earlier installs of this listener may still be registered in this game process
--- (Solar2D has no way to enumerate or remove them selectively), and all of those
--- copies consult _G.__subpix. So the global is deliberately left switched OFF:
--- any stale copy sees on=false and bails out immediately, while our own state
--- lives privately under _G.__subpix_live.
-if type(_G.__subpix) ~= 'table' or _G.__subpix == s then
-  _G.__subpix = { on = false }
-else
-  _G.__subpix.on = false
+local s = _G.__subpix2 or {}
+_G.__subpix2 = s
+-- Solar2D cannot enumerate or remove listeners selectively, so every earlier
+-- generation of this listener that was ever installed in this game process is
+-- still registered. They all hardcode a state global, so the ones from before
+-- this revision are neutralised by leaving their globals switched off:
+--   _G.__subpix      (first revision)  - stale copies see on=false and bail
+--   _G.__subpix_live (second revision) - same
+-- Copies of THIS revision are handled by the identity check in tick() below.
+local function decoy(name)
+  if type(_G[name]) ~= 'table' then
+    _G[name] = { on = false }
+  else
+    _G[name].on = false
+  end
 end
+decoy('__subpix')
+decoy('__subpix_live')
 s.on = true
 s.n = 0
 s.tw = tw
@@ -902,6 +908,16 @@ local function axis(e, t, g)
   local r = math.floor(t + 0.5)        -- the game's own rounding, for t >= 0
   local crossed = (e.r ~= nil) and (r ~= e.r)
   e.r = r
+  if not e.C then
+    -- Bootstrap from the game's own current value. This is deliberately NOT a
+    -- guess at the screen centre: our copy of the focus formula is off by a small
+    -- constant (measured), so a guessed C can differ from the game's by more than
+    -- the 0.75 guard and then every frame gets refused. Latching g + round(t)
+    -- absorbs that constant instead, which makes the whole correction invariant
+    -- to it: want = C - t is exact for ANY constant error in t.
+    e.C = g + r
+    s.latches = s.latches + 1
+  end
   if crossed then
     e.C = g + r                        -- trustworthy: the game just wrote it
     s.latches = s.latches + 1
@@ -924,6 +940,9 @@ local function axis(e, t, g)
     s.sat = s.sat + 1
     return g
   end
+  if math.abs(dev) > -1 then
+    s.lastDev = dev              -- reported by SUBPIXEL_REPORT
+  end
   local res = g + dev
   s.devN = s.devN + 1
   s.devSum = s.devSum + dev
@@ -940,8 +959,10 @@ local function axis(e, t, g)
 end
 
 local function tick()
-  local st = _G.__subpix_live
-  if not st or not st.on then return false end
+  local st = _G.__subpix2
+  -- st.tick is set to this closure by the install below. Two copies of the same
+  -- revision would otherwise both write tw.x and corrupt each other's C latch.
+  if not st or not st.on or st.tick ~= tick then return false end
   st.n = st.n + 1
   if st.n % 60 == 0 then
     local _, tw2 = world()
@@ -968,17 +989,19 @@ local function tick()
   return false
 end
 s.l = tick
+s.tick = tick          -- identity marker: only this closure may run (see tick)
 Runtime:addEventListener('enterFrame', tick)
 return string.format('sub-pixel camera ON (grid=%s) (listener registered last, so it runs after the game)',
   s.grid and s.grid > 0 and ('1/' .. tostring(s.grid) .. ' content px') or 'continuous')
 """
 
 SUBPIXEL_REPORT = PRELUDE + r"""
-local s = _G.__subpix_live
+local s = _G.__subpix2
 if not s then return '!sub-pixel camera not installed!' end
+local _, tw = world()
 local function c(e)
   if e and e.C then return string.format('%.4f', e.C) end
-  return '(not calibrated yet - walk a few steps)'
+  return '(not calibrated yet)'
 end
 local out = {
   string.format('active=%s  grid=%s  frames=%d  C latched=%d  C changed=%d  saturated=%d',
@@ -986,6 +1009,24 @@ local out = {
     s.frames or 0, s.latches or 0, s.unstable or 0, s.sat or 0),
   'calibrated C: x=' .. c(s.x) .. '  y=' .. c(s.y),
 }
+-- Live check. The game itself only ever writes WHOLE pixels here, so a fractional
+-- tiledWorld value can only have come from us. While you stand still the offset is
+-- ~0 by design (the camera only exists relative to the player), so a zero offset
+-- with a high frame count is "idle", not "dead" - the tell-tale is "applied on N
+-- frames" and a non-zero last offset once you walk.
+do
+  local live = 'tiledWorld: unavailable'
+  pcall(function()
+    if type(tw) == 'table' and type(tw.x) == 'number' then
+      live = string.format('tiledWorld.x = %.4f  (fractional part %.4f)',
+        tw.x, tw.x - math.floor(tw.x))
+    end
+  end)
+  out[#out + 1] = live
+  local d = s.lastDev
+  out[#out + 1] = string.format('last offset we applied: %s   (0 while idle is expected)',
+    d and string.format('%+.4f content px = %+.2f device px', d, d * (s.grid or 1)) or 'none yet')
+end
 do
   local keys = {}
   for k, v in pairs(display) do
@@ -1015,11 +1056,11 @@ return table.concat(out, '\n')
 """
 
 SUBPIXEL_REMOVE = r"""
-local s = _G.__subpix_live
+local s = _G.__subpix2
 if not s then return 'sub-pixel camera was not installed' end
 s.on = false
 if s.l then Runtime:removeEventListener('enterFrame', s.l); s.l = nil end
-_G.__subpix_live = nil
+_G.__subpix2 = nil
 return 'sub-pixel camera OFF - the game owns tw.x/tw.y again'
 """
 
@@ -1742,6 +1783,12 @@ def main():
                 if args.walk_subpixel in ("on", "grid"):
                     grid = args.subpixel_grid if args.walk_subpixel == "grid" else 0.0
                     print(_eval(b, SUBPIXEL_INSTALL.replace("__GRID__", repr(float(grid)))))
+                    print()
+                    print("NOTE: this is live from the first frame, but it only has something to")
+                    print("do while you are MOVING - the camera only exists relative to the")
+                    print("player. Walk a few steps, then:")
+                    print("    python tools/scroll_fix.py --walk-subpixel report")
+                    print()
                 print(_eval(b, SUBPIXEL_REPORT))
         elif args.selftest_subpixel:
             selftest_subpixel(b)
