@@ -865,6 +865,8 @@ s.arrived = s.arrived or 0
 s.n = 0
 s.DIST = 16
 s.dt = 16.95
+s.tw = tw
+s.chist = {}
 -- The engine's own nominal frame time is the right basis for the schedule: it is
 -- exactly 1000/fps (16.949152542373 here) and our tile duration is 16 x that, so
 -- duration / msPerFrame lands on exactly 16.0. Deriving the frame count from a
@@ -921,6 +923,20 @@ end
 
 s.list = findList()
 
+-- The engine interpolates along the game's easing curve, which is NOT a straight
+-- line: measured per-frame steps ranged 0.33 .. 1.25 px around the ideal 1.00. The
+-- whole-pixel rounding absorbs that, but the CAMERA is round(sprite + offset), and a
+-- position wobbling by a quarter pixel can still tip that rounding to 0 or to 2. So
+-- the interpolation is made linear: the position then advances exactly 1.0000 px per
+-- frame, and the camera - being that position rounded - advances exactly 1.
+local function linearEasing(t, d, b, c)
+  if not d or d <= 0 then return b end
+  local p = t / d
+  if p > 1 then p = 1 elseif p < 0 then p = 0 end
+  return b + (c or 0) * p
+end
+s.linear = linearEasing
+
 local function playerSprite()
   local spr
   pcall(function()
@@ -931,6 +947,26 @@ local function playerSprite()
 end
 playerSprite()
 
+local function wrapEasing()
+  local inst
+  pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+  if type(inst) ~= 'table' or inst == s.eased then return end
+  local e = inst.getEasing
+  if type(e) == 'function' then
+    s.origEasing, s.easeInst = e, inst
+    inst.getEasing = function(self, ...) return s.linear end
+    s.eases = (s.eases or 0) + 1
+  end
+  local g = inst.getGridMoveEasing
+  if type(g) == 'function' then
+    s.origGridEasing, s.gridEaseInst = g, inst
+    inst.getGridMoveEasing = function(self, ...) return s.linear end
+    s.eases = (s.eases or 0) + 1
+  end
+  s.eased = inst
+end
+wrapEasing()
+
 local last = system.getTimer()
 local function tick()
   local st = _G.__walklock
@@ -940,7 +976,7 @@ local function tick()
   last = now
   if d > 4 and d < 60 then st.dt = st.dt * 0.9 + d * 0.1 end
   st.n = st.n + 1
-  if st.n % 120 == 0 then playerSprite() end
+  if st.n % 120 == 0 then playerSprite(); wrapEasing() end
   do  -- what actually happened to the sprite this frame
     local spr = st.sprite
     if type(spr) == 'table' and type(spr.x) == 'number' then
@@ -956,6 +992,20 @@ local function tick()
         end
       end
       st.mx, st.my = spr.x, spr.y
+    end
+    local tw2 = st.tw
+    if type(tw2) == 'table' and type(tw2.x) == 'number' then
+      if st.cx then
+        local d = math.abs(tw2.x - st.cx) + math.abs(tw2.y - st.cy)
+        if d > 0.001 then
+          st.cn = (st.cn or 0) + 1
+          st.cmin = math.min(st.cmin or d, d)
+          st.cmax = math.max(st.cmax or d, d)
+          local b = math.floor(d + 0.5)
+          st.chist[b] = (st.chist[b] or 0) + 1
+        end
+      end
+      st.cx, st.cy = tw2.x, tw2.y
     end
   end
   if not st.list then
@@ -1010,6 +1060,17 @@ return table.concat({
     tostring(s.on), s.moves or 0, s.adj or 0, s.arrived or 0, live),
   string.format('frame time %.2f ms  ->  a 271 ms tile takes %d frames = %.2f px/frame',
     s.dt or 0, f, 16 / f),
+  (function()
+    local t = {}
+    for k, c in pairs(s.chist or {}) do t[#t + 1] = { k, c } end
+    table.sort(t, function(a, b) return a[1] < b[1] end)
+    local o = {}
+    for _, r in ipairs(t) do o[#o + 1] = string.format('%dpx=%d', r[1], r[2]) end
+    return string.format('CAMERA step: %d frames, min %.4f, max %.4f   histogram %s',
+      s.cn or 0, s.cmin or 0, s.cmax or 0,
+      (#o > 0) and table.concat(o, '  ') or '(nothing yet)')
+  end)(),
+  string.format('easing: linear installed on %s spawnable(s)', tostring(s.eases or 0)),
   string.format('measured sprite step: %d frames, mean %.4f px/frame, min %.4f, max %.4f',
     s.mn or 0, (s.msum or 0) / math.max(1, s.mn or 1), s.mmin or 0, s.mmax or 0),
   'step histogram: ' .. (function()
@@ -1037,6 +1098,12 @@ s.on = false
 s.active = false
 if s.l then Runtime:removeEventListener('enterFrame', s.l); s.l = nil end
 if s.timer then timer.cancel(s.timer); s.timer = nil end
+-- hand the easing back too: it is a method replacement, so otherwise it outlives
+-- the lock inside this game process
+if s.easeInst and s.origEasing then s.easeInst.getEasing = s.origEasing end
+if s.gridEaseInst and s.origGridEasing then
+  s.gridEaseInst.getGridMoveEasing = s.origGridEasing
+end
 _G.__walklock_old = s
 _G.__walklock = nil
 return 'walk lock OFF - the game drives the sprite position again'
