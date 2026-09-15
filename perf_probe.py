@@ -12,6 +12,7 @@ Usage (game must be running):
     python tools/perf_probe.py --seconds 10
 """
 import argparse
+import re
 import sys
 import time
 
@@ -32,10 +33,19 @@ local function tick()
 end
 p.listener = tick
 Runtime:addEventListener('enterFrame', tick)
-p.meta = string.format('targetFps=%s timeScale=%s avgDelta=%.4f gcKB=%.0f texKB=%s kids=%d',
-  tostring(display.fps), tostring(display.timeScale), display.getAverageDelta(),
-  collectgarbage('count'), tostring(system.getInfo('textureMemoryUsed')),
-  display.getCurrentStage().numChildren)
+
+local function safe(f)
+  local ok, v = pcall(f)
+  if ok and v ~= nil then return tostring(v) end
+  return '?'
+end
+p.meta = string.format('targetFps=%s actualFps=%s timeScale=%s gcKB=%s texKB=%s kids=%s',
+  safe(function() return display.fps end),
+  safe(function() return display.actualFps end),
+  safe(function() return display.timeScale end),
+  safe(function() return math.floor(collectgarbage('count')) end),
+  safe(function() return system.getInfo('textureMemoryUsed') end),
+  safe(function() return display.getCurrentStage().numChildren end))
 return p.meta
 """
 
@@ -119,10 +129,149 @@ def show(d, seconds):
     print(f"   frames > 50ms          : {d.get('over50ms')} ({100 * int(d['over50ms']) / n:.1f}%)")
 
 
+CAMERA_INSTALL = r"""
+local stage = display.getCurrentStage()
+local list = {}
+local player = nil
+pcall(function()
+  local sh = _G.spawnableHelper
+  if sh and sh.getPlayerSpawnable then
+    local ok, p = pcall(function() return sh.getPlayerSpawnable(sh) end)
+    if ok and p then player = p end
+  end
+end)
+
+-- the camera/world group has to be an ancestor of the player sprite, so walk
+-- up from the player instead of guessing at stage children
+local chain = {}
+if player then
+  local o = player
+  for _ = 1, 8 do
+    local p = nil
+    pcall(function() p = o.parent end)
+    if not p then break end
+    chain[#chain + 1] = p
+    o = p
+  end
+end
+for i = 1, #chain do list[#list + 1] = chain[i] end
+
+local s = { list = list, player = player, rows = {}, frames = 0 }
+_G.__cam = s
+local function tick()
+  s.frames = s.frames + 1
+  for i = 1, #list do
+    local o = list[i]
+    local row = s.rows[i]
+    if not row then row = {}; s.rows[i] = row end
+    local ok, x, y = pcall(function() return o.x, o.y end)
+    if ok then row[#row + 1] = { x, y } end
+  end
+  if player then
+    s.prow = s.prow or {}
+    local ok, x, y = pcall(function() return player.x, player.y end)
+    if ok then s.prow[#s.prow + 1] = { x, y } end
+  end
+end
+s.listener = tick
+Runtime:addEventListener('enterFrame', tick)
+return 'player=' .. tostring(player) .. '  ancestors=' .. #chain
+"""
+
+CAMERA_COLLECT = r"""
+local s = _G.__cam
+if not s then return '!none!' end
+Runtime:removeEventListener('enterFrame', s.listener)
+_G.__cam = nil
+local out, report = {}, {}
+if s.prow and #s.prow > 1 then
+  out[#out + 1] = string.format('player moved (%d,%d) over %d frames',
+    s.prow[#s.prow][1] - s.prow[1][1], s.prow[#s.prow][2] - s.prow[1][2], #s.prow)
+else
+  out[#out + 1] = 'player: no samples'
+end
+for i = 1, #s.rows do
+  local row = s.rows[i]
+  if row then
+    local moved, seq = 0, {}
+    for k = 2, #row do
+      local dx = row[k][1] - row[k - 1][1]
+      local dy = row[k][2] - row[k - 1][2]
+      if dx ~= 0 or dy ~= 0 then moved = moved + 1 end
+      if #seq < 40 then seq[#seq + 1] = string.format('%d,%d', dx, dy) end
+    end
+    if moved > 0 then
+      report[#report + 1] = {addr = tostring(s.list[i]), moved = moved, frames = #row, seq = seq,
+                             sx = row[#row][1] - row[1][1], sy = row[#row][2] - row[1][2]}
+    end
+  end
+end
+table.sort(report, function(a, b) return a.moved > b.moved end)
+out[#out + 1] = string.format('frames=%d  moving groups=%d', s.frames, #report)
+for r = 1, math.min(#report, 4) do
+  local e = report[r]
+  out[#out + 1] = string.format('MOVED %s  moved=%d/%d frames  span=(%d,%d)',
+    e.addr, e.moved, e.frames, e.sx, e.sy)
+  out[#out + 1] = '   per-frame (dx,dy): ' .. table.concat(e.seq, ' ')
+end
+return table.concat(out, '\n')
+"""
+
+
+CAMERA_STATUS = r"""
+local s = _G.__cam
+if not s then return '!none!' end
+local prow = s.prow
+if not prow or #prow < 2 then return string.format('frames=%d moved=0', s.frames) end
+local dx = prow[#prow][1] - prow[1][1]
+local dy = prow[#prow][2] - prow[1][2]
+return string.format('frames=%d moved=%d', s.frames, math.abs(dx) + math.abs(dy))
+"""
+
+CAMERA_RESET = r"""
+local s = _G.__cam
+if not s then return '!none!' end
+s.rows, s.prow, s.frames = {}, {}, 0
+return 'reset'
+"""
+
+
+def camera(seconds, wait=60.0):
+    b = Bridge("coromon.exe", hooks=MINIMAL_HOOKS)
+    for _ in range(150):
+        if b.status().get("state"):
+            break
+        time.sleep(0.2)
+    r = b.eval(CAMERA_INSTALL, timeout=20.0)
+    print("install:", r.get("out") or r.get("err"))
+    print(f"waiting for you to walk in-game (up to {wait:g}s) ...")
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        st = b.eval(CAMERA_STATUS, timeout=10.0)
+        out = st.get("out") or ""
+        m = re.search(r"moved=(\d+)", out)
+        if m and int(m.group(1)) > 4:
+            print(f"movement detected ({m.group(1)} px) - sampling {seconds:g}s ...")
+            break
+        time.sleep(0.4)
+    else:
+        print("no movement detected - walk around and re-run")
+        b.eval(CAMERA_COLLECT, timeout=20.0)
+        b.detach()
+        return
+    b.eval(CAMERA_RESET, timeout=10.0)
+    time.sleep(seconds)
+    res = b.eval(CAMERA_COLLECT, timeout=20.0)
+    print(res.get("out") or res.get("err"))
+    b.detach()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--process", default="coromon.exe")
     ap.add_argument("--seconds", type=float, default=6.0, help="seconds per mode")
+    ap.add_argument("--camera", action="store_true",
+                    help="sample the stage/background position every frame instead")
     args = ap.parse_args()
 
     try:
@@ -130,6 +279,10 @@ def main():
     except ImportError:
         print("frida is not installed")
         return 1
+
+    if args.camera:
+        camera(args.seconds)
+        return 0
 
     print("Measuring the game with a minimal hook set, then with the full set.")
     print("Move around in-game while this runs so the world is actually scrolling.")
