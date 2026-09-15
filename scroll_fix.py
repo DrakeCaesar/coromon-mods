@@ -1026,73 +1026,82 @@ def main():
             print(_eval(b, code))
             print(_eval(b, WALK_REPORT))
         elif args.walk_calibrate:
-            # Pure closed loop: start from whatever is installed (stock = no
-            # change), then correct using the MEASURED step. No feed-forward
-            # guess, so there is no assumption about tile size, frame time or
-            # the shape of the formula that could be wrong.
+            # Pure closed loop: start from stock (no change), then correct using
+            # the MEASURED step. No feed-forward guess, so there is no assumption
+            # about tile size, frame time, or the shape of the formula.
+            #
+            # Runs INDEFINITELY by default (--iters N to bound it) and keeps
+            # refining after it reaches target, so the value can be watched for
+            # stability before being locked in as a constant. Ctrl+C prints the
+            # lockable durations.
             print(_eval(b, WALK_FIX.replace(
                 "__FACTORS__", _lua_factors({"normal": 1.0, "fast": 1.0}))))
             print(_eval(b, WALK_REPORT))
-            if args.iters <= 0:
-                args.iters = 30          # effectively "until it converges"
+            print()
+            print("Calibrating indefinitely - KEEP WALKING. Press Ctrl+C to stop")
+            print(f"and print the durations to lock in. Each pass samples {args.seconds:g}s.")
+            print()
+            print("  pass  frames  moved%     step px/frame    normal_x     fast_x   action")
             hist = []
-            for it in range(1, args.iters + 1):
+            try:
+                for it in range(1, (args.iters if args.iters > 0 else 10 ** 9) + 1):
+                    print(_eval(b, RATE_INSTALL))
+                    time.sleep(args.seconds)
+                    raw = _eval(b, RATE_COLLECT).strip()
+                    try:
+                        parts = raw.split("\t")
+                        n = int(parts[0])
+                        sx, mx = float(parts[1]), int(parts[2])
+                        sy, my = float(parts[3]), int(parts[4])
+                    except Exception:
+                        print(f"  {it:<6} unparsable: {raw!r}")
+                        continue
+                    if n <= 0:
+                        print(f"  {it:<6} no frames")
+                        continue
+                    if mx >= my:
+                        total, moved, axis = sx, mx, "x"
+                    else:
+                        total, moved, axis = sy, my, "y"
+                    ratio = moved / n
+                    rate = total / n
+                    hist.append((it, n, ratio, rate))
+                    cur = _parse_factors(_eval(b, WALK_FACTORS))
+                    if ratio < 0.7:
+                        action = "not walking - keep moving"
+                    elif abs(rate - 1.0) < 0.002:
+                        action = "on target"
+                    else:
+                        # step is inversely proportional to duration, so
+                        # multiplying by the measured error drives step -> 1
+                        _eval(b, WALK_ADJUST.replace("__RATE__", repr(rate)))
+                        cur = _parse_factors(_eval(b, WALK_FACTORS))
+                        action = f"adjust x{rate:.5f}"
+                    print(f"  {it:<6}{n:<8}{ratio * 100:>5.1f}   {rate:>11.5f}   "
+                          f"{cur.get('normal', 0):>9.6f}  {cur.get('fast', 0):>9.6f}   {action}")
+            except KeyboardInterrupt:
                 print()
-                print(f"--- pass {it}    keep walking for {args.seconds:g}s ---")
-                print(_eval(b, RATE_INSTALL))
-                time.sleep(args.seconds)
-                raw = _eval(b, RATE_COLLECT).strip()
-                try:
-                    parts = raw.split("\t")
-                    n = int(parts[0])
-                    sx, mx = float(parts[1]), int(parts[2])
-                    sy, my = float(parts[3]), int(parts[4])
-                except Exception:
-                    print(f"  unparsable: {raw!r}")
-                    break
-                if n <= 0:
-                    print("  no frames")
-                    break
-                if mx >= my:
-                    total, moved, axis = sx, mx, "x"
-                else:
-                    total, moved, axis = sy, my, "y"
-                ratio = moved / n
-                rate = total / n
-                print(f"  frames={n}  axis={axis}  moved on {ratio * 100:.1f}% of frames")
-                print(f"  measured step = {rate:.5f} px/frame   (want 1.00000)")
-                if ratio < 0.7:
-                    print("  not enough continuous walking - keep walking without stopping")
-                    continue
-                hist.append((it, n, ratio, rate))
-                if abs(rate - 1.0) < 0.002:
-                    print("  CONVERGED - step is within 0.002 of 1 px/frame")
-                    break
-                if len(hist) > 1 and abs(hist[-2][3] - rate) < 0.001:
-                    print("  stable - the last two readings agree, stopping")
-                    break
-                # step is inversely proportional to duration, so multiplying the
-                # current multipliers by the measured error drives step -> 1
-                print("  " + _eval(b, WALK_ADJUST.replace("__RATE__", repr(rate))))
-                print("  now " + _eval(b, WALK_FACTORS))
+                print("---- stopped by user ----")
 
-            print()
-            print("  pass   frames   moved%    step px/frame")
-            for (i2, n2, r2, v2) in hist:
-                print(f"  {i2:<7}{n2:<9}{r2 * 100:>5.1f}    {v2:>10.5f}")
-            print()
             cur = _parse_factors(_eval(b, WALK_FACTORS))
+            print()
             print(_eval(b, WALK_REPORT))
-            if cur:
-                nm = 280.0 * cur.get("normal", 1.0)
-                fm = 133.0 * cur.get("fast", 1.0)
-                sm = 400.0 * cur.get("slow", nm / 280.0)
+            if cur and hist:
+                nmms = 280.0 * cur.get("normal", 1.0)
+                fmms = 133.0 * cur.get("fast", 1.0)
+                smms = 400.0 * cur.get("slow", 1.0)
+                rates = [v for (_, _, r, v) in hist if r >= 0.7]
+                print()
+                print(f"passes run: {len(hist)}   usable readings: {len(rates)}")
+                if rates:
+                    best = min(rates, key=lambda x: abs(x - 1.0))
+                    print(f"  last step = {rates[-1]:.5f}    closest to 1.0 = {best:.5f}")
                 print()
                 print("LOCKED FOR THIS FRAME RATE")
-                print(f"  normal = {nm:.3f} ms     fast = {fm:.3f} ms     slow = {sm:.3f} ms")
+                print(f"  normal = {nmms:.3f} ms     fast = {fmms:.3f} ms     slow = {smms:.3f} ms")
                 print()
                 print("Lock that in as a fixed constant (no frame-time measurement):")
-                print(f"  python tools/scroll_fix.py --walk-const {nm:.3f} {fm:.3f}")
+                print(f"  python tools/scroll_fix.py --walk-const {nmms:.3f} {fmms:.3f}")
         elif args.walk_const is not None:
             # Absolute durations, no measurement - reproducible and lockable.
             nm, fm = args.walk_const
