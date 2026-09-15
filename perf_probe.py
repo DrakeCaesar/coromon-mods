@@ -275,7 +275,7 @@ local function walk(o, path, d)
   pcall(function() n = o.numChildren or #o end)
   if n and n > 0 then
     objs[#objs + 1] = o
-    paths[#paths + 1] = path .. ' (' .. tostring(o) .. ')'
+    paths[#paths + 1] = path
   end
   for i = 1, math.min(n, 60) do
     local c = nil
@@ -284,53 +284,86 @@ local function walk(o, path, d)
   end
 end
 walk(stage, 'stage', 0)
-local s = { objs = objs, paths = paths, rows = {}, ticks = 0 }
+local xs, ys = {}, {}
+for i = 1, #objs do xs[i] = {}; ys[i] = {} end
+local s = { objs = objs, paths = paths, xs = xs, ys = ys, times = {}, frames = 0 }
 _G.__find = s
--- sample at 10 Hz: cheap enough not to disturb the game, plenty to spot what moves
-s.timer = timer.performWithDelay(100, function()
-  s.ticks = s.ticks + 1
+local function getxy(o) return o.x, o.y end
+-- every frame, so a position that only jumps every N frames is caught
+local function sample()
+  s.frames = s.frames + 1
+  local f = s.frames
+  if f > 4000 then return false end
+  s.times[f] = system.getTimer()
   for i = 1, #objs do
-    local ok, x, y = pcall(function() return objs[i].x, objs[i].y end)
-    if ok then
-      local row = s.rows[i]
-      if not row then row = {}; s.rows[i] = row end
-      row[#row + 1] = { x, y }
-    end
+    local ok, x, y = pcall(getxy, objs[i])
+    if ok and x then xs[i][f] = x; ys[i][f] = y end
   end
-end, 0)
-return 'scanned ' .. #objs .. ' groups/objects (depth<=6)'
+  return false
+end
+s.listener = sample
+Runtime:addEventListener('enterFrame', sample)
+return 'scanned ' .. #objs .. ' groups/objects (depth<=6), sampling every frame'
 """
 
 FINDER_COLLECT = r"""
 local s = _G.__find
 if not s then return '!none!' end
-if s.timer then timer.cancel(s.timer) end
+if s.listener then Runtime:removeEventListener('enterFrame', s.listener); s.listener = nil end
 _G.__find = nil
-local out, report = {}, {}
-for i = 1, #s.rows do
-  local row = s.rows[i]
-  if row and #row > 1 then
-    local moved, seq = 0, {}
-    for k = 2, #row do
-      local dx = row[k][1] - row[k - 1][1]
-      local dy = row[k][2] - row[k - 1][2]
-      if dx ~= 0 or dy ~= 0 then moved = moved + 1 end
-      if #seq < 25 then seq[#seq + 1] = string.format('%d,%d', dx, dy) end
+local out = {}
+-- frame pacing over the same window, so a position stall can be tied to a frame
+local n, sum, mx = 0, 0, 0
+for k = 2, s.frames do
+  local d = s.times[k] - s.times[k - 1]
+  if d and d > 0 then
+    n = n + 1; sum = sum + d
+    if d > mx then mx = d end
+  end
+end
+out[#out + 1] = string.format('frames=%d  mean=%.2fms  max=%dms', s.frames, n > 0 and sum / n or 0, mx)
+
+local report = {}
+for i = 1, #s.objs do
+  local x = s.xs[i]
+  local counts, run, longest, seq = {}, 0, 0, {}
+  local prev, moved = nil, 0
+  for f = 1, s.frames do
+    local v = x[f]
+    if v then
+      if prev then
+        local d = v - prev
+        local ad = d < 0 and -d or d
+        counts[ad] = (counts[ad] or 0) + 1
+        if ad == 0 then
+          run = run + 1
+          if run > longest then longest = run end
+        else
+          moved = moved + 1; run = 0
+        end
+        if #seq < 80 then seq[#seq + 1] = ad end
+      end
+      prev = v
     end
-    if moved > 0 then
-      report[#report + 1] = {path = s.paths[i], moved = moved, n = #row - 1,
-                             span = string.format('(%d,%d)', row[#row][1] - row[1][1],
-                                                  row[#row][2] - row[1][2]),
-                             seq = seq}
-    end
+  end
+  if moved > 0 then
+    local keys = {}
+    for d in pairs(counts) do keys[#keys + 1] = d end
+    table.sort(keys)
+    report[#report + 1] = { path = s.paths[i], moved = moved, longest = longest,
+                           keys = keys, counts = counts, seq = seq }
   end
 end
 table.sort(report, function(a, b) return a.moved > b.moved end)
-out[#out + 1] = string.format('ticks=%d  objects that moved=%d', s.ticks, #report)
+out[#out + 1] = string.format('objects that moved=%d', #report)
 for r = 1, math.min(#report, 6) do
   local e = report[r]
-  out[#out + 1] = string.format('MOVER %s  moved %d/%d samples  span=%s', e.path, e.moved, e.n, e.span)
-  out[#out + 1] = '   10Hz deltas: ' .. table.concat(e.seq, ' ')
+  local parts = {}
+  for _, d in ipairs(e.keys) do parts[#parts + 1] = string.format('%dpx=%d', d, e.counts[d]) end
+  out[#out + 1] = string.format('MOVER %s   moved on %d frames   longest run of 0px = %d',
+    e.path, e.moved, e.longest)
+  out[#out + 1] = '   per-frame |dx| histogram: ' .. table.concat(parts, '  ')
+  out[#out + 1] = '   first 80 |dx|: ' .. table.concat(e.seq, ' ')
 end
 return table.concat(out, '\n')
 """
@@ -344,7 +377,7 @@ def finder(seconds):
         time.sleep(0.2)
     r = b.eval(FINDER_INSTALL, timeout=30.0)
     print("install:", r.get("out") or r.get("err"))
-    print(f"walk in-game for {seconds:g}s ...")
+    print(f"walk in-game for {seconds:g}s (keep moving the whole time) ...")
     time.sleep(seconds)
     res = b.eval(FINDER_COLLECT, timeout=30.0)
     print(res.get("out") or res.get("err"))
@@ -359,6 +392,8 @@ def main():
                     help="sample the stage/background position every frame instead")
     ap.add_argument("--finder", action="store_true",
                     help="find which display object scrolls the world")
+    ap.add_argument("--track", action="store_true",
+                    help="deprecated: --finder now samples every frame")
     args = ap.parse_args()
 
     try:
