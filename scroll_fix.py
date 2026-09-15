@@ -1010,16 +1010,22 @@ local function drive(spr, x, y)
     -- own +-3% interpolation error.
     local ds = math.abs(st.dirx) + math.abs(st.diry)
     if ds > 0 then
-      local along = ((x - st.sx) * st.dirx + (y - st.sy) * st.diry) / (ds * st.step)
+      -- the request may be for either object, and the character sits at an offset
+      -- from the shadow, so measure from THAT object's own start of the move
+      local off = (spr == st.shadow) and 0 or 1
+      local pbx = st.sx + off * (st.dox or 0)
+      local pby = st.sy + off * (st.doy or 0)
+      local along = ((x - pbx) * st.dirx + (y - pby) * st.diry) / (ds * st.step)
       local k = math.floor(along + 0.5)
+      local last = math.floor(st.DIST / st.step + 0.5)      -- frames in the move
       if k > (st.n or 0) then
-        if k > st.DIST then k = st.DIST end
+        if k > last then k = last end
         st.n = k
-        if k >= st.DIST then
+        if k >= last then
           st.armed, st.hold = false, true
           st.tail = 1
         end
-        place(st.sx + st.dirx * k, st.sy + st.diry * k)
+        place(st.sx + st.dirx * k * st.step, st.sy + st.diry * k * st.step)
         st.moved = st.moved + 1
       end
     end
