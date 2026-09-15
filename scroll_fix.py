@@ -703,28 +703,49 @@ return string.format('walk fix active: normal x%.4f  fast x%.4f  (watchdog re-ap
   factors.normal, factors.fast)
 """
 
-# Closed-loop calibration. Sums the world's actual per-frame displacement over a
-# walking window, so the measured rate includes the game's own rounding. Using
-# TOTAL frames as the denominator (not "frames that moved") matters: at a true
-# rate below 1 the game emits occasional 0-px frames, and excluding those would
-# bias the estimate upward and hide the error.
+# Closed-loop calibration.
+#
+# The estimator must be immune to PAUSES. Dividing total displacement by total
+# frames does not work: when the step is about 1 px, that ratio is really the
+# duty cycle - "what fraction of frames was I walking" - not the step size. A
+# pause then looks like "too fast" and the loop winds the speed up forever.
+#
+# So: track runs of continuous movement, closed after 6 consecutive still frames
+# (~100 ms). A single 0-px frame inside a walk does NOT close the run, because at
+# a true rate just under 1 the game emits isolated 0-px frames as part of normal
+# walking. The rate is then sum(|d|)/frames over the longest run.
 RATE_INSTALL = PRELUDE + r"""
 local MTE, tw = world()
 if type(tw) ~= 'table' then return '!no tiledWorld - are you in the overworld?!' end
-local s = { tw = tw, n = 0, sx = 0, sy = 0, mx = 0, my = 0 }
+local s = { tw = tw, n = 0, zeros = 0, runN = 0, runSum = 0,
+            bestN = 0, bestSum = 0, runs = 0 }
 _G.__rate = s
 local function f()
   s.n = s.n + 1
   if s.n > 4000 then return false end
   local x, y = tw.x, tw.y
-  if s.lx and x ~= s.lx then s.sx = s.sx + math.abs(x - s.lx); s.mx = s.mx + 1 end
-  if s.ly and y ~= s.ly then s.sy = s.sy + math.abs(y - s.ly); s.my = s.my + 1 end
+  local d = 0
+  if s.lx then d = math.abs(x - s.lx) + math.abs(y - s.ly) end
   s.lx, s.ly = x, y
+  s.runN = s.runN + 1
+  s.runSum = s.runSum + d
+  if d > 0 then
+    s.zeros = 0
+  else
+    s.zeros = s.zeros + 1
+    if s.zeros >= 6 then
+      -- a real pause: drop its frames and close the run
+      s.runN = s.runN - s.zeros
+      s.runs = s.runs + 1
+      if s.runN > s.bestN then s.bestN = s.runN; s.bestSum = s.runSum end
+      s.runN, s.runSum, s.zeros = 0, 0, 0
+    end
+  end
   return false
 end
 s.l = f
 Runtime:addEventListener('enterFrame', f)
-return 'sampling tiledWorld displacement'
+return 'sampling tiledWorld displacement (longest continuous walk is what counts)'
 """
 
 RATE_COLLECT = r"""
@@ -732,9 +753,10 @@ local s = _G.__rate
 if not s then return '!none!' end
 Runtime:removeEventListener('enterFrame', s.l)
 _G.__rate = nil
-local n = s.n - 1
-if n <= 0 then return '0\t0\t0\t0\t0' end
-return string.format('%d\t%.4f\t%d\t%.4f\t%d', n, s.sx, s.mx, s.sy, s.my)
+-- close whatever run is still open at the end
+s.runN = s.runN - s.zeros
+if s.runN > s.bestN then s.bestN = s.runN; s.bestSum = s.runSum end
+return string.format('%d\t%d\t%.4f\t%d', s.n - 1, s.bestN, s.bestSum, s.runs)
 """
 
 WALK_ADJUST = PRELUDE + r"""
@@ -1041,7 +1063,7 @@ def main():
             print("Calibrating indefinitely - KEEP WALKING. Press Ctrl+C to stop")
             print(f"and print the durations to lock in. Each pass samples {args.seconds:g}s.")
             print()
-            print("  pass  frames  moved%     step px/frame    normal_x     fast_x   action")
+            print("  pass  frames  walk%     step px/frame    normal_x     fast_x   action")
             hist = []
             try:
                 for it in range(1, (args.iters if args.iters > 0 else 10 ** 9) + 1):
@@ -1050,33 +1072,30 @@ def main():
                     raw = _eval(b, RATE_COLLECT).strip()
                     try:
                         parts = raw.split("\t")
-                        n = int(parts[0])
-                        sx, mx = float(parts[1]), int(parts[2])
-                        sy, my = float(parts[3]), int(parts[4])
+                        n = int(parts[0])          # total frames sampled
+                        runN = int(parts[1])       # longest uninterrupted walk
+                        runSum = float(parts[2])
                     except Exception:
                         print(f"  {it:<6} unparsable: {raw!r}")
                         continue
-                    if n <= 0:
-                        print(f"  {it:<6} no frames")
+                    if runN < 60:
+                        print(f"  {it:<6} no continuous walk "
+                              f"({runN} frames in the longest stretch) - keep walking")
                         continue
-                    if mx >= my:
-                        total, moved, axis = sx, mx, "x"
-                    else:
-                        total, moved, axis = sy, my, "y"
-                    ratio = moved / n
-                    rate = total / n
+                    rate = runSum / runN
+                    ratio = runN / n
                     hist.append((it, n, ratio, rate))
                     cur = _parse_factors(_eval(b, WALK_FACTORS))
-                    if ratio < 0.7:
-                        action = "not walking - keep moving"
-                    elif abs(rate - 1.0) < 0.002:
+                    if abs(rate - 1.0) <= 0.005:
                         action = "on target"
                     else:
-                        # step is inversely proportional to duration, so
-                        # multiplying by the measured error drives step -> 1
-                        _eval(b, WALK_ADJUST.replace("__RATE__", repr(rate)))
+                        # DAMPED. Applying the full measured error makes the loop
+                        # chase quantisation noise and wander instead of settling:
+                        # half the error in log space converges smoothly.
+                        corr = rate ** 0.5
+                        _eval(b, WALK_ADJUST.replace("__RATE__", repr(corr)))
                         cur = _parse_factors(_eval(b, WALK_FACTORS))
-                        action = f"adjust x{rate:.5f}"
+                        action = f"adjust x{corr:.5f}"
                     print(f"  {it:<6}{n:<8}{ratio * 100:>5.1f}   {rate:>11.5f}   "
                           f"{cur.get('normal', 0):>9.6f}  {cur.get('fast', 0):>9.6f}   {action}")
             except KeyboardInterrupt:
