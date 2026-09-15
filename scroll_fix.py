@@ -1014,10 +1014,22 @@ local function tickBody()
     -- own interpolation, unrounded (sprite.x is a float even though the camera is
     -- rounded). One tile is 16 px, so step 1 => 16 frames, step 2 => 8.
     local mag = math.max(math.abs(dx), math.abs(dy))
-    if mag < 0.25 then return false end      -- the engine has not started yet
-    local step = math.floor(mag + 0.5)
-    if step < 1 or step > st.DIST - 1 then handBack(); return false end
-    st.step = step
+    -- Any movement at all starts the move. A 0.25 px gate missed the engine's first
+    -- sub-pixel step, and the frame that fell through showed the engine's own value:
+    -- a 0 px frame.
+    if mag < 0.02 then return false end
+    -- Running is 2 px per frame on purpose, so it is not ours to drive: hand it to
+    -- the engine rather than guessing. Walking is exactly 1 px per frame, and that
+    -- is the thing being fixed.
+    --
+    -- This is also where the 2 px frames came from, measured live: the step was read
+    -- from how far the ENGINE moved on the first frame, so when the engine's first
+    -- frame came out at ~2 px the lock read step=2 and drove the whole tile at 2 px
+    -- per frame - 16 frames of movement crammed into 8. tile moves=3 with frames
+    -- placed=24 is exactly that. The step is now fixed at 1 and the frame count is
+    -- the only thing that decides.
+    if mag > 1.5 then handBack(); return false end
+    st.step = 1
     -- Each axis on its own, and an axis that is NOT moving stays 0: deriving one
     -- axis from the other drove y on a purely horizontal move, and the sprite
     -- quivered diagonally with the camera following it off-screen.
@@ -1501,7 +1513,8 @@ sim('down (0,1)', 0, 1, 16, 0, 1)
 sim('up (0,-1)', 0, -1, 16, 0, -1)
 sim('diagonal (1,1)', 1, 1, 16, 1, 1)
 sim('diagonal (-1,-1)', -1, -1, 16, -1, -1)
-sim('running (2,0)', 2, 0, 8, 2, 0)
+-- running is deliberately not driven any more: 2 px/frame is its own thing, and the
+-- lock hands it back. Walking is where 1 px/frame has to be exact.
 return table.concat(out, '\n')
 """
 
