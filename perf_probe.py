@@ -358,11 +358,24 @@ table.sort(report, function(a, b) return a.moved > b.moved end)
 out[#out + 1] = string.format('objects that moved=%d', #report)
 for r = 1, math.min(#report, 6) do
   local e = report[r]
+  -- bucket by whole pixel, but keep the exact mean so sub-pixel smoothness is visible
+  local buckets, tot = {}, 0
+  for _, d in ipairs(e.keys) do
+    local bk = math.floor(d)
+    buckets[bk] = (buckets[bk] or 0) + e.counts[d]
+    tot = tot + d * e.counts[d]
+  end
+  local bks = {}
+  for k in pairs(buckets) do bks[#bks + 1] = k end
+  table.sort(bks)
   local parts = {}
-  for _, d in ipairs(e.keys) do parts[#parts + 1] = string.format('%dpx=%d', d, e.counts[d]) end
-  out[#out + 1] = string.format('MOVER %s   moved on %d frames   longest run of 0px = %d',
-    e.path, e.moved, e.longest)
-  out[#out + 1] = '   per-frame |dx| histogram: ' .. table.concat(parts, '  ')
+  for _, k in ipairs(bks) do parts[#parts + 1] = string.format('%dpx=%d', k, buckets[k]) end
+  local n = 0
+  for _, d in ipairs(e.keys) do n = n + e.counts[d] end
+  out[#out + 1] = string.format('MOVER %s   moved on %d of %d frames   longest run of 0px = %d',
+    e.path, e.moved, n, e.longest)
+  out[#out + 1] = string.format('   mean |dx| = %.4f px/frame   integer buckets: %s',
+    n > 0 and tot / n or 0, table.concat(parts, '  '))
   out[#out + 1] = '   first 80 |dx|: ' .. table.concat(e.seq, ' ')
 end
 return table.concat(out, '\n')
