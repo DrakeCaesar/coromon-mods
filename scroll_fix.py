@@ -822,31 +822,187 @@ return table.concat(out, '\n')
 """
 
 # ---------------------------------------------------------------------------
-# Sub-content-pixel camera.
+# Walk lock: exactly one whole pixel per frame, no exceptions.
 #
-# The game writes the camera focus as math.round(...) - see
-# classes.modules.mte.mte proto at lines 1141-1152:
+# The tile move is interpolated from system.getTimer(), so the step is
+# 16 * dt / duration and any frame-to-frame variation in dt shows up as a 0 px or
+# a 2 px step. Scaling the duration (--walk-fix) only gets the AVERAGE to 1 px,
+# and the engine then rounds the duration to whole ms, so a residual error always
+# survives and surfaces as a 2 px step every ~30 s.
 #
-#     posX = sprite.x + sprite.width * 0.5 + sprite.cameraFocusOffsetX
-#     return math.round(posX), math.round(posY)
+# This takes the position away from the clock and drives it from the rendered
+# frame count instead. On each tile move it records the start position (the
+# sprite sits exactly on the tile centre at that moment), reads the per-frame
+# step off the game's own first frame, then writes
 #
-# That is the ONLY integer quantization on the scroll path (the transition sets
-# sprite.x to a float). So the world can only ever advance in whole content
-# pixels - at this window size, 3 screen pixels at a time.
+#     position = start + direction * step * frames      (capped at one tile)
 #
-# This nudges the camera between those integers by re-adding the fraction the
-# game threw away. It never guesses the game's offset formula or its rounding
-# rule. Instead it self-calibrates the invariant
+# so the sprite advances by exactly `step` px per rendered frame, whatever the
+# frame times do. Because the camera focus is math.round(sprite position), the
+# camera then advances by exactly the same amount, and the player stays centred
+# to the pixel - the sprite's own fractional part cancels against the rounded
+# camera instead of drifting.
 #
-#     tw.x + tx  =  C + frac,    frac in [-0.5, +0.5),  C constant per map
+# Interruptions (cancelled move, turn, warp, map change) are detected by
+# comparing the game's own per-frame delta against the direction we are driving,
+# and it hands that move back rather than fighting.
+# ---------------------------------------------------------------------------
+WALK_LOCK_INSTALL = PRELUDE + r"""
+local MTE, tw = world()
+if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
+
+local s = _G.__walklock or {}
+_G.__walklock = s
+-- older copies of this listener (from a previous install in this process) bail out
+if type(_G.__walklock_old) == 'table' then _G.__walklock_old.on = false end
+s.on = true
+s.moves = s.moves or 0
+s.driven = s.driven or 0
+s.released = s.released or 0
+s.active = false
+s.DIST = 16                     -- content px in one grid move (tilewidth)
+
+local function playerSprite()
+  local spr
+  pcall(function()
+    local i = spawnableHelper:getPlayerSpawnable()
+    if i and i.sprite then spr = i.sprite end
+  end)
+  return spr
+end
+s.sprite = playerSprite()
+
+local function arm()
+  local spr = playerSprite()
+  if type(spr) ~= 'table' then return end
+  s.sprite = spr
+  s.sx, s.sy = spr.x, spr.y   -- the game calls this on the tile centre
+  s.px, s.py = spr.x, spr.y   -- the game's position on the previous frame
+  s.n, s.step = 0, nil
+  s.dirx, s.diry = 0, 0
+  s.active = true
+  s.moves = s.moves + 1
+end
+
+local function wrap(inst)
+  if type(inst) ~= 'table' then return false end
+  local inner = inst.getGridMoveTimeBySpeed
+  if type(inner) ~= 'function' then return false end
+  inst.getGridMoveTimeBySpeed = function(self, ...)
+    local r = inner(self, ...)
+    arm()
+    return r
+  end
+  s.wrapped = inst
+  return true
+end
+
+local function apply()
+  local inst
+  pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+  if type(inst) ~= 'table' or inst == s.wrapped then return end
+  if wrap(inst) then s.reapplies = (s.reapplies or 0) + 1 end
+end
+apply()
+if not s.timer then s.timer = timer.performWithDelay(1000, apply, 0) end
+
+local function handBack()
+  s.released = s.released + 1
+  s.active = false
+end
+
+local function tick()
+  local st = _G.__walklock
+  if not st or not st.on or not st.active or st.tick ~= tick then return false end
+  local spr = st.sprite
+  if type(spr) ~= 'table' or type(spr.x) ~= 'number' then handBack(); return false end
+  if st.n > 64 then handBack(); return false end
+  local x, y = spr.x, spr.y
+  local gx, gy = x - st.sx, y - st.sy               -- offset since the move began
+  local dx, dy = x - st.px, y - st.py               -- THIS frame, which is what the
+  st.px, st.py = x, y                               -- checks below are about
+  if not st.step then
+    -- first frame: read the step and direction off the game's own interpolation
+    -- unrounded - sprite.x is a float even though the camera is rounded
+    local mag = math.max(math.abs(dx), math.abs(dy))
+    if mag < 0.25 then return false end    -- the game has not started moving yet
+    local step = math.floor(mag + 0.5)
+    if step < 1 or step > st.DIST - 1 then handBack(); return false end
+    st.step = step
+    if math.abs(dx) >= math.abs(dy) then
+      st.dirx = (dx > 0) and 1 or -1
+      st.diry = (math.abs(dy) > 0.25) and ((dy > 0) and 1 or -1) or 0
+    else
+      st.diry = (dy > 0) and 1 or -1
+      st.dirx = (math.abs(dx) > 0.25) and ((dx > 0) and 1 or -1) or 0
+    end
+  else
+    -- the game disagrees with the direction we are driving: cancelled move, turn,
+    -- warp, map change. Hand it back rather than fight it.
+    local bad = math.abs(dx) > 4.5 or math.abs(dy) > 4.5
+    if st.dirx ~= 0 and dx * st.dirx < -0.25 then bad = true end
+    if st.diry ~= 0 and dy * st.diry < -0.25 then bad = true end
+    if bad then handBack(); return false end
+  end
+  st.n = st.n + 1
+  local k = math.min(st.n * st.step, st.DIST)
+  spr.x = st.sx + st.dirx * k
+  spr.y = st.sy + st.diry * k
+  st.driven = st.driven + 1
+  return false
+end
+s.l = tick
+s.tick = tick
+Runtime:addEventListener('enterFrame', tick)
+return string.format('walk lock ON (%d moves already queued by the watchdog)', s.reapplies or 0)
+"""
+
+WALK_LOCK_REPORT = PRELUDE + r"""
+local s = _G.__walklock
+if not s then return '!walk lock not installed!' end
+return table.concat({
+  string.format('active=%s  moves armed=%d  frames driven=%d  handed back=%d  re-applies=%d',
+    tostring(s.on), s.moves or 0, s.driven or 0, s.released or 0, s.reapplies or 0),
+  string.format('current move: frame %s  step=%s px/frame  dir=(%s,%s)  start=(%.2f, %.2f)',
+    tostring(s.n or 0), tostring(s.step), tostring(s.dirx), tostring(s.diry),
+    s.sx or 0, s.sy or 0),
+  'expect: frames driven ~= 16 per move for walking (8 for running), step 1 or 2',
+}, '\n')
+"""
+
+WALK_LOCK_REMOVE = r"""
+local s = _G.__walklock
+if not s then return 'walk lock was not installed' end
+s.on = false
+s.active = false
+if s.l then Runtime:removeEventListener('enterFrame', s.l); s.l = nil end
+if s.timer then timer.cancel(s.timer); s.timer = nil end
+_G.__walklock_old = s
+_G.__walklock = nil
+return 'walk lock OFF - the game drives the sprite position again'
+"""
+
+# ---------------------------------------------------------------------------
+# FAILED EXPERIMENT - kept only so the knowledge is not lost, off by default.
 #
-# from the observed min/max of (tw.x + tx) while you walk: the midpoint of that
-# range is C, and the exact target is then just C - tx.
+# Sub-content-pixel camera. The intent was to re-inject the fraction that
+# math.round() discards in the camera focus, so the world could sit between whole
+# content pixels. It does move the camera in fractions (a fractional camera step
+# is impossible for the game to produce on its own, so it was demonstrably live),
+# but it is WRONG in two ways that only showed up in play:
 #
-# Safety: the correction is clamped to +-0.75 content px from the value the game
-# itself wrote, so anything the game does deliberately (map-edge clamping, a
-# camera locked for a cutscene) still wins. We can nudge the world by a fraction
-# of a pixel; we can never override the game's intent.
+#   1. Our copy of the focus formula is off by a constant (y latched at 138.6667
+#      where the game's value is 135). The correction therefore writes a camera
+#      that is not the one the game centred the player on, so the player slowly
+#      drifts off-centre and the camera stops being centred on them.
+#   2. Because the game only writes the camera when it changes, the only way to
+#      keep the latch valid is to re-derive it every frame the player crosses a
+#      pixel - which makes the applied offset depend on the interplay between our
+#      write and the game's, i.e. non-linear camera movement.
+#
+# Lesson: verify that the formula you are inverting reproduces the game's own
+# value EXACTLY (bias 0) before building on it. A constant error is invisible in
+# the derivative (the step size) and only shows up as drift in the absolute.
 # ---------------------------------------------------------------------------
 SUBPIXEL_INSTALL = PRELUDE + r"""
 local MTE, tw = world()
@@ -1377,24 +1533,31 @@ do
 end
 
 -- How far does the player drift on screen while walking? If the camera and the
--- sprite are quantized differently (round() on one, not the other) the player
--- wobbles by up to half a content pixel = 1.5 screen pixels. Pinned is best.
+-- sprite are quantized differently (round() on one, not on the other) the player
+-- wobbles by up to half a content pixel = 1.5 screen pixels. Pinned to 0 is the
+-- goal, and the walk lock should achieve exactly that. Measured per continuous
+-- run: a map change or teleport moves the camera by hundreds of pixels and would
+-- otherwise swamp the number.
 do
-  local px = {}
+  local worst, runs = 0, 0
+  local lo, hi
   for f = 2, n do
-    if inRun[f] and s.sx[f] then px[#px + 1] = s.sx[f] + s.cx[f] end
-  end
-  if #px > 4 then
-    local lo, hi, sum = px[1], px[1], 0
-    for i = 1, #px do
-      if px[i] < lo then lo = px[i] end
-      if px[i] > hi then hi = px[i] end
-      sum = sum + px[i]
+    local jump = (s.cx[f] and s.cx[f - 1]) and math.abs(s.cx[f] - s.cx[f - 1]) > 8
+    if jump or not inRun[f] then
+      if lo and (hi - lo) > worst then worst = hi - lo end
+      lo, hi = nil, nil
+      if jump then runs = runs + 1 end
     end
-    out[#out + 1] = string.format(
-      'player screen offset (sprite.x + tiledWorld.x): range %.4f content px = %.2f screen px',
-      hi - lo, (hi - lo) * 3)
+    if inRun[f] and s.sx[f] then
+      local v = s.sx[f] + s.cx[f]
+      if not lo or v < lo then lo = v end
+      if not hi or v > hi then hi = v end
+    end
   end
+  if lo and (hi - lo) > worst then worst = hi - lo end
+  out[#out + 1] = string.format(
+    'player centring: worst drift %.4f content px = %.2f screen px  (%d separate runs)',
+    worst, worst * 3, runs)
 end
 
 -- The interesting frames are the ones that disagree with the DOMINANT step, not
@@ -1611,6 +1774,10 @@ def main():
                     help="max calibration passes (0 = until it converges, default)")
     ap.add_argument("--walk-report", action="store_true",
                     help="show the baseline getGridMoveTimeBySpeed descriptors")
+    ap.add_argument("--walk-lock", nargs="?", const="on", default=None,
+                    choices=["on", "off", "report"],
+                    help="drive the sprite from the frame count so it advances a whole number "
+                         "of pixels every frame, with no 0 or 2 px steps (on|off|report)")
     ap.add_argument("--walk-diag", nargs="?", const="on", default=None,
                     choices=["on", "off", "report"],
                     help="camera-step recorder: 'on' records in the background while you play "
@@ -1774,6 +1941,13 @@ def main():
             print(_eval(b, SET_SPEED.replace("__SPEED__", repr(args.set_speed))))
         elif args.walk_report:
             print(_eval(b, WALK_REPORT))
+        elif args.walk_lock is not None:
+            if args.walk_lock == "off":
+                print(_eval(b, WALK_LOCK_REMOVE))
+            else:
+                if args.walk_lock == "on":
+                    print(_eval(b, WALK_LOCK_INSTALL))
+                print(_eval(b, WALK_LOCK_REPORT))
         elif args.walk_diag is not None:
             diag(b, args.walk_diag)
         elif args.walk_subpixel is not None:
@@ -1811,9 +1985,11 @@ def main():
             print(__doc__.strip())
             print()
             print("EVERYDAY COMMANDS")
-            print("  --walk-fix      apply the fix (run once per game launch, while in the overworld)")
-            print("  --walk-report   show whether it is active, plus call and re-apply counts")
-            print("  --off           undo it immediately (also undone by closing the game)")
+            print("  --walk-lock     THE FIX: the sprite advances exactly 1 px (or 2 running) per")
+            print("                  frame, driven by the frame count, so no 0 px or 2 px steps")
+            print("  --walk-lock report / off")
+            print("  --walk-report   show whether the duration scaling is active")
+            print("  --off           undo all of it immediately (also undone by closing the game)")
             print()
             print("CALIBRATION")
             print("  --walk-calibrate --seconds 8   closed loop: corrects until the measured")
@@ -1827,10 +2003,10 @@ def main():
             print("                              and frame time per frame while you play;")
             print("                              'report' analyses whatever it captured")
             print("  --walk-subpixel on|grid|off|report")
-            print("                              fractional camera: 'on' scrolls between whole")
-            print("                              content pixels; 'grid' snaps to whole device")
-            print("                              pixels instead (1/3 content px here), which stays")
-            print("                              crisp under nearest filtering")
+            print("                              DEPRECATED - a failed experiment. It does move the")
+            print("                              camera in fractions, but our focus formula is off by")
+            print("                              a constant, so the player drifts off-centre and the")
+            print("                              camera motion goes non-linear. Kept for the notes.")
             print("  --measure --seconds 8   per-frame world step histogram, to verify it worked")
             print()
             print("Leftovers from the investigation, not needed for normal use:")
