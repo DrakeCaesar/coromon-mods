@@ -862,25 +862,56 @@ s.released = s.released or 0
 s.active = false
 s.DIST = 16                     -- content px in one grid move (tilewidth)
 
-local function playerSprite()
-  local spr
-  pcall(function()
-    local i = spawnableHelper:getPlayerSpawnable()
-    if i and i.sprite then spr = i.sprite end
-  end)
-  return spr
+local function playerInstance()
+  local inst
+  pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+  return inst
 end
-s.sprite = playerSprite()
 
-local function arm()
-  local spr = playerSprite()
-  if type(spr) ~= 'table' then return end
-  s.sprite = spr
-  s.sx, s.sy = spr.x, spr.y   -- the game calls this on the tile centre
-  s.px, s.py = spr.x, spr.y   -- the game's position on the previous frame
+-- Every positioned object belonging to the player spawnable: the character sprite,
+-- its shadow, and anything else the game moves with it.
+--
+-- The shadow matters. It is a SEPARATE object with its own animation, and on this
+-- build the camera focus is tied to it rather than to the sprite. So driving only
+-- the sprite desynchronises the two: the character walks off its own shadow, and
+-- the camera (following the shadow) stops tracking the character.
+--
+-- Rather than guess which object is the important one, snapshot all candidates and
+-- drive the ones the game actually animates, each from its own start position and
+-- its own direction.
+local function candidates(inst)
+  local list, seen = {}, {}
+  local function add(name, o)
+    if type(o) ~= 'table' or seen[o] then return end
+    if type(o.x) ~= 'number' or type(o.y) ~= 'number' then return end
+    seen[o] = true
+    list[#list + 1] = { name = name, obj = o, sx = o.x, sy = o.y, px = o.x, py = o.y }
+  end
+  if type(inst) ~= 'table' then return list end
+  for k, v in pairs(inst) do
+    if type(v) == 'table' then add(tostring(k), v) end
+  end
+  local cls = inst._class
+  if type(cls) ~= 'table' then
+    local mt = getmetatable(inst)
+    cls = mt and mt.__index
+  end
+  if type(cls) == 'table' then
+    for k, v in pairs(cls) do
+      if type(v) == 'table' and not seen[v] then add(tostring(k), v) end
+    end
+  end
+  return list
+end
+
+local function arm(inst)
+  s.inst = inst
+  s.list = candidates(inst)
+  s.keep = {}
+  s.primary = nil
+  s.active = true
   s.n, s.step = 0, nil
   s.dirx, s.diry = 0, 0
-  s.active = true
   s.moves = s.moves + 1
 end
 
@@ -890,7 +921,7 @@ local function wrap(inst)
   if type(inner) ~= 'function' then return false end
   inst.getGridMoveTimeBySpeed = function(self, ...)
     local r = inner(self, ...)
-    arm()
+    arm(self or inst)
     return r
   end
   s.wrapped = inst
@@ -898,8 +929,7 @@ local function wrap(inst)
 end
 
 local function apply()
-  local inst
-  pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+  local inst = playerInstance()
   if type(inst) ~= 'table' or inst == s.wrapped then return end
   if wrap(inst) then s.reapplies = (s.reapplies or 0) + 1 end
 end
@@ -914,40 +944,69 @@ end
 local function tick()
   local st = _G.__walklock
   if not st or not st.on or not st.active or st.tick ~= tick then return false end
-  local spr = st.sprite
-  if type(spr) ~= 'table' or type(spr.x) ~= 'number' then handBack(); return false end
   if st.n > 64 then handBack(); return false end
-  local x, y = spr.x, spr.y
-  local gx, gy = x - st.sx, y - st.sy               -- offset since the move began
-  local dx, dy = x - st.px, y - st.py               -- THIS frame, which is what the
-  st.px, st.py = x, y                               -- checks below are about
+
   if not st.step then
-    -- first frame: read the step and direction off the game's own interpolation
-    -- unrounded - sprite.x is a float even though the camera is rounded
-    local mag = math.max(math.abs(dx), math.abs(dy))
-    if mag < 0.25 then return false end    -- the game has not started moving yet
+    -- First frame of the move: find whichever object the game is animating fastest
+    -- and read the step off its own interpolation, unrounded (sprite.x is a float
+    -- even though the camera is rounded).
+    local best, mag = nil, 0
+    for _, c in ipairs(st.list or {}) do
+      c.dx, c.dy = c.obj.x - c.px, c.obj.y - c.py
+      local m = math.max(math.abs(c.dx), math.abs(c.dy))
+      if m > mag then best, mag = c, m end
+    end
+    if not best or mag < 0.25 then return false end   -- not moving yet
     local step = math.floor(mag + 0.5)
     if step < 1 or step > st.DIST - 1 then handBack(); return false end
     st.step = step
-    if math.abs(dx) >= math.abs(dy) then
-      st.dirx = (dx > 0) and 1 or -1
-      st.diry = (math.abs(dy) > 0.25) and ((dy > 0) and 1 or -1) or 0
-    else
-      st.diry = (dy > 0) and 1 or -1
-      st.dirx = (math.abs(dx) > 0.25) and ((dx > 0) and 1 or -1) or 0
+    st.primary = best.name
+    -- Keep every object whose own delta matches: the sprite and the shadow move
+    -- together, anything that happens to be elsewhere in the table does not.
+    local keep, names = {}, {}
+    for _, c in ipairs(st.list or {}) do
+      local m = math.max(math.abs(c.dx), math.abs(c.dy))
+      if m >= mag - 0.3 and m <= mag + 0.3 then
+        c.dirx = (math.abs(c.dx) >= math.abs(c.dy)) and ((c.dx > 0) and 1 or -1)
+                                                or ((c.dy > 0) and 1 or -1)
+        c.diry = (math.abs(c.dy) >= math.abs(c.dx)) and ((c.dy > 0) and 1 or -1)
+                                                or ((c.dx > 0) and 1 or -1)
+        c.sx, c.sy = c.obj.x, c.obj.y   -- start our schedule from where it is now
+        c.px, c.py = c.obj.x, c.obj.y
+        keep[#keep + 1] = c
+        names[#names + 1] = c.name
+      end
     end
+    st.keep = keep
+    st.names = names
   else
-    -- the game disagrees with the direction we are driving: cancelled move, turn,
-    -- warp, map change. Hand it back rather than fight it.
-    local bad = math.abs(dx) > 4.5 or math.abs(dy) > 4.5
-    if st.dirx ~= 0 and dx * st.dirx < -0.25 then bad = true end
-    if st.diry ~= 0 and dy * st.diry < -0.25 then bad = true end
-    if bad then handBack(); return false end
+    -- Hand the move back only if the PRIMARY object disagrees (cancelled move,
+    -- turn, warp, map change). A secondary object that stops moving with us is just
+    -- dropped - it may have been an unrelated table that matched once.
+    local keep = {}
+    local primaryBad = false
+    for _, c in ipairs(st.keep or {}) do
+      local dx, dy = c.obj.x - c.px, c.obj.y - c.py
+      c.px, c.py = c.obj.x, c.obj.y
+      local drop = math.abs(dx) > 4.5 or math.abs(dy) > 4.5
+      if c.dirx ~= 0 and dx * c.dirx < -0.25 then drop = true end
+      if c.diry ~= 0 and dy * c.diry < -0.25 then drop = true end
+      if drop then
+        if c.name == st.primary then primaryBad = true else st.dropped = (st.dropped or 0) + 1 end
+      else
+        keep[#keep + 1] = c
+      end
+    end
+    st.keep = keep
+    if primaryBad or #keep == 0 then handBack(); return false end
   end
+
   st.n = st.n + 1
   local k = math.min(st.n * st.step, st.DIST)
-  spr.x = st.sx + st.dirx * k
-  spr.y = st.sy + st.diry * k
+  for _, c in ipairs(st.keep) do
+    c.obj.x = c.sx + c.dirx * k
+    c.obj.y = c.sy + c.diry * k
+  end
   st.driven = st.driven + 1
   return false
 end
@@ -960,14 +1019,22 @@ return string.format('walk lock ON (%d moves already queued by the watchdog)', s
 WALK_LOCK_REPORT = PRELUDE + r"""
 local s = _G.__walklock
 if not s then return '!walk lock not installed!' end
-return table.concat({
+local out = {
   string.format('active=%s  moves armed=%d  frames driven=%d  handed back=%d  re-applies=%d',
     tostring(s.on), s.moves or 0, s.driven or 0, s.released or 0, s.reapplies or 0),
-  string.format('current move: frame %s  step=%s px/frame  dir=(%s,%s)  start=(%.2f, %.2f)',
-    tostring(s.n or 0), tostring(s.step), tostring(s.dirx), tostring(s.diry),
-    s.sx or 0, s.sy or 0),
-  'expect: frames driven ~= 16 per move for walking (8 for running), step 1 or 2',
-}, '\n')
+  string.format('current move: frame %s  step=%s px/frame  primary=%s',
+    tostring(s.n or 0), tostring(s.step), tostring(s.primary)),
+}
+if s.names and #s.names > 0 then
+  out[#out + 1] = 'driving ' .. #s.names .. ' object(s): ' .. table.concat(s.names, ', ')
+else
+  out[#out + 1] = 'nothing driven yet'
+end
+if (s.dropped or 0) > 0 then
+  out[#out + 1] = string.format('%d secondary object(s) dropped (stopped moving with us)', s.dropped)
+end
+out[#out + 1] = 'expect the sprite AND its shadow in the list: the camera is tied to the shadow'
+return table.concat(out, '\n')
 """
 
 WALK_LOCK_REMOVE = r"""
