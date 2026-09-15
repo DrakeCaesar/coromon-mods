@@ -897,31 +897,9 @@ local function playerSprite()
 end
 playerSprite()
 
--- The player's sprite and shadow are recreated on a map change, and a stale handle
--- means the lock writes an object that is no longer the player - which moved a
--- character sprite off-screen and then threw. Drop every cached handle the moment the
--- player's objects are not the ones we were holding.
-local function refresh()
-  local i
-  pcall(function() i = spawnableHelper:getPlayerSpawnable() end)
-  if type(i) ~= 'table' then return false end
-  local spr = (type(i.sprite) == 'table') and i.sprite or nil
-  local sh = (type(i.shadow) == 'table') and i.shadow or nil
-  if spr ~= s.sprite or sh ~= s.shadow then
-    s.sprite, s.shadow = spr, sh
-    s.armed, s.hold, s.n = false, nil, nil
-    s.dox, s.doy = nil, nil
-    s.twx, s.twy, s.wx, s.wy, s.tail = nil, nil, nil, nil, nil
-    pcall(function() s.tw = upval(MTE.getTiledWorld, 'tiledWorld') end)
-    return true
-  end
-  return false
-end
-
 local function put(obj, x, y)
   if type(obj) ~= 'table' then return false end
-  local set = s.origSet or MTE.setSpriteLocation     -- never the hook: no recursion
-  local ok = pcall(set, obj, x, y)
+  local ok = pcall(MTE.setSpriteLocation, obj, x, y)
   if not ok then obj.x, obj.y = x, y end
   return true
 end
@@ -941,34 +919,17 @@ local function place(x, y)
     put(s.sprite, x, y)          -- no shadow object: the sprite is all we have
   end
 
-  -- The scroll is not derived from the player: it is animated by the transition's
-  -- own progress, so placing the player cannot pin it. Record where the world node
-  -- has to be instead - it is written by placeWorld() from the listener, because the
-  -- engine writes it after this hook and would otherwise have the last word.
-  if s.twx then
-    s.wx, s.wy = s.twx - x, s.twy - y
-  else
-    s.wx, s.wy = nil, nil
+  -- The SCROLL is the thing being watched, and it is animated by the transition's
+  -- own progress, so placing the player alone cannot pin it. Place the world node
+  -- from the same integer schedule instead. Both integers, so every frame of the
+  -- scroll is a whole pixel. Skipped when the engine's own value is not close by:
+  -- at a map edge the engine clamps the camera, and the clamp must win.
+  local tw = s.tw
+  if s.twx and type(tw) == 'table' and type(tw.x) == 'number' then
+    local wx, wy = s.twx - x, s.twy - y
+    if math.abs(wx - tw.x) <= 4 then tw.x = wx end
+    if math.abs(wy - tw.y) <= 4 then tw.y = wy end
   end
-end
-
--- Write the world node. Called once per frame from the listener, which runs after
--- the engine's own tick, so this is the last word on the scroll. Both the constant
--- and the player position are integers, so every frame of the scroll is one whole
--- pixel. Skipped when the engine's own value is not close by: at a map edge the
--- engine clamps the camera and the clamp must win.
-local function placeWorld()
-  local st = _G.__walklock
-  if not st or not st.wx then return false end
-  local tw = st.tw
-  if type(tw) ~= 'table' or type(tw.x) ~= 'number' then return false end
-  if math.abs(st.wx - tw.x) <= 4 then tw.x = st.wx end
-  if math.abs(st.wy - tw.y) <= 4 then tw.y = st.wy end
-  if st.tail then
-    st.tail = st.tail - 1
-    if st.tail <= 0 then st.tail, st.wx, st.wy = nil, nil, nil end
-  end
-  return true
 end
 
 local function arm(inst)
@@ -1004,115 +965,17 @@ local function arm(inst)
   s.moves = s.moves + 1
 end
 
--- The engine asks for every player position through MTE.setSpriteLocation, so hook
--- that. While a tile move is in progress the lock OWNS the position and the engine's
--- own request is dropped: the frame count decides, not the clock.
---
--- This is the fix for the frames that were not exactly one pixel. The old lock
--- sampled the sprite and reacted to what the engine had done, so on any frame where
--- the engine had not moved yet (or had moved a fraction of a pixel) the lock stood
--- aside and the engine's own value was shown - a 0 px or 2 px frame. There is no
--- sampling and no threshold here: a request that moves the player starts a move, and
--- from then on every frame advances exactly `step` px along the captured direction,
--- whether or not the engine agrees.
-local function drive(spr, x, y)
-  local st = _G.__walklock
-  if not st or not st.on then return false end
-  if spr ~= st.sprite and spr ~= st.shadow then return false end      -- not the player
-  if st.armed then
-    -- Take this frame's progress from the engine's own request, projected onto the
-    -- direction we captured, instead of counting calls.
-    --
-    -- Counting calls is what produced the occasional 2 px frame: the engine asks for
-    -- the sprite AND for the shadow, and both come through here, so one frame could
-    -- be counted twice. The projection gives the same k for both calls, so they
-    -- cannot add up; and k only ever moves forwards, so a stale request cannot pull
-    -- the position back either. Rounding to whole pixels is what removes the engine's
-    -- own +-3% interpolation error.
-    local ds = math.abs(st.dirx) + math.abs(st.diry)
-    if ds > 0 then
-      -- the request may be for either object, and the character sits at an offset
-      -- from the shadow, so measure from THAT object's own start of the move
-      local off = (spr == st.shadow) and 0 or 1
-      local pbx = st.sx + off * (st.dox or 0)
-      local pby = st.sy + off * (st.doy or 0)
-      local along = ((x - pbx) * st.dirx + (y - pby) * st.diry) / (ds * st.step)
-      local k = math.floor(along + 0.5)
-      local last = math.floor(st.DIST / st.step + 0.5)      -- frames in the move
-      if k > (st.n or 0) then
-        if k > last then k = last end
-        st.n = k
-        if k >= last then
-          st.armed, st.hold = false, true
-          st.tail = 1
-        end
-        place(st.sx + st.dirx * k * st.step, st.sy + st.diry * k * st.step)
-        st.moved = st.moved + 1
-      end
-    end
-    st.lastx, st.lasty = x, y
-    return true                             -- and the engine's own value is dropped
-  end
-  local bx, by = spr.x, spr.y               -- where the player is now (pre-write)
-  local dx, dy = x - bx, y - by
-  if math.abs(dx) < 0.25 and math.abs(dy) < 0.25 then
-    st.hold = nil                           -- the engine has settled: a move may start
-    return false
-  end
-  -- Just after a move finished the engine is still finishing its own interpolation.
-  -- Do not read that as the start of the next move: wait for it to settle first, or
-  -- one tile move would run straight into the next and never land.
-  if st.hold then return true end
-  local mag = math.max(math.abs(dx), math.abs(dy))
-  -- more than a tile and a half: a warp, a map change, a scripted move. Not a tile
-  -- walk, and not ours to drive - hands off.
-  if mag > 24 then return false end
-  refresh()
-  local step = math.floor(mag + 0.5)
-  if step < 1 then step = 1 end
-  if step > st.DIST / 2 then step = st.DIST / 2 end
-  st.step = step
-  st.dirx = (math.abs(dx) > 0.25) and ((dx > 0) and 1 or -1) or 0
-  st.diry = (math.abs(dy) > 0.25) and ((dy > 0) and 1 or -1) or 0
-  local sh = st.shadow
-  if type(sh) ~= 'table' or type(sh.x) ~= 'number' then sh = spr end
-  local sp = st.sprite
-  if type(sp) ~= 'table' or type(sp.x) ~= 'number' then sp = sh end
-  st.sx, st.sy = math.round(sh.x), math.round(sh.y)
-  st.dox, st.doy = sp.x - sh.x, sp.y - sh.y
-  if math.abs(st.dox) > 40 or math.abs(st.doy) > 40 then st.dox, st.doy = -8, 0 end
-  local tw = st.tw
-  if type(tw) == 'table' and type(tw.x) == 'number' and type(tw.y) == 'number' then
-    st.twx, st.twy = math.round(tw.x + sh.x), math.round(tw.y + sh.y)
-  else
-    st.twx, st.twy = nil, nil
-  end
-  st.n, st.armed = 1, true
-  st.lastx, st.lasty = x, y
-  place(st.sx + st.dirx * step, st.sy + st.diry * step)
-  st.moved = st.moved + 1
-  return true
-end
-
 local function wrap(inst)
-  if s.origSet then return false end
-  local inner = MTE.setSpriteLocation
+  if type(inst) ~= 'table' then return false end
+  local inner = inst.getGridMoveTimeBySpeed
   if type(inner) ~= 'function' then return false end
-  s.origSet = inner
-  MTE.setSpriteLocation = function(...)
-    -- guarded: an error here must never take the game down, and on any trouble the
-    -- engine's own behaviour is what happens - but it is RECORDED, not hidden. A
-    -- silent fallback looks exactly like the lock not being installed at all.
-    local st = _G.__walklock
-    local ok, res = pcall(drive, ...)
-    if not ok then
-      if st then st.err = tostring(res) end
-      return inner(...)
-    end
-    if res then return end
-    return inner(...)
+  inst.getGridMoveTimeBySpeed = function(self, ...)
+    local r = inner(self, ...)
+    arm(self)
+    return r
   end
   s.wrapped = inst
+  s.origMove = inner          -- so --walk-lock off can hand the method back
   return true
 end
 
@@ -1131,16 +994,6 @@ local function handBack()
 end
 
 local function tickBody()
-  -- idle refresher only. The move is driven by the MTE.setSpriteLocation hook above;
-  -- if this listener touched the position there would be two drivers.
-  local st = _G.__walklock
-  if not st then return false end
-  st.frames = (st.frames or 0) + 1
-  if st.frames % 30 == 0 then refresh() end
-  if st.armed or st.tail then placeWorld() end
-  return false
-end
-local function unusedTickBody()
   local st = _G.__walklock
   if not st or not st.active then return false end
   st.n = st.n + 1
@@ -1258,8 +1111,8 @@ if s.easeInst and s.origEasing then s.easeInst.getEasing = s.origEasing end
 if s.gridEaseInst and s.origGridEasing then
   s.gridEaseInst.getGridMoveEasing = s.origGridEasing
 end
-if s.origSet then MTE.setSpriteLocation = s.origSet end
-s.origSet, s.wrapped, s.origMove = nil, nil, nil
+if s.wrapped and s.origMove then s.wrapped.getGridMoveTimeBySpeed = s.origMove end
+s.wrapped, s.origMove = nil, nil
 _G.__walklock_old = s
 _G.__walklock = nil
 return 'walk lock OFF - the game drives the sprite position again'
@@ -1581,10 +1434,8 @@ local function upval(fn, name)      -- the PRELUDE's helper, which the real inst
   end
 end
 local tiledWorld = { x = 122.0, y = 52.0 }
-local rawSet = nil      -- the engine's own writer, before the lock wraps it
 local MTE = { setSpriteLocation = function(spr, x, y) spr.x, spr.y = x, y end,
               getTiledWorld = function() return tiledWorld end }
-rawSet = MTE.setSpriteLocation
 local timer = { performWithDelay = function() return 1 end }
 local fake = { sprite = { x = 100.0, y = 100.0 }, shadow = { x = 108.0, y = 100.0 } }
 local originalMove = function() return { normal = 271 } end
@@ -1601,12 +1452,10 @@ local function reset()
   s.on, s.DIST, s.moves, s.moved, s.released, s.frames = true, 16, 0, 0, 0, 0
   s.active, s.chist, s.nominal = false, {}, 16.9491525
   s.tick = tick          -- the loop above clears it; the wrapper refuses without it
-  s.tw = tiledWorld      -- ... and these, or the driver bails on the identity check
-  s.sprite, s.shadow = fake.sprite, fake.shadow
+  s.tw = tiledWorld      -- ... and this one, or the world placement is skipped
   fake.sprite.x, fake.sprite.y = 100.0, 100.0
   fake.shadow.x, fake.shadow.y = 108.0, 100.0
   tiledWorld.x, tiledWorld.y = 122.0, 52.0      -- the constant: tw + shadow = 230, 152
-  MTE.setSpriteLocation = rawSet                -- unwrap, or a re-wrap recurses
   fake.getGridMoveTimeBySpeed = originalMove    -- do not nest wrappers
   s.wrapped = nil
   apply()
@@ -1618,15 +1467,13 @@ local function sim(name, dx, dy, frames, expectX, expectY)
   fake.getGridMoveTimeBySpeed()          -- the engine signals a new tile move
   local bad = nil
   for f = 1, frames + 2 do
-    -- what the ENGINE does: it asks MTE for a position, one jittery interpolation
-    -- step at a time. The lock intercepts the request. The shadow is not touched
-    -- here: the lock places it, and that is part of what is being asserted.
-    MTE.setSpriteLocation(fake.sprite, 100.0 + dx * (f * 1.03), 100.0 + dy * (f * 1.03))
-    -- the engine asks for the shadow too, in the same frame: same k, so no 2 px frame
-    MTE.setSpriteLocation(fake.shadow, 108.0 + dx * (f * 1.03), 100.0 + dy * (f * 1.03))
+    -- the ENGINE animates the SHADOW: that is the object the scroll is derived
+    -- from, and the one the lock reads its direction and step from
+    fake.shadow.x = 108.0 + dx * (f * 1.03)
+    fake.shadow.y = 100.0 + dy * (f * 1.03)
     tiledWorld.x = 122.0 - dx * (f * 1.03)      -- the engine scrolls the world too
     tiledWorld.y = 52.0 - dy * (f * 1.03)
-    tick()                                      -- the listener runs after the engine
+    tick()
     local ex, ey = 100.0 + expectX * f, 100.0 + expectY * f
     local exsh = 108.0 + expectX * f, 100.0 + expectY * f
     if f <= frames and (math.abs(fake.sprite.x - ex) > 1e-9
@@ -1635,10 +1482,8 @@ local function sim(name, dx, dy, frames, expectX, expectY)
                         or math.abs(fake.shadow.y - (100.0 + expectY * f)) > 1e-9
                         or math.abs(tiledWorld.x - (122.0 - expectX * f)) > 1e-9
                         or math.abs(tiledWorld.y - (52.0 - expectY * f)) > 1e-9) then
-      bad = string.format('frame %d wanted sprite(%.2f,%.2f) sh(%.2f,%.2f) world(%.2f,%.2f) | got sprite(%.2f,%.2f) sh(%.2f,%.2f) world(%.2f,%.2f)',
-        f, ex, ey, 108.0 + expectX * f, 100.0 + expectY * f, 122.0 - expectX * f,
-        52.0 - expectY * f, fake.sprite.x, fake.sprite.y, fake.shadow.x,
-        fake.shadow.y, tiledWorld.x, tiledWorld.y)
+      bad = string.format('frame %d: got (%.2f,%.2f) wanted (%.2f,%.2f)',
+        f, fake.sprite.x, fake.sprite.y, ex, ey)
       break
     end
   end
