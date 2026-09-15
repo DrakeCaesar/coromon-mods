@@ -249,9 +249,10 @@ return table.concat(lines, '\n')
 # ---------------------------------------------------------------------------
 WALK_STEP = PRELUDE + r"""
 local s = _G.__walkstep
-if s and s.on then return 'frame-counted walk already on' end
+-- s.inst is set only once the hooks went in, so a state without it is a leftover
+-- from an interrupted install and is replaced rather than trusted
+if s and s.on and s.inst then return 'frame-counted walk already on' end
 s = { on = true, n = 0, N = 16, calls = 0, moves = 0 }
-_G.__walkstep = s
 
 local inst
 pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
@@ -290,6 +291,7 @@ if type(origTime) == 'function' then
     if type(ms) == 'number' and ms > 1 then frames = math.floor(ms / mt + 0.5) end
     if frames < 2 then frames = 2 end
     s.N, s.n = frames, 0
+    s.startFrame = s.frame or 0
     s.moves = s.moves + 1
     return r
   end
@@ -297,18 +299,81 @@ end
 
 local origEase = inst.getGridMoveEasing
 s.origEase = origEase
+-- ONE TICK PER RENDERED FRAME - not one tick per call.
+--
+-- The easing is asked for several times in a single frame (per mover, per layer, per
+-- sprite being depth-sorted), so counting calls ran progress ahead of the frames: the
+-- sprite was placed at a position mid-move that it should not have been at - the
+-- camera jumped there and snapped back when the move ended - and moveSprite's
+-- depth-sort group lookup hit a state that cannot happen, which is the runtime error.
+-- The frame clock is ours, so five calls in one frame give the same progress five
+-- times, and the step stays one pixel per frame.
+local function tickFrame()
+  s.frame = (s.frame or 0) + 1
+  return false
+end
+s.tickFrame = tickFrame
+pcall(function() Runtime:addEventListener('enterFrame', tickFrame) end)
+
 local function progress()
-  s.n = s.n + 1
   s.calls = s.calls + 1
+  s.n = (s.frame or 0) - (s.startFrame or 0)
+  if s.n < 0 then s.n = 0 end
   local p = s.n / s.N
   if p > 1 then p = 1 end
   return p
 end
-inst.getGridMoveEasing = function(self, ...)
-  local p = progress()
-  if returnsFunction then return function() return p end end
-  return p
+-- The contract: an easing is called as ease(t, duration, startValue, endValue) and
+-- returns the INTERPOLATED VALUE, not a fraction. Returning a bare 0..1 number was
+-- what threw the sprite off the map and took the camera with it at the start of every
+-- move: the engine fed that number into a position of a few hundred pixels.
+-- The frame count replaces only the FRACTION; the start and end still come from the
+-- engine, so the move still travels the distance it is supposed to.
+local function ease(t, duration, startValue, endValue)
+  -- Snap the engine's OWN fraction to whole pixels, rather than substituting a
+  -- fraction of my own. A single global frame counter cannot be right for every
+  -- mover that uses this easing (the sprite and the camera both do), and feeding one
+  -- mover the other's fraction is exactly the wrong-position jump being seen: the
+  -- engine's fraction is per-mover by construction, so every mover gets a correct,
+  -- independent value and nothing is shared.
+  --
+  -- N+1 discrete values means each step is exactly one pixel, against the engine's
+  -- continuous 1.03, 0.97, 1.04.
+  local f = 0
+  if type(t) == 'number' and type(duration) == 'number' and duration > 0 then
+    f = t / duration
+    if f < 0 then f = 0 end
+    if f > 1 then f = 1 end
+  end
+  -- Snap to WHOLE PIXELS OF THIS MOVE. px is how far this mover travels, in pixels,
+  -- so every step is exactly one pixel - for the player, the shadow, the camera,
+  -- anything - with no constant to calibrate and nothing derived from frame timing.
+  -- The engine stays the only writer; its fraction only chooses which pixel we are
+  -- on. That is what ties the movement to the rendered frame and leaves no second
+  -- write to lose a race to.
+  if type(startValue) == 'number' and type(endValue) == 'number' then
+    local px = math.floor(math.abs(endValue - startValue) + 0.5)
+    if px > 1 then f = math.floor(f * px + 0.5) / px end
+  end
+  local frameFraction = progress()
+  -- remember what we were actually called with: this is the evidence that settles
+  -- the contract instead of inferring it from the symptom
+  if not s.lastArgs then
+    s.lastArgs = string.format('nargs=%s  t=%s  duration=%s  start=%s  end=%s',
+      tostring(select('#', t, duration, startValue, endValue)), tostring(t),
+      tostring(duration), tostring(startValue), tostring(endValue))
+  end
+  if type(startValue) == 'number' and type(endValue) == 'number' then
+    return startValue + (endValue - startValue) * f
+  end
+  return f
 end
+
+inst.getGridMoveEasing = function(self, ...)
+  if returnsFunction then return ease end
+  return ease(...)          -- some builds return the value directly
+end
+_G.__walkstep = s          -- only now, so a failed install leaves nothing behind
 return 'frame-counted walk ON - progress = frame / ' .. tostring(s.N)
 """
 
@@ -320,6 +385,9 @@ if s.inst then
   if s.origEase then s.inst.getGridMoveEasing = s.origEase end
   if s.origTime then s.inst.getGridMoveTimeBySpeed = s.origTime end
 end
+if s.tickFrame then
+  pcall(function() Runtime:removeEventListener('enterFrame', s.tickFrame) end)
+end
 _G.__walkstep = nil
 _G.__walkstep_old = s
 return 'frame-counted walk OFF - the engine times the walk again'
@@ -330,12 +398,443 @@ local s = _G.__walkstep
 if not s then return '!frame-counted walk not installed!' end
 return string.format(
   'on=%s  frames per tile=%s  frames this move=%s  moves=%d  easing calls=%d\n' ..
+  'frame clock = %s   (calls should be >= frames: several per frame is normal)\n' ..
   'progress this frame = %s  ->  pixels this frame = %s\n' ..
-  'method shape: %s',
+  'method shape: %s\nlast call args: %s',
   tostring(s.on), tostring(s.N), tostring(s.n), s.moves or 0, s.calls or 0,
+  tostring(s.frame or 0),
   s.N and string.format('%.4f', (s.n or 0) / s.N) or '?',
   s.N and string.format('%.4f', 16 / s.N) or '?',
-  s.returnsFunction and 'returns an easing function' or 'returns the progress number')
+  s.returnsFunction and 'returns an easing function' or 'returns the progress number',
+  tostring(s.lastArgs))
+"""
+
+
+# ---------------------------------------------------------------------------
+# FRESH START: the walk tied to rendering, not to time.
+#
+# The engine's tile move is an interpolation: position = start + (end-start) * f,
+# with f coming from the clock. That is where every problem lives - the fraction is
+# jittery, so the rounded position is jittery, so frames come out 0 px or 2 px.
+#
+# The plan is to take that over entirely: a frame counter, integer positions,
+# start + dir * n, one pixel per rendered frame, no fraction anywhere.
+#
+# The mover is MTE's per-frame callback for a tile move. Before replacing it, this
+# observes it: what it is called with, and what the world and the player actually do
+# per frame. Nothing is changed - the original still runs.
+# ---------------------------------------------------------------------------
+WALK_FRAMES = PRELUDE + r"""
+local st = _G.__walkframes
+if st and st.on then return 'observer already on' end
+st = { on = true, n = 0, rec = {}, lastArgs = nil, calls = 0 }
+_G.__walkframes = st
+
+local MTE = _G.MTE
+if type(MTE) ~= 'table' then return '!no MTE - are you in the overworld?!' end
+st.MTE = MTE
+st.tw = upval(MTE.getTiledWorld, 'tiledWorld')
+
+-- The trace names three things, and only one of them is a FIELD on MTE:
+--   transition -> proxy (mte.lua:1090) -> doMoveSprite (mte.lua:1037) -> tiledWorldBuilder.moveSprite
+-- 'doMoveSprite' is a LOCAL inside mte.lua, not a table entry, which is why looking
+-- for it as a field found nothing. So wrap every plausible entry point and let the
+-- call counters say which one the engine actually drives.
+st.hooks = {}
+local function hook(target, key, label)
+  if type(target) ~= 'table' then return end
+  local fn = target[key]
+  if type(fn) ~= 'function' then return end
+  local rec = { label = label, name = key, target = target, orig = fn, calls = 0 }
+  st.hooks[#st.hooks + 1] = rec
+  target[key] = function(...)
+    local s2 = _G.__walkframes
+    if not s2 or not s2.on then return fn(...) end
+    rec.calls = rec.calls + 1
+    if not rec.lastArgs then
+      local a = { ... }
+      local parts = {}
+      for i = 1, math.min(#a, 6) do
+        parts[#parts + 1] = string.format('%s(%s)', tostring(a[i]), type(a[i]))
+      end
+      rec.lastArgs = 'nargs=' .. #a .. '  ' .. table.concat(parts, '  ')
+    end
+    pcall(snap, 'before')
+    local r1, r2, r3 = fn(...)
+    pcall(snap, 'after ')
+    return r1, r2, r3
+  end
+end
+hook(MTE, 'proxy', 'MTE.proxy')
+hook(MTE, 'doMoveSprite', 'MTE.doMoveSprite')
+hook(MTE, 'moveSprite', 'MTE.moveSprite')
+hook(MTE, 'doMove', 'MTE.doMove')
+pcall(function() hook(spawnableHelper:getPlayerSpawnable(), 'proxy', 'player.proxy') end)
+if #st.hooks == 0 then return '!none of the candidate entry points exist!' end
+
+local function playerSprite()
+  local i, spr
+  pcall(function() i = spawnableHelper:getPlayerSpawnable() end)
+  if type(i) == 'table' then spr = i.sprite end
+  return spr
+end
+
+-- PER FRAME: what the mover is called with, and where the player and the world are.
+-- This is the contract, measured rather than assumed - the assumption about where
+-- the position comes from has been wrong more than once today.
+local function snap(tag)
+  local s = _G.__walkframes
+  if not s then return end
+  local spr = s.spr or playerSprite()
+  s.spr = spr
+  local t = s.tw
+  s.rec[#s.rec + 1] = string.format('%s n=%s sprite=%s,%s world=%s,%s',
+    tag, tostring(s.n),
+    tostring(spr and spr.x), tostring(spr and spr.y),
+    tostring(t and t.x), tostring(t and t.y))
+  s.n = s.n + 1
+  if #s.rec > 400 then table.remove(s.rec, 1) end
+end
+
+local labels = {}
+for _, rec in ipairs(st.hooks) do labels[#labels + 1] = rec.label end
+return 'observer on: ' .. table.concat(labels, ', ')
+"""
+
+WALK_FRAMES_OFF = r"""
+local s = _G.__walkframes
+if not s then return 'observer was not installed' end
+s.on = false
+for _, rec in ipairs(s.hooks or {}) do
+  pcall(function() rec.target[rec.name] = rec.orig end)
+end
+_G.__walkframes, _G.__walkframes_old = nil, s
+return 'observer off'
+"""
+
+WALK_FRAMES_REPORT = r"""
+local s = _G.__walkframes or _G.__walkframes_old
+if not s then return '!nothing recorded!' end
+local out = {}
+out[#out + 1] = 'frames captured: ' .. #s.rec
+for _, rec in ipairs(s.hooks or {}) do
+  out[#out + 1] = string.format('%-20s calls=%d   args: %s',
+    rec.label, rec.calls, tostring(rec.lastArgs))
+end
+local shown = 0
+for _, line in ipairs(s.rec) do
+  if line:find('after ') and shown < 40 then
+    shown = shown + 1
+    out[#out + 1] = line
+  end
+end
+if shown == 0 then out[#out + 1] = '(no frames captured - did the player move?)' end
+return table.concat(out, '\n')
+"""
+
+
+# ---------------------------------------------------------------------------
+# THE COUNTER. One pixel per rendered frame, integer positions, no fraction.
+#
+# Measured with synthetic input (no human walking needed): the engine advances the
+# player ~0.9657 px per frame, varying 0.945-0.994, and the world moves EXACTLY
+# opposite with the same magnitude. Rounding that gives 1,1,1,2,1 - the 2 px frame.
+#
+# So: our own enterFrame clock. Each frame, place the player at start + dir * n and
+# the world at worldStart - dir * n, both whole pixels, and stop at the tile centre.
+# The engine's interpolation still runs underneath, but every frame we overwrite it,
+# so whatever fraction it computed never reaches the screen.
+# ---------------------------------------------------------------------------
+WALK_TICK = PRELUDE + r"""
+local s = _G.__walktick
+if s and s.on and s.installed then return 'counter already running' end
+s = { on = true, n = 0, dist = 16, active = false, moves = 0, frames = 0 }
+_G.__walktick = s
+
+local MTE = _G.MTE
+if type(MTE) ~= 'table' then return '!no MTE - are you in the overworld?!' end
+s.MTE = MTE
+s.tw = upval(MTE.getTiledWorld, 'tiledWorld')
+
+-- While the counter is driving, the engine's writes to the player and its shadow are
+-- dropped instead of racing ours. Racing was never reliable: whichever write landed
+-- last decided what rendered, and the numbers looked perfect while the screen did
+-- not change. Nothing to race now.
+if type(MTE.setSpriteLocation) == 'function' and not s.origSet then
+  s.origSet = MTE.setSpriteLocation
+  MTE.setSpriteLocation = function(obj, x, y)
+    local st = _G.__walktick
+    if st and st.on and st.active and (obj == st.spr or obj == st.sh) then
+      st.dropped = (st.dropped or 0) + 1
+      return
+    end
+    return s.origSet(obj, x, y)
+  end
+end
+
+local function parts()
+  local i, spr, sh
+  pcall(function() i = spawnableHelper:getPlayerSpawnable() end)
+  if type(i) == 'table' then spr, sh = i.sprite, i.shadow end
+  if type(spr) ~= 'table' or type(spr.x) ~= 'number' then spr = nil end
+  if type(sh) ~= 'table' or type(sh.x) ~= 'number' then sh = nil end
+  if spr ~= s.spr or sh ~= s.sh or s.tw ~= upval(MTE.getTiledWorld, 'tiledWorld') then
+    s.spr, s.sh = spr, sh
+    s.tw = upval(MTE.getTiledWorld, 'tiledWorld')
+    s.active, s.hold = false, nil
+    s.armed = false
+    -- the camera constant: world + player. Taken once, from the engine's own idea
+    -- of where the two are, so that afterwards the world is derived from the frame
+    -- counter and not from the engine's drifting position.
+    if spr and s.tw and type(s.tw.x) == 'number' then
+      s.twcx, s.twcy = math.round(s.tw.x + spr.x), math.round(s.tw.y + spr.y)
+    else
+      s.twcx, s.twcy = nil, nil
+    end
+    if sh and spr then s.shox = math.round(sh.x - spr.x) else s.shox = 8 end
+  end
+  return spr, sh
+end
+
+local function put(obj, x, y)
+  if type(obj) ~= 'table' then return end
+  local set = s.origSet or MTE.setSpriteLocation      -- never the hook: no recursion
+  local ok = pcall(set, obj, x, y)
+  if not ok then obj.x, obj.y = x, y end
+  s.lastTarget = { x = x, y = y, twx = s.tw and s.tw.x, twy = s.tw and s.tw.y }
+end
+
+local function tickFrame()
+  local st = _G.__walktick
+  if not st or not st.on then return false end
+  local ok = pcall(function()
+    st.frames = st.frames + 1
+    local spr, sh = parts()
+    if not spr then return end
+    if st.lastTarget then
+      local tw0 = st.tw
+      local okSpr = (math.abs(spr.x - st.lastTarget.x) < 0.001)
+      local okTw = (not tw0 or not st.lastTarget.twx) or
+                   (math.abs(tw0.x - st.lastTarget.twx) < 0.001)
+      if okSpr and okTw then st.survived = (st.survived or 0) + 1
+      else st.clobbered = (st.clobbered or 0) + 1 end
+    end
+    local tw = st.tw
+    local px, py = spr.x, spr.y
+    -- start of a tile move: the engine has moved the player at all
+    if not st.active then
+      do
+        local dx, dy = px - (st.lx or px), py - (st.ly or py)
+        local mag = math.max(math.abs(dx), math.abs(dy))
+        if mag >= 0.02 and mag <= 1.5 then
+          st.active = true
+          st.n = 0
+          st.dirx = (math.abs(dx) > 0.02) and ((dx > 0) and 1 or -1) or 0
+          st.diry = (math.abs(dy) > 0.02) and ((dy > 0) and 1 or -1) or 0
+          st.sx = math.round(st.lx or px)
+          st.sy = math.round(st.ly or py)
+          st.dx0 = spr.x - (st.lx or px)
+          st.dy0 = spr.y - (st.ly or py)
+          st.tsx = tw and math.round(tw.x + (st.lx or px)) or nil
+          st.tsy = tw and math.round(tw.y + (st.ly or py)) or nil
+          st.moves = st.moves + 1
+        end
+      end
+    end
+    if st.active then
+      st.n = st.n + 1
+      local n = st.n
+      if n >= st.dist then n = st.dist end
+      local tx, ty = st.sx + st.dirx * n, st.sy + st.diry * n
+      put(spr, tx, ty)
+      if sh then put(sh, tx + st.shox, ty) end     -- sprite x=568 / shadow x=576 in the healthy game
+      -- the world moves with the player, from the same counter: one writer, one
+      -- clock. The guard is only wide enough to let a map-edge camera clamp win.
+      if tw and st.twcx then
+        local wx, wy = st.twcx - tx, st.twcy - ty
+        if math.abs(wx - tw.x) <= 40 then tw.x = wx end
+        if math.abs(wy - tw.y) <= 40 then tw.y = wy end
+      end
+      if st.n >= st.dist then
+        st.active = false
+        st.lx, st.ly = tx, ty
+      end
+      return
+    end
+    st.lx, st.ly = px, py
+  end)
+  if not ok then
+    _G.__walktick = nil
+    pcall(function() Runtime:removeEventListener('enterFrame', tickFrame) end)
+  end
+  return false
+end
+
+s.l = tickFrame
+s.installed = true
+Runtime:addEventListener('enterFrame', tickFrame)
+return 'counter running: one whole pixel per rendered frame'
+"""
+
+WALK_TICK_OFF = r"""
+local s = _G.__walktick
+if not s then return 'counter was not running' end
+if s.l then pcall(function() Runtime:removeEventListener('enterFrame', s.l) end) end
+if s.origSet and s.MTE then pcall(function() s.MTE.setSpriteLocation = s.origSet end) end
+s.on = false
+_G.__walktick, _G.__walktick_old = nil, s
+return 'counter off'
+"""
+
+WALK_TICK_REPORT = r"""
+local s = _G.__walktick or _G.__walktick_old
+if not s then return '!counter not running!' end
+return string.format(
+  'on=%s  frames=%d  tile moves=%d  frame of move=%s / %s  dir=(%s,%s)  baseline=(%s,%s)\n' ..
+  'write survived=%d   engine overwrote us=%d   engine writes dropped=%d',
+  tostring(s.on), s.frames or 0, s.moves or 0, tostring(s.n), tostring(s.dist),
+  tostring(s.dirx), tostring(s.diry), tostring(s.sx), tostring(s.sy),
+  s.survived or 0, s.clobbered or 0, s.dropped or 0)
+"""
+
+
+# ---------------------------------------------------------------------------
+# THE LAST WORD. transition.enterFrame (transition.lua:83) is the library's own
+# per-frame driver - a reachable table field, and the function under which every
+# animation write of the frame happens (tickTransition -> proxy -> doMoveSprite).
+#
+# Wrap it: call the engine's version, then re-assert the counter's position before
+# returning. Our write is then necessarily the last one of the frame - not usually,
+# necessarily - because nothing else runs between it and the render.
+#
+# The counter itself is the rule you specified: one whole pixel per rendered frame,
+# start + dir * n, integers only, no fraction and nothing from the clock.
+# ---------------------------------------------------------------------------
+WALK_ENTER = PRELUDE + r"""
+local MTE = _G.MTE
+local lib = package.loaded['classes.libraries.transition']
+if type(MTE) ~= 'table' then return '!no MTE - are you in the overworld?!' end
+if type(lib) ~= 'table' or type(lib.enterFrame) ~= 'function' then
+  return '!transition.enterFrame not found!'
+end
+if _G.__walk2 and _G.__walk2.on then return 'already on' end
+local s = { on = true, n = 0, dist = 16, frames = 0, moves = 0, held = 0, stray = 0 }
+_G.__walk2 = s
+s.lib, s.orig = lib, lib.enterFrame
+s.tw = upval(MTE.getTiledWorld, 'tiledWorld')
+
+local function parts()
+  local i, spr, sh
+  pcall(function() i = spawnableHelper:getPlayerSpawnable() end)
+  if type(i) == 'table' then spr, sh = i.sprite, i.shadow end
+  if type(spr) ~= 'table' or type(spr.x) ~= 'number' then spr = nil end
+  if type(sh) ~= 'table' or type(sh.x) ~= 'number' then sh = nil end
+  if spr ~= s.spr or sh ~= s.sh then
+    s.spr, s.sh, s.active, s.lx, s.ly = spr, sh, false, nil, nil
+    s.shox = (spr and sh) and (sh.x - spr.x) or 0
+    if spr and s.tw and type(s.tw.x) == 'number' then
+      s.twcx, s.twcy = s.tw.x + spr.x, s.tw.y + spr.y
+    end
+  end
+  return spr, sh
+end
+
+local function put(obj, x, y)
+  if type(obj) ~= 'table' then return end
+  local ok = pcall(MTE.setSpriteLocation, obj, x, y)
+  if not ok then obj.x, obj.y = x, y end
+end
+
+local function step()
+  s.frames = s.frames + 1
+  local spr, sh = parts()
+  if not spr then return end
+  if not s.active then
+    local px, py = spr.x, spr.y
+    local dx, dy = px - (s.lx or px), py - (s.ly or py)
+    local mag = math.max(math.abs(dx), math.abs(dy))
+    if mag >= 0.02 and mag <= 1.5 then
+      s.active, s.n = true, 0
+      s.dirx = (math.abs(dx) > 0.02) and ((dx > 0) and 1 or -1) or 0
+      s.diry = (math.abs(dy) > 0.02) and ((dy > 0) and 1 or -1) or 0
+      s.tx, s.ty = math.round(s.lx or px), math.round(s.ly or py)
+      s.moves = s.moves + 1
+    else
+      s.lx, s.ly = px, py
+      return
+    end
+  end
+  -- The engine's own intent for THIS frame. step() runs immediately after the
+  -- engine's tick, so spr.x here is the engine's value, before we overwrite it - that
+  -- is the only place its direction is visible. Without this the counter drove the
+  -- direction it latched for sixteen frames, which is why a turn came out as "turns
+  -- left, moves right", as up/down wobble on a horizontal move, and as a snap back.
+  local ex, ey = spr.x, spr.y
+  local edx, edy = ex - (s.epx or ex), ey - (s.epy or ey)
+  s.epx, s.epy = ex, ey
+  if math.abs(edx) + math.abs(edy) > 0.02 then
+    local ndx = (math.abs(edx) > 0.02) and ((edx > 0) and 1 or -1) or 0
+    local ndy = (math.abs(edy) > 0.02) and ((edy > 0) and 1 or -1) or 0
+    if ndx ~= s.dirx or ndy ~= s.diry then
+      s.dirx, s.diry = ndx, ndy
+      s.tx, s.ty = math.round(ex), math.round(ey)   -- re-base on the pixel we are on
+      s.n, s.turns = 0, (s.turns or 0) + 1
+      -- This frame the engine's value was computed along the axis we have just
+      -- abandoned, so writing it would be a multi-pixel jump. Stand on the pixel we
+      -- are on for one frame instead: zero pixels this frame, then the new direction
+      -- starts from here. One still frame at a turn is invisible; a 4 px jump is not.
+      s.turnfreeze = true
+    end
+  end
+  if s.turnfreeze then
+    s.turnfreeze = nil
+    local fx, fy = s.tx, s.ty
+    put(spr, fx, fy)
+    if sh then put(sh, fx + s.shox, fy) end
+    s.lx, s.ly, s.held = fx, fy, (s.held or 0) + 1
+    return
+  end
+  s.n = s.n + 1
+  local n = (s.n < s.dist) and s.n or s.dist
+  local x, y = s.tx + s.dirx * n, s.ty + s.diry * n
+  put(spr, x, y)
+  if sh then put(sh, x + s.shox, y) end
+  s.lx, s.ly = x, y
+  -- the sentinel: read it straight back, in the same frame. It must be ours.
+  if math.abs(spr.x - x) < 0.001 and math.abs(spr.y - y) < 0.001 then
+    s.held = s.held + 1
+  else
+    s.stray = s.stray + 1
+  end
+  if s.n >= s.dist then s.active = false end
+end
+s.step = step
+
+lib.enterFrame = function(...)
+  local st = _G.__walk2
+  if not st or not st.on then return s.orig(...) end
+  local a, b, c = s.orig(...)
+  pcall(step)
+  return a, b, c
+end
+return 'enterFrame wrapped - we have the last word of every frame'
+"""
+
+WALK_ENTER_OFF = r"""
+local s = _G.__walk2
+if not s then return 'the enterFrame wrap was not installed' end
+if s.lib and s.orig then pcall(function() s.lib.enterFrame = s.orig end) end
+s.on = false
+_G.__walk2, _G.__walk2_old = nil, s
+return 'enterFrame wrap off'
+"""
+
+WALK_ENTER_REPORT = r"""
+local s = _G.__walk2 or _G.__walk2_old
+if not s then return '!not installed!' end
+return string.format('frames=%d  tile moves=%d  turns=%d  frame of move=%s/%s  held=%d  stray=%d',
+  s.frames or 0, s.moves or 0, s.turns or 0, tostring(s.n), tostring(s.dist),
+  s.held or 0, s.stray or 0)
 """
 
 # ---------------------------------------------------------------------------
@@ -2179,6 +2678,18 @@ def main():
                     # + recorder
     ap.add_argument("--no-record", action="store_true",
                     help="with --apply, skip starting the frame recorder")
+    ap.add_argument("--walk-enter", nargs="?", const="on", default=None,
+                    choices=["on", "off", "report"],
+                    help="wrap transition.enterFrame so the counter's position is "
+                         "re-asserted last in every frame")
+    ap.add_argument("--walk-tick", nargs="?", const="on", default=None,
+                    choices=["on", "off", "report"],
+                    help="the counter: one whole pixel per rendered frame, integer "
+                         "positions, no fraction and no clock")
+    ap.add_argument("--walk-frames", nargs="?", const="on", default=None,
+                    choices=["on", "off", "report"],
+                    help="observe MTE's per-frame tile-move callback: what it is "
+                         "called with and what the world does per frame")
     ap.add_argument("--walk-step", nargs="?", const="on", default=None,
                     choices=["on", "off", "report"],
                     help="frame-counted walk: progress = frame/N, so walking is "
@@ -2366,8 +2877,9 @@ def main():
             print("   " + _eval(b, WALK_FIX.replace(
                 "__FACTORS__", _lua_factors({"normal": fn, "fast": ff}))))
             print()
-            print("2) walk lock: exactly one frame of progress per rendered frame")
-            print("   " + _eval(b, WALK_LOCK_INSTALL))
+            print("2) nothing else - the duration timing is the whole fix")
+            for off in (WALK_ENTER_OFF, WALK_TICK_OFF, WALK_STEP_REMOVE, WALK_LOCK_REMOVE):
+                _eval(b, off)
             print()
             if not args.no_record:
                 print("3) frame recorder (for --walk-diag report)")
@@ -2376,6 +2888,27 @@ def main():
             print(_eval(b, WALK_LOCK_REPORT))
             print()
             print(_eval(b, WALK_REPORT))
+        elif args.walk_enter is not None:
+            if args.walk_enter == "on":
+                print(_eval(b, WALK_ENTER))
+            elif args.walk_enter == "off":
+                print(_eval(b, WALK_ENTER_OFF))
+            else:
+                print(_eval(b, WALK_ENTER_REPORT))
+        elif args.walk_tick is not None:
+            if args.walk_tick == "on":
+                print(_eval(b, WALK_TICK))
+            elif args.walk_tick == "off":
+                print(_eval(b, WALK_TICK_OFF))
+            else:
+                print(_eval(b, WALK_TICK_REPORT))
+        elif args.walk_frames is not None:
+            if args.walk_frames == "on":
+                print(_eval(b, WALK_FRAMES))
+            elif args.walk_frames == "off":
+                print(_eval(b, WALK_FRAMES_OFF))
+            else:
+                print(_eval(b, WALK_FRAMES_REPORT))
         elif args.walk_step is not None:
             if args.walk_step == "on":
                 print(_eval(b, WALK_STEP))
