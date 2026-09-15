@@ -753,6 +753,15 @@ table.sort(out)
 return 'adjusted by x' .. string.format('%.5f', rate) .. ':  ' .. table.concat(out, '  ')
 """
 
+WALK_FACTORS = PRELUDE + r"""
+local st = _G.__walkscale
+if not st or not st.factors then return '!not installed!' end
+local out = {}
+for k, f in pairs(st.factors) do out[#out + 1] = string.format('%s=%.8f', k, f) end
+table.sort(out)
+return table.concat(out, '\t')
+"""
+
 DT_INSTALL = r"""
 local s = { n = 0, t0 = 0, t1 = 0 }
 _G.__dt = s
@@ -907,6 +916,19 @@ def _lua_factors(d):
     return "{" + ", ".join(f"{k} = {v!r}" for k, v in d.items()) + "}"
 
 
+def _parse_factors(s):
+    """Parse the 'normal=0.968\tfast=1.019' readout into a dict."""
+    d = {}
+    for part in s.strip().split("\t"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            try:
+                d[k.strip()] = float(v)
+            except ValueError:
+                pass
+    return d
+
+
 def _measure_dt(b):
     """Average enterFrame interval in ms. Falls back to 60 fps."""
     print("measuring frame time (stand still) ...")
@@ -951,7 +973,11 @@ def main():
                     help="sanity check: force a specific px/frame (e.g. 10). Restore with --walk-fix")
     ap.add_argument("--walk-calibrate", action="store_true",
                     help="closed loop: measure the real step and correct until it is exactly 1 px/frame")
-    ap.add_argument("--iters", type=int, default=4, help="max calibration passes")
+    ap.add_argument("--walk-const", type=float, nargs=2, default=None,
+                    metavar=("NORMAL_MS", "FAST_MS"),
+                    help="apply fixed tile durations, skipping the frame-time measurement")
+    ap.add_argument("--iters", type=int, default=0,
+                    help="max calibration passes (0 = until it converges, default)")
     ap.add_argument("--walk-report", action="store_true",
                     help="show the baseline getGridMoveTimeBySpeed descriptors")
     ap.add_argument("--set-speed", type=float, default=None,
@@ -1007,9 +1033,12 @@ def main():
             print(_eval(b, WALK_FIX.replace(
                 "__FACTORS__", _lua_factors({"normal": 1.0, "fast": 1.0}))))
             print(_eval(b, WALK_REPORT))
+            if args.iters <= 0:
+                args.iters = 30          # effectively "until it converges"
+            hist = []
             for it in range(1, args.iters + 1):
                 print()
-                print(f"pass {it}/{args.iters}: walk continuously for {args.seconds:g}s ...")
+                print(f"--- pass {it}    keep walking for {args.seconds:g}s ---")
                 print(_eval(b, RATE_INSTALL))
                 time.sleep(args.seconds)
                 raw = _eval(b, RATE_COLLECT).strip()
@@ -1033,15 +1062,45 @@ def main():
                 print(f"  frames={n}  axis={axis}  moved on {ratio * 100:.1f}% of frames")
                 print(f"  measured step = {rate:.5f} px/frame   (want 1.00000)")
                 if ratio < 0.7:
-                    print("  not enough continuous walking - walk without stopping")
+                    print("  not enough continuous walking - keep walking without stopping")
                     continue
+                hist.append((it, n, ratio, rate))
                 if abs(rate - 1.0) < 0.002:
-                    print("  within tolerance - done")
+                    print("  CONVERGED - step is within 0.002 of 1 px/frame")
+                    break
+                if len(hist) > 1 and abs(hist[-2][3] - rate) < 0.001:
+                    print("  stable - the last two readings agree, stopping")
                     break
                 # step is inversely proportional to duration, so multiplying the
                 # current multipliers by the measured error drives step -> 1
                 print("  " + _eval(b, WALK_ADJUST.replace("__RATE__", repr(rate))))
+                print("  now " + _eval(b, WALK_FACTORS))
+
             print()
+            print("  pass   frames   moved%    step px/frame")
+            for (i2, n2, r2, v2) in hist:
+                print(f"  {i2:<7}{n2:<9}{r2 * 100:>5.1f}    {v2:>10.5f}")
+            print()
+            cur = _parse_factors(_eval(b, WALK_FACTORS))
+            print(_eval(b, WALK_REPORT))
+            if cur:
+                nm = 280.0 * cur.get("normal", 1.0)
+                fm = 133.0 * cur.get("fast", 1.0)
+                sm = 400.0 * cur.get("slow", nm / 280.0)
+                print()
+                print("LOCKED FOR THIS FRAME RATE")
+                print(f"  normal = {nm:.3f} ms     fast = {fm:.3f} ms     slow = {sm:.3f} ms")
+                print()
+                print("Lock that in as a fixed constant (no frame-time measurement):")
+                print(f"  python tools/scroll_fix.py --walk-const {nm:.3f} {fm:.3f}")
+        elif args.walk_const is not None:
+            # Absolute durations, no measurement - reproducible and lockable.
+            nm, fm = args.walk_const
+            factors = {"normal": nm / 280.0, "fast": fm / 133.0}
+            print(f"applying fixed durations: normal {nm:.3f} ms, fast {fm:.3f} ms")
+            print(f"  (slow left at 400 ms; multipliers normal x{factors['normal']:.6f} "
+                  f"fast x{factors['fast']:.6f})")
+            print(_eval(b, WALK_FIX.replace("__FACTORS__", _lua_factors(factors))))
             print(_eval(b, WALK_REPORT))
         elif args.walk_speed is not None:
             # Deliberately wrong on purpose: a big obvious speed change proves the
@@ -1081,6 +1140,12 @@ def main():
             print("  --walk-fix      apply the fix (run once per game launch, while in the overworld)")
             print("  --walk-report   show whether it is active, plus call and re-apply counts")
             print("  --off           undo it immediately (also undone by closing the game)")
+            print()
+            print("CALIBRATION")
+            print("  --walk-calibrate --seconds 8   closed loop: corrects until the measured")
+            print("                                 step is 1 px/frame, printing every pass and")
+            print("                                 the durations to lock in")
+            print("  --walk-const NORMAL FAST       apply fixed durations (no measurement)")
             print()
             print("DIAGNOSTICS")
             print("  --measure --seconds 8   per-frame world step histogram, to verify it worked")
