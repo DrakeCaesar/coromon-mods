@@ -865,6 +865,22 @@ s.arrived = s.arrived or 0
 s.n = 0
 s.DIST = 16
 s.dt = 16.95
+-- The engine's own nominal frame time is the right basis for the schedule: it is
+-- exactly 1000/fps (16.949152542373 here) and our tile duration is 16 x that, so
+-- duration / msPerFrame lands on exactly 16.0. Deriving the frame count from a
+-- MEASURED frame time instead is fragile: one hitch drags an exponential average
+-- up, the count rounds to 15, and then the schedule advances 16/15 = 1.067 px per
+-- frame - which shows up in play as a 2 px jump every ~14 frames.
+s.nominal = nil
+pcall(function()
+  if type(display.msPerFrame) == 'number' and display.msPerFrame > 1 then
+    s.nominal = display.msPerFrame
+  end
+end)
+-- measured sprite step per frame, so the report is evidence and not a claim
+s.mn, s.msum = 0, 0
+s.mmin, s.mmax = nil, nil
+s.mhist = {}
 
 -- The transition module keeps its list of live transitions in a module-local,
 -- which has to be found through debug.getupvalue. The name is not stable across
@@ -925,6 +941,23 @@ local function tick()
   if d > 4 and d < 60 then st.dt = st.dt * 0.9 + d * 0.1 end
   st.n = st.n + 1
   if st.n % 120 == 0 then playerSprite() end
+  do  -- what actually happened to the sprite this frame
+    local spr = st.sprite
+    if type(spr) == 'table' and type(spr.x) == 'number' then
+      if st.mx then
+        local d = math.abs(spr.x - st.mx) + math.abs(spr.y - st.my)
+        if d > 0.001 then
+          st.mn = st.mn + 1
+          st.msum = st.msum + d
+          if not st.mmin or d < st.mmin then st.mmin = d end
+          if not st.mmax or d > st.mmax then st.mmax = d end
+          local b = math.floor(d + 0.5)
+          st.mhist[b] = (st.mhist[b] or 0) + 1
+        end
+      end
+      st.mx, st.my = spr.x, spr.y
+    end
+  end
   if not st.list then
     st.list = findList()
     if not st.list then return false end
@@ -937,8 +970,10 @@ local function tick()
         -- How many frames this move SHOULD take. The engine rounds the duration to
         -- whole ms, so duration/frame_time is 16 for walking and 8 for running, and
         -- a tile is 16 px: 16/frames px per frame, i.e. exactly 1 or exactly 2.
-        tr.__lockFrames = math.max(1, math.floor(tr.duration / st.dt + 0.5))
+        local basis = st.nominal or st.dt
+        tr.__lockFrames = math.max(1, math.floor(tr.duration / basis + 0.5))
         tr.__lockN = 0
+        st.lastD, st.lastF, st.lastBasis = tr.duration, tr.__lockFrames, basis
         st.moves = st.moves + 1
       end
       tr.__lockN = tr.__lockN + 1
@@ -975,6 +1010,19 @@ return table.concat({
     tostring(s.on), s.moves or 0, s.adj or 0, s.arrived or 0, live),
   string.format('frame time %.2f ms  ->  a 271 ms tile takes %d frames = %.2f px/frame',
     s.dt or 0, f, 16 / f),
+  string.format('measured sprite step: %d frames, mean %.4f px/frame, min %.4f, max %.4f',
+    s.mn or 0, (s.msum or 0) / math.max(1, s.mn or 1), s.mmin or 0, s.mmax or 0),
+  'step histogram: ' .. (function()
+    local t = {}
+    for k, c in pairs(s.mhist or {}) do t[#t + 1] = { k, c } end
+    table.sort(t, function(a, b) return a[1] < b[1] end)
+    local o = {}
+    for _, r in ipairs(t) do o[#o + 1] = string.format('%dpx=%d', r[1], r[2]) end
+    return (#o > 0) and table.concat(o, '  ') or '(nothing measured yet - walk a few steps)'
+  end)(),
+  string.format('last tile move: duration=%s ms  frame count=%s  basis=%s ms  ->  %.4f px/frame',
+    tostring(s.lastD), tostring(s.lastF), tostring(s.lastBasis),
+    s.lastF and (16 / s.lastF) or 0),
   'transition list: ' .. tostring(s.listInfo),
   'counters are cumulative since the lock was first installed in this game run',
   'expect live transitions 0 while standing still, 1 while a tile move runs',
