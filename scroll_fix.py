@@ -943,7 +943,19 @@ def main():
             print(_eval(b, STATUS))
             measure(b, args.seconds, "current")
         else:
-            ap.print_help()
+            print(__doc__.strip())
+            print()
+            print("EVERYDAY COMMANDS")
+            print("  --walk-fix      apply the fix (run once per game launch, while in the overworld)")
+            print("  --walk-report   show whether it is active, plus call and re-apply counts")
+            print("  --off           undo it immediately (also undone by closing the game)")
+            print()
+            print("DIAGNOSTICS")
+            print("  --measure --seconds 8   per-frame world step histogram, to verify it worked")
+            print()
+            print("Leftovers from the investigation, not needed for normal use:")
+            print("  --on --snap --trace --trace-spawn --find-speed --set-speed --walk-scale")
+            print("  --status --ab --trace-report --snap-report --trace-spawn-report")
     finally:
         b.detach()
     return 0
