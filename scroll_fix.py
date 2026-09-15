@@ -999,17 +999,29 @@ local function drive(spr, x, y)
   if not st or not st.on then return false end
   if spr ~= st.sprite and spr ~= st.shadow then return false end      -- not the player
   if st.armed then
-    if math.abs(x - st.lastx) + math.abs(y - st.lasty) > 0.5 then
-      st.n = st.n + 1                       -- the engine moved on: one more frame
-      local k = st.n * st.step
-      if k >= st.DIST then
-        st.armed, st.hold = false, true
-        st.tail = 1
-        place(st.sx + st.dirx * st.DIST, st.sy + st.diry * st.DIST)   -- tile centre
-      else
+    -- Take this frame's progress from the engine's own request, projected onto the
+    -- direction we captured, instead of counting calls.
+    --
+    -- Counting calls is what produced the occasional 2 px frame: the engine asks for
+    -- the sprite AND for the shadow, and both come through here, so one frame could
+    -- be counted twice. The projection gives the same k for both calls, so they
+    -- cannot add up; and k only ever moves forwards, so a stale request cannot pull
+    -- the position back either. Rounding to whole pixels is what removes the engine's
+    -- own +-3% interpolation error.
+    local ds = math.abs(st.dirx) + math.abs(st.diry)
+    if ds > 0 then
+      local along = ((x - st.sx) * st.dirx + (y - st.sy) * st.diry) / (ds * st.step)
+      local k = math.floor(along + 0.5)
+      if k > (st.n or 0) then
+        if k > st.DIST then k = st.DIST end
+        st.n = k
+        if k >= st.DIST then
+          st.armed, st.hold = false, true
+          st.tail = 1
+        end
         place(st.sx + st.dirx * k, st.sy + st.diry * k)
+        st.moved = st.moved + 1
       end
-      st.moved = st.moved + 1
     end
     st.lastx, st.lasty = x, y
     return true                             -- and the engine's own value is dropped
@@ -1579,6 +1591,8 @@ local function sim(name, dx, dy, frames, expectX, expectY)
     -- step at a time. The lock intercepts the request. The shadow is not touched
     -- here: the lock places it, and that is part of what is being asserted.
     MTE.setSpriteLocation(fake.sprite, 100.0 + dx * (f * 1.03), 100.0 + dy * (f * 1.03))
+    -- the engine asks for the shadow too, in the same frame: same k, so no 2 px frame
+    MTE.setSpriteLocation(fake.shadow, 108.0 + dx * (f * 1.03), 100.0 + dy * (f * 1.03))
     tiledWorld.x = 122.0 - dx * (f * 1.03)      -- the engine scrolls the world too
     tiledWorld.y = 52.0 - dy * (f * 1.03)
     tick()                                      -- the listener runs after the engine
