@@ -866,15 +866,43 @@ s.n = 0
 s.DIST = 16
 s.dt = 16.95
 
--- The transition module keeps its list of live transitions in an upvalue of .to.
-local list
-for i = 1, 10 do
-  local nm, v = debug.getupvalue(trans.to, i)
-  if not nm then break end
-  if nm == 't' and type(v) == 'table' then list = v end
+-- The transition module keeps its list of live transitions in a module-local,
+-- which has to be found through debug.getupvalue. The name is not stable across
+-- builds and the module is loaded lazily, so this looks for anything that LOOKS
+-- like a list of transitions, retries on every frame until it finds one, and
+-- records what it saw when it fails (the report prints that).
+local function looksLikeTransitions(v)
+  if type(v) ~= 'table' then return false end
+  local e = v[1]
+  if type(e) ~= 'table' then return false end
+  return (e.duration ~= nil) or (e.startTime ~= nil) or (e.target ~= nil)
 end
-if not list then return '!could not find the live transition list!' end
-s.list = list
+
+local function findList()
+  local seen = {}
+  for i = 1, 30 do
+    local nm, v = debug.getupvalue(trans.to, i)
+    if not nm then break end
+    seen[#seen + 1] = nm
+    -- match by name first: the list is EMPTY until a move starts, and an empty
+    -- table cannot be recognised by its contents
+    local named = (nm == 't') or nm:find('transition') or nm:find('list')
+    if type(v) == 'table' and (named or looksLikeTransitions(v)) then
+      s.listInfo = 'upvalue "' .. nm .. '" (named ' .. tostring(named) .. ')'
+      return v
+    end
+  end
+  for k, v in pairs(trans) do
+    if looksLikeTransitions(v) then
+      s.listInfo = 'field "' .. tostring(k) .. '"'
+      return v
+    end
+  end
+  s.listInfo = 'not found; upvalues of transitions.to = {' .. table.concat(seen, ', ') .. '}'
+  return nil
+end
+
+s.list = findList()
 
 local function playerSprite()
   local spr
@@ -896,6 +924,10 @@ local function tick()
   if d > 4 and d < 60 then st.dt = st.dt * 0.9 + d * 0.1 end
   st.n = st.n + 1
   if st.n % 120 == 0 then playerSprite() end
+  if not st.list then
+    st.list = findList()
+    if not st.list then return false end
+  end
   local spr = st.sprite
   if type(spr) ~= 'table' then return false end
   for _, tr in ipairs(st.list) do
@@ -925,8 +957,8 @@ end
 s.l = tick
 s.tick = tick
 Runtime:addEventListener('enterFrame', tick)
-return string.format('walk lock ON (timeline): %d live transitions, frame time %.2f ms',
-  #list, s.dt)
+return string.format('walk lock ON (timeline): live transitions via %s, frame time %.2f ms',
+  tostring(s.listInfo), s.dt)
 """
 
 WALK_LOCK_REPORT = PRELUDE + r"""
@@ -942,6 +974,7 @@ return table.concat({
     tostring(s.on), s.moves or 0, s.adj or 0, s.arrived or 0, live),
   string.format('frame time %.2f ms  ->  a 271 ms tile takes %d frames = %.2f px/frame',
     s.dt or 0, f, 16 / f),
+  'transition list: ' .. tostring(s.listInfo),
   'expect live transitions 0 while standing still, 1 while a tile move runs',
 }, '\n')
 """
@@ -1825,6 +1858,11 @@ def main():
                     help="max calibration passes (0 = until it converges, default)")
     ap.add_argument("--walk-report", action="store_true",
                     help="show the baseline getGridMoveTimeBySpeed descriptors")
+    ap.add_argument("--apply", action="store_true",
+                    help="reapply everything after a game restart: tile duration + walk lock ")
+                    # + recorder
+    ap.add_argument("--no-record", action="store_true",
+                    help="with --apply, skip starting the frame recorder")
     ap.add_argument("--walk-lock", nargs="?", const="on", default=None,
                     choices=["on", "off", "report"],
                     help="drive the sprite from the frame count so it advances a whole number "
@@ -1995,6 +2033,29 @@ def main():
             print(_eval(b, SET_SPEED.replace("__SPEED__", repr(args.set_speed))))
         elif args.walk_report:
             print(_eval(b, WALK_REPORT))
+        elif args.apply:
+            # Everything the fix needs, in the order it needs to happen. Run this
+            # once per game launch, while in the overworld (the tile duration is
+            # applied to the live player spawnable, which only exists in a map).
+            dt = _measure_dt(b)
+            fn = (16.0 * dt) / 280.0
+            ff = (8.0 * dt) / 133.0
+            print("1) tile duration: "
+                  f"frame time {dt:.4f} ms -> normal {280.0 * fn:.2f} ms = 16 frames, "
+                  f"fast {133.0 * ff:.2f} ms = 8 frames")
+            print("   " + _eval(b, WALK_FIX.replace(
+                "__FACTORS__", _lua_factors({"normal": fn, "fast": ff}))))
+            print()
+            print("2) walk lock: exactly one frame of progress per rendered frame")
+            print("   " + _eval(b, WALK_LOCK_INSTALL))
+            print()
+            if not args.no_record:
+                print("3) frame recorder (for --walk-diag report)")
+                print("   " + _eval(b, WALK_DIAG_INSTALL))
+                print()
+            print(_eval(b, WALK_LOCK_REPORT))
+            print()
+            print(_eval(b, WALK_REPORT))
         elif args.walk_lock is not None:
             if args.walk_lock == "off":
                 print(_eval(b, WALK_LOCK_REMOVE))
@@ -2041,11 +2102,12 @@ def main():
             print(__doc__.strip())
             print()
             print("EVERYDAY COMMANDS")
-            print("  --walk-lock     THE FIX: the sprite advances exactly 1 px (or 2 running) per")
-            print("                  frame, driven by the frame count, so no 0 px or 2 px steps")
-            print("  --walk-lock report / off")
-            print("  --walk-report   show whether the duration scaling is active")
-            print("  --off           undo all of it immediately (also undone by closing the game)")
+            print("  --apply         APPLY THE FIX after each game launch (run it in the")
+            print("                  overworld - it measures the frame time and installs both")
+            print("                  parts, then starts the recorder)")
+            print("  --walk-lock     the exact-step part on its own (on|off|report)")
+            print("  --walk-report   show whether the tile duration scaling is active")
+            print("  --off           undo it immediately (also undone by closing the game)")
             print()
             print("CALIBRATION")
             print("  --walk-calibrate --seconds 8   closed loop: corrects until the measured")
