@@ -169,15 +169,182 @@ return 'installed, wrapped: ' .. table.concat(s.names, ', ')
 
 REMOVE = PRELUDE + r"""
 local MTE, tw = world()
+local lines = {}
+
 local s = _G.__scrollfix
-if not s then return 'was not installed' end
-if type(MTE) == 'table' then
-  for _, n in ipairs(s.names or {}) do
-    if s.orig[n] then MTE[n] = s.orig[n] end
+if s then
+  if type(MTE) == 'table' then
+    for _, n in ipairs(s.names or {}) do
+      if s.orig[n] then MTE[n] = s.orig[n] end
+    end
+  end
+  _G.__scrollfix = nil
+  lines[#lines + 1] = 'restored: ' .. table.concat(s.names or {}, ', ')
+else
+  lines[#lines + 1] = 'scroll fix was not installed'
+end
+
+local t = _G.__mtetrace
+if t then
+  if type(MTE) == 'table' then
+    for k, fn in pairs(t.orig) do MTE[k] = fn end
+  end
+  _G.__mtetrace = nil
+  lines[#lines + 1] = 'restored tracer'
+end
+
+local sn = _G.__snap
+if sn then
+  if type(MTE) == 'table' then
+    for k, fn in pairs(sn.orig) do MTE[k] = fn end
+  end
+  _G.__snap = nil
+  lines[#lines + 1] = 'restored snap: ' .. table.concat(sn.names, ', ')
+end
+
+return table.concat(lines, '\n')
+"""
+
+# ---------------------------------------------------------------------------
+# Empirical tracer. Static analysis guessed the wrong funnel once already, so
+# instead of guessing again, count calls into EVERY public MTE function and see
+# which one actually fires while walking.
+# ---------------------------------------------------------------------------
+TRACE_INSTALL = PRELUDE + r"""
+local MTE = _G.MTE
+if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
+if _G.__mtetrace then return 'already tracing' end
+
+local t = { orig = {}, counts = {} }
+_G.__mtetrace = t
+local n = 0
+for k, v in pairs(MTE) do
+  if type(v) == 'function' then
+    t.orig[k] = v
+    t.counts[k] = 0
+    MTE[k] = (function(name, fn)
+      return function(...)
+        t.counts[name] = t.counts[name] + 1
+        return fn(...)
+      end
+    end)(k, v)
+    n = n + 1
   end
 end
-_G.__scrollfix = nil
-return 'restored: ' .. table.concat(s.names or {}, ', ')
+return 'tracing ' .. n .. ' MTE functions - now walk around'
+"""
+
+# ---------------------------------------------------------------------------
+# The real fix. The tracer showed moveSprite/translateCamera are never called,
+# while editObject fires once per walking frame, and the movement class
+# (classes.spawnables.abstractEightDirectionalMovingSpawnable) calls
+# MTE.<fn>(sprite, { deltaX = ..., deltaY = ... }).
+#
+# So the world's motion is inherited from the SPRITE's per-frame motion, and the
+# sprite moves a fractional number of pixels per frame. Snapping the sprite's
+# per-frame delta to whole content pixels makes the world advance exactly 1 pixel
+# every frame, which survives the game's own rounding - a constant integer
+# advance rounds to itself.
+#
+# Argument tables are rounded in place; both absolute (x/y) and delta
+# (deltaX/deltaY/dx/dy) forms are handled so it does not matter which one the
+# call site uses.
+# ---------------------------------------------------------------------------
+SNAP_INSTALL = PRELUDE + r"""
+local MTE = _G.MTE
+if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
+if _G.__snap then return 'already installed' end
+
+local st = { orig = {}, names = {}, calls = 0, rounded = 0, touched = {} }
+_G.__snap = st
+
+-- round to whole content pixels; a non-zero never collapses to zero
+local function snapVal(v)
+  if type(v) ~= 'number' then return v end
+  if v == 0 then return 0 end
+  local r = math.floor(math.abs(v) + 0.5)
+  if r < 1 then r = 1 end
+  return v < 0 and -r or r
+end
+
+local KEYS = { 'deltaX', 'deltaY', 'dx', 'dy', 'x', 'y' }
+
+local function snapArg(a)
+  if type(a) ~= 'table' then return false end
+  local changed = false
+  for _, k in ipairs(KEYS) do
+    local v = a[k]
+    if type(v) == 'number' then
+      local nv = snapVal(v)
+      if nv ~= v then
+        st.touched[k] = (st.touched[k] or 0) + 1
+        a[k] = nv
+        changed = true
+      end
+    end
+  end
+  return changed
+end
+
+local function wrap(name)
+  local orig = MTE[name]
+  if type(orig) ~= 'function' then return end
+  st.orig[name] = orig
+  st.names[#st.names + 1] = name
+  MTE[name] = function(a, b, c, d)
+    st.calls = st.calls + 1
+    local ch = snapArg(b)
+    if snapArg(c) then ch = true end
+    if snapArg(d) then ch = true end
+    if ch then st.rounded = st.rounded + 1 end
+    return orig(a, b, c, d)
+  end
+end
+
+for _, n in ipairs({ 'editObject', 'setSpriteLocation', 'moveSprite', 'translateCamera' }) do
+  wrap(n)
+end
+if #st.names == 0 then
+  _G.__snap = nil
+  return '!none of the movement functions exist!'
+end
+return 'snap installed on: ' .. table.concat(st.names, ', ')
+"""
+
+SNAP_REPORT = PRELUDE + r"""
+local st = _G.__snap
+if not st then return '!snap not installed!' end
+local out = {
+  'wrapped   : ' .. table.concat(st.names, ', '),
+  'calls     : ' .. tostring(st.calls),
+  'rounded   : ' .. tostring(st.rounded),
+}
+local keys = {}
+for k, c in pairs(st.touched) do keys[#keys + 1] = string.format('%s=%d', k, c) end
+table.sort(keys)
+out[#out + 1] = 'keys hit  : ' .. (#keys > 0 and table.concat(keys, '  ') or '(none)')
+return table.concat(out, '\n')
+"""
+
+TRACE_REPORT = PRELUDE + r"""
+local t = _G.__mtetrace
+if not t then return '!not tracing!' end
+local rows = {}
+for k, c in pairs(t.counts) do rows[#rows + 1] = { k, c } end
+table.sort(rows, function(a, b) return a[2] > b[2] end)
+local out = { 'MTE calls since tracing started:' }
+local shown = 0
+for i = 1, #rows do
+  if rows[i][2] > 0 then
+    shown = shown + 1
+    if shown <= 30 then
+      out[#out + 1] = string.format('  %-34s %d', rows[i][1], rows[i][2])
+    end
+  end
+end
+if shown == 0 then out[#out + 1] = '  (nothing called yet)' end
+out[#out + 1] = '  ' .. shown .. ' of ' .. #rows .. ' functions were called'
+return table.concat(out, '\n')
 """
 
 MEASURE_INSTALL = PRELUDE + r"""
@@ -281,6 +448,14 @@ def main():
     ap.add_argument("--measure", action="store_true", help="log per-frame world deltas")
     ap.add_argument("--ab", action="store_true",
                     help="measure baseline, install, measure again, then leave it installed")
+    ap.add_argument("--trace", action="store_true",
+                    help="count calls into every public MTE function (walk while it runs)")
+    ap.add_argument("--trace-report", action="store_true",
+                    help="print the MTE call counts accumulated so far")
+    ap.add_argument("--snap", action="store_true",
+                    help="round the per-frame movement delta to whole content pixels")
+    ap.add_argument("--snap-report", action="store_true",
+                    help="show what the snap wrapper has been catching")
     ap.add_argument("--seconds", type=float, default=6.0, help="seconds per measurement")
     args = ap.parse_args()
 
@@ -294,6 +469,14 @@ def main():
     try:
         if args.status:
             print(_eval(b, STATUS))
+        elif args.trace:
+            print(_eval(b, TRACE_INSTALL))
+        elif args.trace_report:
+            print(_eval(b, TRACE_REPORT))
+        elif args.snap:
+            print(_eval(b, SNAP_INSTALL))
+        elif args.snap_report:
+            print(_eval(b, SNAP_REPORT))
         elif args.off:
             print(_eval(b, REMOVE))
         elif args.on:
