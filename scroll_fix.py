@@ -967,11 +967,17 @@ local function tick()
     for _, c in ipairs(st.list or {}) do
       local m = math.max(math.abs(c.dx), math.abs(c.dy))
       if m >= mag - 0.3 and m <= mag + 0.3 then
-        c.dirx = (math.abs(c.dx) >= math.abs(c.dy)) and ((c.dx > 0) and 1 or -1)
-                                                or ((c.dy > 0) and 1 or -1)
-        c.diry = (math.abs(c.dy) >= math.abs(c.dx)) and ((c.dy > 0) and 1 or -1)
-                                                or ((c.dx > 0) and 1 or -1)
-        c.sx, c.sy = c.obj.x, c.obj.y   -- start our schedule from where it is now
+        -- Each axis independently, and an axis that is NOT moving must stay 0.
+        -- Deriving one from the other drove y as well on a purely horizontal
+        -- move, so our write fought the game's on the very next frame: the
+        -- sprite quivered diagonally and walked off, taking the camera with it.
+        c.dirx = (math.abs(c.dx) > 0.25) and ((c.dx > 0) and 1 or -1) or 0
+        c.diry = (math.abs(c.dy) > 0.25) and ((c.dy > 0) and 1 or -1) or 0
+        -- NOTE: do not re-baseline sx/sy here. The candidate scan already captured
+        -- the position at arm time, which is the tile centre, and this frame is
+        -- already counted as n=1. Re-baselining to the position the game has just
+        -- moved TO double-counts the first frame: every move would run one pixel
+        -- past the tile and be snapped back at the boundary.
         c.px, c.py = c.obj.x, c.obj.y
         keep[#keep + 1] = c
         names[#names + 1] = c.name
@@ -1336,6 +1342,107 @@ return string.format(
   .. string.format('\n   applied=%d skipped=%d saturated=%d  latched C=%.6f (want 240)',
        s.devN, s.skipped, s.sat, e.C or -1)
 """
+
+
+# ---------------------------------------------------------------------------
+# Regression test for the walk lock: replays whole tile moves against the REAL
+# arm/tick source lifted out of WALK_LOCK_INSTALL (so the test cannot drift from
+# the code), with a fake player that has a sprite and a shadow at different y.
+#
+# It exists because a horizontal move once drove y as well - the direction was
+# derived per object rather than per axis - and the sprite zigzagged diagonally
+# with the camera following it off-screen. That is a logic error, so it is
+# testable without the game, and it should have been tested before shipping.
+# Touches no game state and needs no input.
+# ---------------------------------------------------------------------------
+SELFTEST_LOCK = r"""
+local s = { moves = 0, driven = 0, released = 0, DIST = 16 }
+local spawnableHelper = nil
+local timer = { performWithDelay = function() return 1 end }
+
+__LOCK__
+
+-- the real tick() reads the state out of _G.__walklock and refuses to run unless
+-- st.tick is itself, so wire both up exactly as the install does
+_G.__walklock = s
+s.tick = tick
+
+-- fake player: sprite at (100,100), shadow at (100,104)
+local fake = { sprite = { x = 100.0, y = 100.0 }, shadow = { x = 100.0, y = 104.0 } }
+local originalMove = function() return { normal = 271 } end
+fake.getGridMoveTimeBySpeed = originalMove
+spawnableHelper = { getPlayerSpawnable = function() return fake end }
+
+local out = {}
+local function state()
+  return string.format(' [moves=%s list=%s step=%s primary=%s keep=%s driven=%s released=%s]',
+    tostring(s.moves), tostring(s.list and #s.list), tostring(s.step), tostring(s.primary),
+    tostring(s.keep and #s.keep), tostring(s.driven), tostring(s.released))
+end
+local function reset()
+  for k in pairs(s) do s[k] = nil end
+  s.moves, s.driven, s.released, s.DIST = 0, 0, 0, 16
+  s.tick = tick            -- cleared by the loop above; tick() refuses without it
+  s.on = true              -- likewise set by the install header we did not extract
+  fake.sprite.x, fake.sprite.y = 100.0, 100.0
+  fake.shadow.x, fake.shadow.y = 100.0, 104.0
+  fake.getGridMoveTimeBySpeed = originalMove   -- unwrap: do not nest wrappers
+  s.wrapped = nil
+  apply()
+end
+
+-- one tile move: the game interpolates 1.03 px/frame (fractional on purpose, to
+-- prove the step is taken from the frame count and not from the clock)
+local function sim(name, dx, dy, frames, expectX, expectY)
+  reset()
+  fake.getGridMoveTimeBySpeed()          -- the game signals a new tile move
+  local bad = nil
+  for f = 1, frames do
+    fake.sprite.x = 100.0 + dx * (f * 1.03)
+    fake.sprite.y = 100.0 + dy * (f * 1.03)
+    fake.shadow.x = 100.0 + dx * (f * 1.03)
+    fake.shadow.y = 104.0 + dy * (f * 1.03)
+    tick()
+    local ex, ey = 100.0 + expectX * f, 100.0 + expectY * f
+    if math.abs(fake.sprite.x - ex) > 1e-9 or math.abs(fake.sprite.y - ey) > 1e-9 then
+      bad = string.format('frame %d: sprite (%.2f,%.2f) wanted (%.2f,%.2f)',
+        f, fake.sprite.x, fake.sprite.y, ex, ey)
+      break
+    end
+    if math.abs(fake.shadow.x - (100.0 + expectX * f)) > 1e-9
+       or math.abs(fake.shadow.y - (104.0 + expectY * f)) > 1e-9 then
+      bad = string.format('frame %d: shadow (%.2f,%.2f) drifted from sprite',
+        f, fake.shadow.x, fake.shadow.y)
+      break
+    end
+  end
+  out[#out + 1] = string.format('%-28s -> %s   (sprite %.2f,%.2f  shadow %.2f,%.2f)'
+    , name, bad and ('FAIL: ' .. bad .. state()) or ('PASS ' .. s.driven .. ' frames driven'),
+    fake.sprite.x, fake.sprite.y, fake.shadow.x, fake.shadow.y)
+end
+
+sim('right (1,0) x16', 1, 0, 16, 1, 0)
+sim('left  (-1,0) x16', -1, 0, 16, -1, 0)
+sim('down  (0,1) x16', 0, 1, 16, 0, 1)
+sim('up    (0,-1) x16', 0, -1, 16, 0, -1)
+sim('diagonal (1,1) x16', 1, 1, 16, 1, 1)
+sim('diagonal (-1,-1) x16', -1, -1, 16, -1, -1)
+sim('running (2,0) x8', 2, 0, 8, 2, 0)
+return table.concat(out, '\n')
+"""
+
+
+def _lock_source():
+    """Lift the real lock body (candidates/arm/wrap/apply/handBack/tick) out of
+    WALK_LOCK_INSTALL, excluding the PRELUDE header and the listener registration."""
+    txt = WALK_LOCK_INSTALL
+    start = txt.index("local function playerInstance()")
+    end = txt.index("\ns.l = tick")
+    return txt[start:end]
+
+
+def selftest_lock(b):
+    print(_eval(b, SELFTEST_LOCK.replace("__LOCK__", _lock_source()), timeout=30.0))
 
 
 def _axis_source():
@@ -1856,6 +1963,9 @@ def main():
                          "of motion granularity), off/report")
     ap.add_argument("--subpixel-grid", type=float, default=3.0,
                     help="device pixels per content pixel for --walk-subpixel grid (default 3)")
+    ap.add_argument("--selftest-lock", action="store_true",
+                    help="replay whole tile moves against the real walk lock code and check "
+                         "the axes (pure math, touches no game state, needs no input)")
     ap.add_argument("--selftest-subpixel", action="store_true",
                     help="replay a simulated walk against the real sub-pixel camera code "
                          "(pure math, touches no game state, needs no input)")
@@ -2031,6 +2141,8 @@ def main():
                     print("    python tools/scroll_fix.py --walk-subpixel report")
                     print()
                 print(_eval(b, SUBPIXEL_REPORT))
+        elif args.selftest_lock:
+            selftest_lock(b)
         elif args.selftest_subpixel:
             selftest_subpixel(b)
         elif args.off:
