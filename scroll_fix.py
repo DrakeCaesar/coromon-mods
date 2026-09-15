@@ -211,9 +211,10 @@ end
 
 local ws = _G.__walkscale
 if ws then
-  ws.inst.getGridMoveTimeBySpeed = ws.orig
+  if ws.timer then timer.cancel(ws.timer) end
+  if ws.patched and ws.orig then ws.patched.getGridMoveTimeBySpeed = ws.orig end
   _G.__walkscale = nil
-  lines[#lines + 1] = 'restored getGridMoveTimeBySpeed'
+  lines[#lines + 1] = 'restored getGridMoveTimeBySpeed and stopped the watchdog'
 end
 
 return table.concat(lines, '\n')
@@ -635,41 +636,60 @@ return 'wrapped getGridMoveTimeBySpeed, factor ' .. tostring(factor)
 """
 
 WALK_FIX = PRELUDE + r"""
--- per-key duration multipliers. normal -> 1 px/frame, fast -> 2 px/frame.
--- slow is left alone: its current step is ~0.67 px/frame, and the only way to
--- make THAT whole is 1 px/frame, which would erase the distinction from normal.
+-- Duration multipliers. normal -> 1 px/frame, fast -> 2 px/frame.
+-- slow is left alone: its step is ~0.67 px/frame and the only whole-pixel value
+-- is 1 px/frame, which would make it indistinguishable from normal.
 local factors = { normal = __FN__, fast = __FF__ }
-local inst
-pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
-if type(inst) ~= 'table' then return '!no player spawnable - are you in the overworld?!' end
 
-local st = _G.__walkscale
-if st then
-  st.factors = factors
-  return string.format('factors updated: normal x%.4f  fast x%.4f', factors.normal, factors.fast)
-end
-
-local orig = inst.getGridMoveTimeBySpeed
-if type(orig) ~= 'function' then return '!getGridMoveTimeBySpeed not found!' end
-st = { factors = factors, orig = orig, inst = inst, calls = 0, samples = {} }
+local st = _G.__walkscale or { calls = 0, samples = {}, reapplies = 0 }
 _G.__walkscale = st
-inst.getGridMoveTimeBySpeed = function(self, ...)
-  local r = orig(self, ...)
-  st.calls = st.calls + 1
-  if #st.samples < 4 and type(r) == 'table' then
-    local bits = {}
-    for k, v in pairs(r) do bits[#bits + 1] = tostring(k) .. '=' .. tostring(v) end
-    table.sort(bits)
-    st.samples[#st.samples + 1] = '{' .. table.concat(bits, ', ') .. '}'
-  end
-  if type(r) == 'table' then
-    for k, f in pairs(st.factors) do
-      if type(r[k]) == 'number' then r[k] = r[k] * f end
+st.factors = factors
+
+-- Wrap the method on whatever the CURRENT player spawnable is. The game builds
+-- a fresh spawnable on every map change and save load, so the wrapper has to be
+-- re-applied or the fix silently disappears when you change area.
+local function wrap(inst)
+  if type(inst) ~= 'table' then return false end
+  local orig = inst.getGridMoveTimeBySpeed
+  if type(orig) ~= 'function' then return false end
+  inst.getGridMoveTimeBySpeed = function(self, ...)
+    local r = orig(self, ...)
+    st.calls = st.calls + 1
+    if type(r) == 'table' then
+      for k, f in pairs(st.factors) do
+        if type(r[k]) == 'number' then r[k] = r[k] * f end
+      end
+      if #st.samples < 3 then
+        local bits = {}
+        for k, v in pairs(r) do bits[#bits + 1] = tostring(k) .. '=' .. tostring(v) end
+        table.sort(bits)
+        st.samples[#st.samples + 1] = '{' .. table.concat(bits, ', ') .. '}'
+      end
     end
+    return r
   end
-  return r
+  st.orig = orig
+  st.patched = inst
+  return true
 end
-return 'walk fix installed'
+
+local function apply()
+  local inst
+  pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
+  if type(inst) ~= 'table' or inst == st.patched then return end
+  if wrap(inst) then st.reapplies = st.reapplies + 1 end
+end
+
+apply()
+if not st.timer then
+  st.timer = timer.performWithDelay(1000, apply, 0)
+end
+
+if not st.patched then
+  return '!no player spawnable found - are you in the overworld?!'
+end
+return string.format('walk fix active: normal x%.4f  fast x%.4f  (watchdog re-applies every 1s)',
+  factors.normal, factors.fast)
 """
 
 DT_INSTALL = r"""
@@ -697,8 +717,10 @@ return string.format('%d\t%.4f', s.n, (s.t1 - s.t0) / n)
 
 WALK_REPORT = PRELUDE + r"""
 local st = _G.__walkscale
-if not st then return '!not wrapped - run --walk-fix first!' end
-local out = { 'calls     : ' .. tostring(st.calls), 'baseline descriptors returned:' }
+if not st then return '!not active - run --walk-fix first!' end
+local out = { 'calls     : ' .. tostring(st.calls),
+              're-applies: ' .. tostring(st.reapplies or 0) .. '   (map changes / save loads)',
+              'watchdog  : ' .. tostring(st.timer ~= nil) }
 if st.factors then
   for k, f in pairs(st.factors) do out[#out + 1] = '  factor ' .. k .. ' = ' .. tostring(f) end
 end
