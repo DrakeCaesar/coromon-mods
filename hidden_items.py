@@ -3,9 +3,9 @@
 hidden_items.py - find and highlight Coromon's hidden overworld items.
 
 Coromon scatters items that are invisible until you walk into the tile they sit
-on. They are plain Tiled objects with `class = "hiddenItem"` in an object layer
-(usually `interactObjects`), each carrying `item1_UID` / `item1_amount`. On
-`electricTown` alone there are 8 of them.
+on. They are plain Tiled objects with `class = "hiddenItem"` in an object layer,
+carrying their contents in up to three item<N>_UID / item<N>_amount slots.
+Containers (chests) use the same slot layout, so every item in them is shown.
 
 This reads the live map out of the running game and draws a marker over each one,
 so you can see where they are without walking the whole map. Labels show the
@@ -18,10 +18,14 @@ Usage:
     python hidden_items.py --off       # remove the markers
     python hidden_items.py --no-labels # markers only, no item names
     python hidden_items.py --crates    # also mark item chests (amber borders)
+    python hidden_items.py --all       # every item-carrying class
 
 Chests are off by default because they are visible objects anyway; when enabled they
-get amber borders so they can be told apart from the white hidden-item borders. They
-use the same runtime mechanism (see below), so collected ones drop out the same way.
+get amber borders so they can be told apart from the white hidden-item borders.
+
+Collected objects drop out of the markers, but the classes do NOT all share one
+mechanism - see stillPresent() below. Only hidden items and chests have been verified
+for that; the --all extras are unverified.
 
 The markers are children of the game's own `tiledWorld` node, positioned in map
 pixel coordinates, so they scroll with the map for free - no per-frame work. A
@@ -45,6 +49,42 @@ from coromon_lua import MINIMAL_HOOKS, Bridge  # noqa: E402
 # save property instead (itemChestIsOpened). stillPresent() handles both.
 HIDDEN_CLASSES = ["hiddenItem"]
 CHEST_CLASSES = ["itemChest", "pyramidItemChest"]
+# Every other class that carries an item, inventoried across all 194 shipped map files
+# with Tiled templates resolved (most of these objects get their class via a template,
+# not inline): hiddenItem 371, itemChest 310, fruitGrowingPot 41, pyramidItemChest 30,
+# drillShovelItem 11, item 9, treeItem 1.
+#
+# fruitGrowingPot is deliberately excluded even from --all: it is a repeatable
+# harvester (you plant a fruit and take the yield), not a one-time pickup, so
+# "already collected" has no meaning for it.
+OTHER_CLASSES = ["drillShovelItem", "item", "treeItem"]
+
+# Marker label font. The game ships only two text sizes - 8 and 10, with _bold only at
+# 10 - so this is a straight choice between them, and it applies to EVERY line: the
+# first item is no longer emphasised. Change it here.
+#     "small" -> outline_8         (measured 60x15)
+#     "big"   -> outline_10_bold   (measured 80x18)
+# The line spacing is deliberately tighter than the text object's height: Solar2D
+# reports contentHeight == height, i.e. the whole padded line box, and the pixel font's
+# glyphs occupy well under that. Lower these further if the stack still looks loose.
+FONT = "small"
+FONTS = {
+    "small": ("outline_8", 10),
+    "big": ("outline_10_bold", 12),
+}
+
+
+def _font_of(choice):
+    return FONTS.get(str(choice).lower(), FONTS["small"])
+
+
+def _sub(code, classes_lua, font_type, line_h):
+    """Fill in the placeholders the Lua snippets are written with."""
+    return (
+        code.replace("__CLASSES__", classes_lua)
+        .replace("__FONT__", "'" + font_type + "'")
+        .replace("__LINE_H__", str(line_h))
+    )
 
 
 def _lua_classes(classes):
@@ -119,9 +159,14 @@ local function runtimeEntry(o)
   local MTE = _G.MTE
   local ok, list = pcall(function() return MTE.getObjectsAtTile(o.tileX, o.tileY) end)
   if not ok or type(list) ~= 'table' then return nil end
+  -- Deliberately NOT restricted to the 'interactObjects' layer. Item carriers also
+  -- live on layers named items, gems, birds, interactObjects_custom, and on
+  -- conditional variants like interactObjects#whileChristmas or afterDEFEAT_GHOST_TITAN.
+  -- The runtime name is the Tiled name plus a suffix, which is specific enough on its
+  -- own, so matching that prefix is both necessary and sufficient.
   for _, e in pairs(list) do
-    if type(e) == 'table' and e.layerName == 'interactObjects'
-       and type(e.name) == 'string' and e.name:sub(1, #n) == n then
+    if type(e) == 'table' and type(e.name) == 'string'
+       and e.name:sub(1, #n) == n then
       return e
     end
   end
@@ -156,17 +201,36 @@ local function collect()
            and type(o.tileX) == 'number' and type(o.tileY) == 'number' then
           -- properties turn up under either name depending on the object
           local P = o.tiledProperties or o.properties or {}
-          local uid = tostring(P.item1_UID or '?')
-          local iname = itemName(uid)
-          local amount = tonumber(P.item1_amount) or 1
+          -- Containers can hold up to THREE items, in item<N>_UID / item<N>_amount
+          -- slots. An empty slot is a nil UID with amount 0, so both are tested.
+          -- Growing pots, ground items and tree items use a plain itemUID instead.
+          local lines, uids = {}, {}
+          for n = 1, 3 do
+            local u = P['item' .. n .. '_UID']
+            local a = tonumber(P['item' .. n .. '_amount']) or 0
+            if u ~= nil and a > 0 then
+              local nm = itemName(tostring(u))
+              -- counts are only appended above 1 - "Silver Spinner x1" is noise
+              lines[#lines + 1] = a > 1 and (nm .. ' x' .. a) or nm
+              uids[#uids + 1] = tostring(u)
+            end
+          end
+          if #lines == 0 and P.itemUID ~= nil then
+            lines[1] = itemName(tostring(P.itemUID))
+            uids[1] = tostring(P.itemUID)
+          end
+          if #lines == 0 then
+            lines[1], uids[1] = '?', '?'
+          end
           items[#items + 1] = {
             tx = o.tileX, ty = o.tileY,
-            uid = uid,
-            name = iname,
-            amount = amount,
-            -- one label for both the console list and the on-screen marker. The
-            -- count is only appended above 1 - "Silver Spinner x1" is just noise.
-            label = amount > 1 and (iname .. ' x' .. amount) or iname,
+            -- lines[1] is the "top name"; lines/uids carry the whole contents
+            uid = uids[1],
+            name = lines[1],
+            amount = tonumber(P.item1_amount) or 1,
+            lines = lines,
+            uids = uids,
+            label = lines[1],
             kind = o.class,
             layer = tostring(o.layerName or '?'),
             collected = not stillPresent(o),
@@ -218,8 +282,12 @@ for _, it in ipairs(items) do
   end
   local kind = (it.kind == 'hiddenItem') and '' or ('   [' .. it.kind .. ']')
   out[#out + 1] = string.format('  tile (%3d,%3d)  %-24s   (%s)%s%s%s',
-    it.tx, it.ty, it.label, it.uid, kind,
+    it.tx, it.ty, it.lines[1], it.uids[1], kind,
     it.collected and '   [already collected]' or '', tag)
+  -- a container can hold up to three items; the rest sit under the top name
+  for i = 2, #it.lines do
+    out[#out + 1] = string.format('  %-13s  %-24s   (%s)', '', it.lines[i], it.uids[i])
+  end
 end
 return table.concat(out, '\n')
 """
@@ -289,9 +357,15 @@ local function draw(map, items, tw)
       g:insert(r)
     end
     if s.labels then
-      local t = textHelper:new(g, 'outline_10_bold', { text = it.label })
-      t.x, t.y = x0 + 8, y0 - 2
-      g:insert(t)
+      -- Every line uses the same font - see FONT at the top of the Python. The block
+      -- is lifted so its LAST line still sits just above the tile, which keeps the
+      -- first item highest.
+      local n = #it.lines
+      for i = 1, n do
+        local t = textHelper:new(g, __FONT__, { text = it.lines[i] })
+        t.x, t.y = x0 + 8, y0 - 2 - (n - i) * __LINE_H__
+        g:insert(t)
+      end
     end
   end
   tw:insert(g)          -- appended last, so drawn over every map layer
@@ -370,21 +444,32 @@ def main():
         action="store_true",
         help="also mark item chests (itemChest / pyramidItemChest), not just hidden items",
     )
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help="mark every item-carrying class (hidden items, chests, drill/gem spots, "
+        "ground items, tree items)",
+    )
     args = ap.parse_args()
 
-    classes = HIDDEN_CLASSES + (CHEST_CLASSES if args.crates else [])
+    classes = list(HIDDEN_CLASSES)
+    if args.crates or args.all:
+        classes += CHEST_CLASSES
+    if args.all:
+        classes += OTHER_CLASSES
     cls_lua = _lua_classes(classes)
+    font_type, line_h = _font_of(FONT)
 
     b = _bridge(args.process)
     if args.off:
         print(_eval(b, OFF))
     elif args.list:
-        print(_eval(b, LIST.replace("__CLASSES__", cls_lua)))
+        print(_eval(b, _sub(LIST, cls_lua, font_type, line_h)))
     else:
         print(
             _eval(
                 b,
-                SHOW.replace("__CLASSES__", cls_lua).replace(
+                _sub(SHOW, cls_lua, font_type, line_h).replace(
                     "__LABELS__", "false" if args.no_labels else "true"
                 ),
             )

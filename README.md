@@ -158,14 +158,63 @@ coordinates are in that space (not pixels).
 
 Coromon scatters items that stay invisible until you walk onto their tile. They are
 plain Tiled objects with `class = "hiddenItem"` in an object layer (usually
-`interactObjects`), each carrying `item1_UID` / `item1_amount`:
+`interactObjects`), carrying their contents in up to three slots:
 
 ```bash
 python tools/hidden_items.py --list    # print them with tile coords
 python tools/hidden_items.py           # draw a marker over each one
 python tools/hidden_items.py --crates  # also mark item chests (amber borders)
+python tools/hidden_items.py --all     # every item-carrying class
 python tools/hidden_items.py --off     # remove the markers
 ```
+
+**Which classes carry items.** Inventoried across all 194 shipped map files, with
+Tiled templates resolved (most of these objects get their class from a template, not
+inline — 369 `hiddenItem` and 253 `itemChest` entries are template-based, so a naive
+scan of inline `class` fields misses nearly all of them):
+
+| class | count | item property | covered by |
+|---|---|---|---|
+| `hiddenItem` | 371 | `item1_UID` | default |
+| `itemChest` | 310 | `item1_UID` | `--crates` |
+| `fruitGrowingPot` | 41 | `itemUID` | never — see below |
+| `pyramidItemChest` | 30 | `item1_UID` | `--crates` |
+| `drillShovelItem` | 11 | `item1_UID` | `--all` |
+| `item` | 9 | `itemUID` | `--all` |
+| `treeItem` | 1 | `itemUID` | `--all` |
+
+`fruitGrowingPot` is excluded even from `--all`: it is a repeatable harvester (plant a
+fruit, take the yield), not a one-time pickup, so "already collected" has no meaning.
+
+**Containers hold up to three items**, in `item<N>_UID` / `item<N>_amount` slots — an
+empty slot is a nil UID with amount 0, so both are tested. Every item is shown: the
+first is the "top name" and the rest stack underneath it on screen, with the block
+lifted so its last line still sits just above the tile. In `--list` the extras are
+indented under the first.
+
+**Label font** is one choice for every line, set by the `FONT` variable at the top of
+`hidden_items.py`:
+
+| `FONT` | fontType | measured | line spacing |
+|---|---|---|---|
+| `"small"` (current) | `outline_8` | 60×15 | 10px |
+| `"big"` | `outline_10_bold` | 80×18 | 12px |
+
+The spacing is deliberately tighter than the measured height, because Solar2D reports
+`contentHeight == height` — the whole padded line box — while the pixel glyphs occupy
+well under it. Tune the numbers in the `FONTS` table.
+
+The game ships only two text sizes — **8 and 10**, with `_bold` only at 10 — so there
+is no third option. `plain_*` variants exist but would not stay legible over a busy
+map, and the `*_nonPixelArt_*` variants (27 pages each vs 1–2) are the full-Unicode
+fallbacks the game switches to for languages the pixel font cannot render, so they are
+not a safe choice here.
+
+**The layers vary, so don't filter by layer.** Item carriers live on layers named
+`interactObjects`, `interactObjects_custom`, `items`, `gems`, `birds`, and on
+conditional variants like `interactObjects#whileChristmas`, `afterDEFEAT_GHOST_TITAN`
+and `whileDEMO`. Matching on the runtime **name prefix** is both necessary and
+sufficient, since the runtime name is the Tiled name plus a suffix.
 
 **Chests** are off by default (they're visible objects anyway). `--crates` adds
 `itemChest` / `pyramidItemChest`, drawn with amber borders so the two kinds are
@@ -177,7 +226,9 @@ in the bytecode — which is misleading. Measured on a chest that had been opene
 and reloaded: it is *still spawned*, sprite at `alpha = 1`, and the state is a
 consistent save property instead, `consistentSaveProperties.itemChestIsOpened = true`
 on `entry.properties.spawnable`. So absence from the runtime list is not enough for
-chests, and the tool checks both.
+chests, and the tool checks both. `drillShovelItem` / `item` / `treeItem` are **not
+yet verified** this way — if one of them turns out to use a third mechanism, its marker
+would linger after collection.
 
 Labels show the item's display name, resolved through the game's **own localisation**:
 `localise('items.<UID>.name')`. That follows the selected language (the game ships
@@ -197,7 +248,7 @@ live state is on the runtime objects from `MTE.getObjectsAtTile()`, and there ar
 different mechanisms:
 
 * **hidden items are removed** from the runtime list — their tile keeps only a
-  collision object, so no `interactObjects` entry means collected;
+  collision object, so no matching entry means collected;
 * **chests stay spawned** and flip `consistentSaveProperties.itemChestIsOpened = true`
   on the spawnable at `entry.properties.spawnable`.
 
