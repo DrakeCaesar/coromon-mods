@@ -157,11 +157,16 @@ local function collect()
           -- properties turn up under either name depending on the object
           local P = o.tiledProperties or o.properties or {}
           local uid = tostring(P.item1_UID or '?')
+          local iname = itemName(uid)
+          local amount = tonumber(P.item1_amount) or 1
           items[#items + 1] = {
             tx = o.tileX, ty = o.tileY,
             uid = uid,
-            name = itemName(uid),
-            amount = tonumber(P.item1_amount) or 1,
+            name = iname,
+            amount = amount,
+            -- one label for both the console list and the on-screen marker. The
+            -- count is only appended above 1 - "Silver Spinner x1" is just noise.
+            label = amount > 1 and (iname .. ' x' .. amount) or iname,
             kind = o.class,
             layer = tostring(o.layerName or '?'),
             collected = not stillPresent(o),
@@ -211,10 +216,9 @@ for _, it in ipairs(items) do
         or dy == -1 and 'up' or 'down') .. ')'
     end
   end
-  local amt = it.amount > 1 and string.format(' x%d', it.amount) or ''
   local kind = (it.kind == 'hiddenItem') and '' or ('   [' .. it.kind .. ']')
-  out[#out + 1] = string.format('  tile (%3d,%3d)  %-22s%s   (%s)%s%s%s',
-    it.tx, it.ty, it.name, amt, it.uid, kind,
+  out[#out + 1] = string.format('  tile (%3d,%3d)  %-24s   (%s)%s%s%s',
+    it.tx, it.ty, it.label, it.uid, kind,
     it.collected and '   [already collected]' or '', tag)
 end
 return table.concat(out, '\n')
@@ -285,7 +289,7 @@ local function draw(map, items, tw)
       g:insert(r)
     end
     if s.labels then
-      local t = textHelper:new(g, 'outline_10_bold', { text = it.name })
+      local t = textHelper:new(g, 'outline_10_bold', { text = it.label })
       t.x, t.y = x0 + 8, y0 - 2
       g:insert(t)
     end
@@ -320,7 +324,7 @@ if s.timer then pcall(function() timer.cancel(s.timer) end) end
 s.timer = timer.performWithDelay(1000, function() s.apply() end, 0)
 
 local names = {}
-for _, it in ipairs(vis) do names[#names + 1] = it.name end
+for _, it in ipairs(vis) do names[#names + 1] = it.label end
 return string.format('%d of %d collectable(s) still there on %s%s\n  %s',
   #vis, #items, tostring(map.path), tostring(map.filename), table.concat(names, ', '))
 """
