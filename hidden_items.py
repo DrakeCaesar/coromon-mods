@@ -50,6 +50,7 @@ CHEST_CLASSES = ["itemChest", "pyramidItemChest"]
 def _lua_classes(classes):
     return "{" + ", ".join("'" + c + "'" for c in classes) + "}"
 
+
 # ---------------------------------------------------------------------------
 # Shared helpers. Two things learned the hard way elsewhere in tools/:
 #   * the world node must be re-resolved, not cached - a cached one goes stale
