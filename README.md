@@ -147,9 +147,77 @@ coordinates are in that space (not pixels).
 | file | purpose |
 |---|---|
 | `coromon_starter.py` | the useful one — read the 3 starter potentials and draw them on screen |
+| `hidden_items.py` | find and highlight the hidden overworld items (`--list`, `--off`) |
+| `scroll_fix.py` | make the overworld scroll a constant number of pixels per frame |
+| `pad_drive.py` | hold a direction in the game window from outside (test instrument) |
 | `coromon_lua.py` | generic Lua injection bridge (`--eval`, `--file`, or REPL) |
 | `car_extract.py` | Solar2D `resource.car` reader/extractor (`--list`, `--extract`) |
 | `luadis.py` | Lua 5.1 bytecode reader/disassembler/string dumper for `.lu` chunks |
+
+### Hidden items
+
+Coromon scatters items that stay invisible until you walk onto their tile. They are
+plain Tiled objects with `class = "hiddenItem"` in an object layer (usually
+`interactObjects`), each carrying `item1_UID` / `item1_amount`:
+
+```bash
+python tools/hidden_items.py --list    # print them with tile coords
+python tools/hidden_items.py           # draw a marker over each one
+python tools/hidden_items.py --crates  # also mark item chests (amber borders)
+python tools/hidden_items.py --off     # remove the markers
+```
+
+**Chests** are off by default (they're visible objects anyway). `--crates` adds
+`itemChest` / `pyramidItemChest`, drawn with amber borders so the two kinds are
+distinguishable.
+
+They do **not** share the hidden items' mechanism, despite
+`abstractItemChest:shouldAutomaticallyRemoveItemSpawnable()` being a bare `return true`
+in the bytecode — which is misleading. Measured on a chest that had been opened, saved
+and reloaded: it is *still spawned*, sprite at `alpha = 1`, and the state is a
+consistent save property instead, `consistentSaveProperties.itemChestIsOpened = true`
+on `entry.properties.spawnable`. So absence from the runtime list is not enough for
+chests, and the tool checks both.
+
+Labels show the item's display name, resolved through the game's **own localisation**:
+`localise('items.<UID>.name')`. That follows the selected language (the game ships
+`classes.language.items_<locale>.lu` chunks) rather than the English names baked into
+`Resources/data/json/items.json`. A missing key comes back as `'???'` rather than nil,
+so the tool tests for that and falls back to the raw UID.
+
+They are found on `map.layers[*].objects` — **not** in `MTE.getObjects()`, which only
+returns tile-collision objects. Markers are inserted as children of the game's own
+`tiledWorld` node at map-local pixel `(tileX*16 + 8, tileY*16 + 8)`, which is exactly
+where the engine centres a sprite on a tile, so they scroll with the map and need no
+per-frame work. A Lua watchdog re-draws them on map change.
+
+**Collected items are dropped from the markers.** The static Tiled data can't tell you
+anything here — it keeps every entry forever, verified across a save and reload. The
+live state is on the runtime objects from `MTE.getObjectsAtTile()`, and there are two
+different mechanisms:
+
+* **hidden items are removed** from the runtime list — their tile keeps only a
+  collision object, so no `interactObjects` entry means collected;
+* **chests stay spawned** and flip `consistentSaveProperties.itemChestIsOpened = true`
+  on the spawnable at `entry.properties.spawnable`.
+
+Both are matched by name **prefix**, because the runtime name is the Tiled name plus a
+suffix (`hiddenItem_31_44` → `hiddenItem_31_44_front`). For reference,
+`playerStats:getAmountOfHiddenItemsFound()` only tracks a global counter for the
+`FIND_150_HIDDEN_ITEMS` achievement, with no per-item flag anywhere in
+`playerWorldData`. The watchdog re-checks every second, so a marker disappears as soon
+as the item is taken. `--list` still shows collected ones, tagged `[already collected]`.
+
+**Gotcha:** Coromon's wrapped `display.newRect` has **no stroke support** —
+`setStrokeColor` is `nil` on it (and `strokeWidth` is a plain field that does nothing).
+Wrapping the call in `pcall` hides this and silently leaves you with a filled square.
+The border is therefore drawn as four 1px filled edges, anchored at 0,0 on integer
+coordinates to stay crisp at the game's x3 content scale. `rectHelper:newLineRect`
+exists and builds the same four lines internally, but its 5th parameter wants a
+game-internal "rect mutator" object (it indexes `fillColor` / `anchorX`), not a table.
+
+Note the world node must be **re-resolved**, never cached: a cached `tiledWorld` goes
+stale (`.x` becomes nil) when the game rebuilds the map.
 
 ### Poking around yourself
 

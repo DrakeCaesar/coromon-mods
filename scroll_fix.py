@@ -25,9 +25,9 @@ the rendered result lands on whole content pixels, so:
     ~24 frames in every 25 step 1 content pixel  (3 screen px)
     the 25th frame        steps 2 content pixels (6 screen px)
 
-Roughly twice a second the background takes a double step. The frame times are perfect
-(18.18 ms mean, 19 ms max) and the position is continuous, which is exactly why the
-frametime graph looks smooth while the scroll visibly judders.
+Roughly twice a second the background takes a double step. The frame times are flat and
+the position is continuous, which is exactly why the frametime graph looks smooth while
+the scroll visibly judders.
 
 No amount of re-quantising the *position* can fix this: a non-integer average speed
 cannot be expressed as equal integer steps. The fix has to make the step itself a
@@ -35,44 +35,56 @@ constant integer number of content pixels.
 
 THE FIX
 -------
-Round the per-frame delta to whole content pixels, at the single point where the game
-asks for it. The sprite is moved by the same rounded delta as the world, so the camera
-stays locked to the player and nothing drifts - motion just becomes a uniform 1 pixel
-per frame instead of 1,1,1,...,2.
+Make the tile crossing last a whole number of frames, at the single point where the game
+asks for the duration. The sprite is moved by the same rounded delta as the world, so the
+camera stays locked to the player and nothing drifts - motion just becomes a uniform
+1 pixel per frame instead of 1,1,1,...,2.
 
-Trade-off: the scroll becomes 1 px/frame instead of 1.04, i.e. ~4% slower, and because
-the step is now per-frame rather than per-second the speed scales with the frame rate.
-Both are invisible at the game's locked 55 fps. Movement along both axes at once keeps
-its direction (both components are scaled by the same factor).
+The duration is derived from the frame rate ((16 frames * frame time) for a walk), and
+the game runs vsync-locked at 60 fps - `display.fps == 60`, `display.msPerFrame ==
+16.6667` - so the frame rate is ASSUMED to be 60 rather than sampled. That keeps the
+durations deterministic and identical on every run, and removes the sampling pause
+before the fix goes in. Use `--fps auto` to measure it instead, or `--fps N` for a
+different refresh rate.
+
+Trade-off: the scroll becomes exactly 1 px/frame instead of the fractional rate the
+clock produces, and because the step is now per-frame rather than per-second the speed
+scales with the frame rate. Both are invisible while the game holds its lock at 60 fps.
+Movement along both axes at once keeps its direction (both components are scaled by the
+same factor).
 
 Everything here is reversible: `--off` restores the original functions, and the change
 lives only in the running process - it is gone when the game closes.
 
 USAGE
 -----
-    python tools/scroll_fix.py --walk-fix
+    python tools/scroll_fix.py --apply
 
 Run that once per game launch, while the game is open and you are standing in
-the overworld. It measures your frame time, computes the durations, and applies
+the overworld. It assumes 60 fps (see above), computes the durations, and applies
 them. You do NOT need to re-run it for map changes or save loads - a watchdog
 re-applies it whenever the game rebuilds the player object.
 
     --walk-report   show whether it is active, plus call/re-apply counts
     --off           undo it immediately
     --measure       verify: per-frame world step histogram
+    --fps auto      measure the frame time instead of assuming 60
+    --fps N         assume N fps (e.g. --fps 59.94 for a non-60 refresh rate)
 
-Changing refresh rate changes the frame time, so re-run --walk-fix afterwards.
+If the frame rate is not actually 60, the assumed duration is wrong by the same
+ratio and the jitter comes back, so check `--walk-report` if the scroll looks off.
 
 The rest of the flags (--on, --snap, --trace, --trace-spawn, --find-speed,
 --set-speed, --walk-scale, and the matching -report flags) are the instruments
 used to find the cause and are not needed for normal use.
 """
+
 import argparse
 import sys
 import time
 
 sys.path.insert(0, __file__.rsplit("\\", 1)[0])
-from coromon_lua import Bridge, MINIMAL_HOOKS  # noqa: E402
+from coromon_lua import MINIMAL_HOOKS, Bridge  # noqa: E402
 
 PRELUDE = r"""
 local function upval(fn, name)
@@ -91,7 +103,9 @@ local function world()
 end
 """
 
-STATUS = PRELUDE + r"""
+STATUS = (
+    PRELUDE
+    + r"""
 local MTE, tw = world()
 if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
 local s = _G.__scrollfix
@@ -115,8 +129,11 @@ if s then
 end
 return table.concat(lines, '\n')
 """
+)
 
-INSTALL = PRELUDE + r"""
+INSTALL = (
+    PRELUDE
+    + r"""
 local MTE, tw = world()
 if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
 if _G.__scrollfix then return 'already installed' end
@@ -178,8 +195,11 @@ if #s.names == 0 then
 end
 return 'installed, wrapped: ' .. table.concat(s.names, ', ')
 """
+)
 
-REMOVE = PRELUDE + r"""
+REMOVE = (
+    PRELUDE
+    + r"""
 local MTE, tw = world()
 local lines = {}
 
@@ -231,6 +251,7 @@ end
 
 return table.concat(lines, '\n')
 """
+)
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +268,9 @@ return table.concat(lines, '\n')
 # the clock or the framerate does. Nothing else writes a position, so the player,
 # the shadow and the world cannot separate - they all read this one number.
 # ---------------------------------------------------------------------------
-WALK_STEP = PRELUDE + r"""
+WALK_STEP = (
+    PRELUDE
+    + r"""
 local s = _G.__walkstep
 -- s.inst is set only once the hooks went in, so a state without it is a leftover
 -- from an interrupted install and is replaced rather than trusted
@@ -376,6 +399,7 @@ end
 _G.__walkstep = s          -- only now, so a failed install leaves nothing behind
 return 'frame-counted walk ON - progress = frame / ' .. tostring(s.N)
 """
+)
 
 WALK_STEP_REMOVE = r"""
 local s = _G.__walkstep
@@ -393,7 +417,9 @@ _G.__walkstep_old = s
 return 'frame-counted walk OFF - the engine times the walk again'
 """
 
-WALK_STEP_REPORT = PRELUDE + r"""
+WALK_STEP_REPORT = (
+    PRELUDE
+    + r"""
 local s = _G.__walkstep
 if not s then return '!frame-counted walk not installed!' end
 return string.format(
@@ -408,6 +434,7 @@ return string.format(
   s.returnsFunction and 'returns an easing function' or 'returns the progress number',
   tostring(s.lastArgs))
 """
+)
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +451,9 @@ return string.format(
 # observes it: what it is called with, and what the world and the player actually do
 # per frame. Nothing is changed - the original still runs.
 # ---------------------------------------------------------------------------
-WALK_FRAMES = PRELUDE + r"""
+WALK_FRAMES = (
+    PRELUDE
+    + r"""
 local st = _G.__walkframes
 if st and st.on then return 'observer already on' end
 st = { on = true, n = 0, rec = {}, lastArgs = nil, calls = 0 }
@@ -500,6 +529,7 @@ local labels = {}
 for _, rec in ipairs(st.hooks) do labels[#labels + 1] = rec.label end
 return 'observer on: ' .. table.concat(labels, ', ')
 """
+)
 
 WALK_FRAMES_OFF = r"""
 local s = _G.__walkframes
@@ -545,7 +575,9 @@ return table.concat(out, '\n')
 # The engine's interpolation still runs underneath, but every frame we overwrite it,
 # so whatever fraction it computed never reaches the screen.
 # ---------------------------------------------------------------------------
-WALK_TICK = PRELUDE + r"""
+WALK_TICK = (
+    PRELUDE
+    + r"""
 local s = _G.__walktick
 if s and s.on and s.installed then return 'counter already running' end
 s = { on = true, n = 0, dist = 16, active = false, moves = 0, frames = 0 }
@@ -675,6 +707,7 @@ s.installed = true
 Runtime:addEventListener('enterFrame', tickFrame)
 return 'counter running: one whole pixel per rendered frame'
 """
+)
 
 WALK_TICK_OFF = r"""
 local s = _G.__walktick
@@ -710,7 +743,9 @@ return string.format(
 # The counter itself is the rule you specified: one whole pixel per rendered frame,
 # start + dir * n, integers only, no fraction and nothing from the clock.
 # ---------------------------------------------------------------------------
-WALK_ENTER = PRELUDE + r"""
+WALK_ENTER = (
+    PRELUDE
+    + r"""
 local MTE = _G.MTE
 local lib = package.loaded['classes.libraries.transition']
 if type(MTE) ~= 'table' then return '!no MTE - are you in the overworld?!' end
@@ -819,6 +854,7 @@ lib.enterFrame = function(...)
 end
 return 'enterFrame wrapped - we have the last word of every frame'
 """
+)
 
 WALK_ENTER_OFF = r"""
 local s = _G.__walk2
@@ -842,7 +878,9 @@ return string.format('frames=%d  tile moves=%d  turns=%d  frame of move=%s/%s  h
 # instead of guessing again, count calls into EVERY public MTE function and see
 # which one actually fires while walking.
 # ---------------------------------------------------------------------------
-TRACE_INSTALL = PRELUDE + r"""
+TRACE_INSTALL = (
+    PRELUDE
+    + r"""
 local MTE = _G.MTE
 if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
 if _G.__mtetrace then return 'already tracing' end
@@ -865,6 +903,7 @@ for k, v in pairs(MTE) do
 end
 return 'tracing ' .. n .. ' MTE functions - now walk around'
 """
+)
 
 # ---------------------------------------------------------------------------
 # The real fix. The tracer showed moveSprite/translateCamera are never called,
@@ -882,7 +921,9 @@ return 'tracing ' .. n .. ' MTE functions - now walk around'
 # (deltaX/deltaY/dx/dy) forms are handled so it does not matter which one the
 # call site uses.
 # ---------------------------------------------------------------------------
-SNAP_INSTALL = PRELUDE + r"""
+SNAP_INSTALL = (
+    PRELUDE
+    + r"""
 local MTE = _G.MTE
 if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
 if _G.__snap then return 'already installed' end
@@ -979,8 +1020,11 @@ if #st.names == 0 then
 end
 return 'snap installed on: ' .. table.concat(st.names, ', ')
 """
+)
 
-SNAP_REPORT = PRELUDE + r"""
+SNAP_REPORT = (
+    PRELUDE
+    + r"""
 local st = _G.__snap
 if not st then return '!snap not installed!' end
 local out = {
@@ -1004,6 +1048,7 @@ if st.seen then
 end
 return table.concat(out, '\n')
 """
+)
 
 # ---------------------------------------------------------------------------
 # Option B: change the RATE instead of the rounding.
@@ -1029,7 +1074,9 @@ return table.concat(out, '\n')
 # That makes every frame advance exactly 1 content pixel, so the game's own
 # math.round() has nothing to alternate between and the scroll is uniform.
 # ---------------------------------------------------------------------------
-FIND_SPEED = PRELUDE + r"""
+FIND_SPEED = (
+    PRELUDE
+    + r"""
 local out = {}
 local hits, seen = {}, {}
 
@@ -1084,8 +1131,11 @@ for _, h in ipairs(hits) do
 end
 return table.concat(out, '\n')
 """
+)
 
-SET_SPEED = PRELUDE + r"""
+SET_SPEED = (
+    PRELUDE
+    + r"""
 local target = __SPEED__
 local out = {}
 local hits, seen = {}, {}
@@ -1143,13 +1193,16 @@ end
 return string.format('set movementSpeed to %s on %d function(s):\n%s',
   tostring(target), #hits, table.concat(out, '\n'))
 """
+)
 
 # The player spawnable does NOT use abstractEightDirectionalMovingSpawnable's
 # dt-based movement (its methods carry no movementSpeed upvalue anywhere we can
 # reach, and its own methods are grid-step names: getGridMoveStack,
 # untilLocationXY, hasReachedNewTile, isGridMoveBlocked, executeNowOrAfterMove).
 # So trace the player spawnable's own methods to find the per-frame mover.
-SPAWN_TRACE_INSTALL = PRELUDE + r"""
+SPAWN_TRACE_INSTALL = (
+    PRELUDE
+    + r"""
 local inst
 pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
 if type(inst) ~= 'table' then return '!no player spawnable found!' end
@@ -1173,8 +1226,11 @@ for k, v in pairs(inst) do
 end
 return 'tracing ' .. n .. ' methods on the player spawnable - now walk around'
 """
+)
 
-SPAWN_TRACE_REPORT = PRELUDE + r"""
+SPAWN_TRACE_REPORT = (
+    PRELUDE
+    + r"""
 local t = _G.__spawntrace
 if not t then return '!not tracing!' end
 local rows = {}
@@ -1194,6 +1250,7 @@ if shown == 0 then out[#out + 1] = '  (nothing called yet)' end
 out[#out + 1] = '  ' .. shown .. ' of ' .. #rows .. ' methods were called'
 return table.concat(out, '\n')
 """
+)
 
 # ---------------------------------------------------------------------------
 # OPTION B, final form. The trace showed the player moves one tile per
@@ -1209,7 +1266,9 @@ return table.concat(out, '\n')
 # getGridMoveTimeBySpeed is a plain method on the live player spawnable, so we
 # can wrap it and scale its result. factor 1.0 = observe only.
 # ---------------------------------------------------------------------------
-WALK_SCALE = PRELUDE + r"""
+WALK_SCALE = (
+    PRELUDE
+    + r"""
 local factor = __FACTOR__
 local inst
 pcall(function() inst = spawnableHelper:getPlayerSpawnable() end)
@@ -1251,8 +1310,11 @@ inst.getGridMoveTimeBySpeed = function(self, ...)
 end
 return 'wrapped getGridMoveTimeBySpeed, factor ' .. tostring(factor)
 """
+)
 
-WALK_FIX = PRELUDE + r"""
+WALK_FIX = (
+    PRELUDE
+    + r"""
 -- Duration multipliers, e.g. { normal = 0.968, fast = 1.019 }. A value below 1
 -- shortens the tile crossing, i.e. makes the player walk faster.
 local factors = __FACTORS__
@@ -1307,6 +1369,7 @@ end
 return string.format('walk fix active: normal x%.4f  fast x%.4f  (watchdog re-applies every 1s)',
   factors.normal, factors.fast)
 """
+)
 
 # Closed-loop calibration.
 #
@@ -1319,7 +1382,9 @@ return string.format('walk fix active: normal x%.4f  fast x%.4f  (watchdog re-ap
 # (~100 ms). A single 0-px frame inside a walk does NOT close the run, because at
 # a true rate just under 1 the game emits isolated 0-px frames as part of normal
 # walking. The rate is then sum(|d|)/frames over the longest run.
-RATE_INSTALL = PRELUDE + r"""
+RATE_INSTALL = (
+    PRELUDE
+    + r"""
 local MTE, tw = world()
 if type(tw) ~= 'table' then return '!no tiledWorld - are you in the overworld?!' end
 local s = { tw = tw, n = 0, zeros = 0, runN = 0, runSum = 0,
@@ -1352,6 +1417,7 @@ s.l = f
 Runtime:addEventListener('enterFrame', f)
 return 'sampling tiledWorld displacement (longest continuous walk is what counts)'
 """
+)
 
 RATE_COLLECT = r"""
 local s = _G.__rate
@@ -1364,7 +1430,9 @@ if s.runN > s.bestN then s.bestN = s.runN; s.bestSum = s.runSum end
 return string.format('%d\t%d\t%.4f\t%d', s.n - 1, s.bestN, s.bestSum, s.runs)
 """
 
-WALK_ADJUST = PRELUDE + r"""
+WALK_ADJUST = (
+    PRELUDE
+    + r"""
 -- Multiply the current duration multipliers by `rate`. The step is inversely
 -- proportional to the duration, so multiplying by the MEASURED step drives the
 -- measured step towards 1 over successive passes.
@@ -1379,8 +1447,11 @@ end
 table.sort(out)
 return 'adjusted by x' .. string.format('%.5f', rate) .. ':  ' .. table.concat(out, '  ')
 """
+)
 
-WALK_FACTORS = PRELUDE + r"""
+WALK_FACTORS = (
+    PRELUDE
+    + r"""
 local st = _G.__walkscale
 if not st or not st.factors then return '!not installed!' end
 local out = {}
@@ -1388,6 +1459,7 @@ for k, f in pairs(st.factors) do out[#out + 1] = string.format('%s=%.8f', k, f) 
 table.sort(out)
 return table.concat(out, '\t')
 """
+)
 
 DT_INSTALL = r"""
 local s = { n = 0, t0 = 0, t1 = 0 }
@@ -1412,7 +1484,9 @@ if n <= 0 then return '0\t0' end
 return string.format('%d\t%.4f', s.n, (s.t1 - s.t0) / n)
 """
 
-WALK_REPORT = PRELUDE + r"""
+WALK_REPORT = (
+    PRELUDE
+    + r"""
 local st = _G.__walkscale
 if not st then return '!not active - run --walk-fix first!' end
 local out = { 'calls     : ' .. tostring(st.calls),
@@ -1425,6 +1499,7 @@ for _, s in ipairs(st.samples) do out[#out + 1] = '   ' .. s end
 if #st.samples == 0 then out[#out + 1] = '   (not called yet - walk to trigger a step)' end
 return table.concat(out, '\n')
 """
+)
 
 # ---------------------------------------------------------------------------
 # Walk lock: exactly one whole pixel per frame, no exceptions.
@@ -1452,7 +1527,9 @@ return table.concat(out, '\n')
 # comparing the game's own per-frame delta against the direction we are driving,
 # and it hands that move back rather than fighting.
 # ---------------------------------------------------------------------------
-WALK_LOCK_INSTALL = PRELUDE + r"""
+WALK_LOCK_INSTALL = (
+    PRELUDE
+    + r"""
 local MTE, tw = world()
 if type(MTE) ~= 'table' then return '!MTE not found - are you in the overworld?!' end
 if type(MTE.setSpriteLocation) ~= 'function' then
@@ -1692,8 +1769,11 @@ s.tick = tick
 Runtime:addEventListener('enterFrame', tick)
 return 'walk lock ON (whole-pixel placement through MTE.setSpriteLocation)'
 """
+)
 
-WALK_LOCK_REPORT = PRELUDE + r"""
+WALK_LOCK_REPORT = (
+    PRELUDE
+    + r"""
 local s = _G.__walklock
 if not s then return '!walk lock not installed!' end
 local hist = {}
@@ -1714,6 +1794,7 @@ return table.concat({
   'camera: exact by construction - baseline and step are integers, so the camera',
 }, '\n')
 """
+)
 
 WALK_LOCK_REMOVE = r"""
 local s = _G.__walklock
@@ -1757,7 +1838,9 @@ return 'walk lock OFF - the game drives the sprite position again'
 # value EXACTLY (bias 0) before building on it. A constant error is invisible in
 # the derivative (the step size) and only shows up as drift in the absolute.
 # ---------------------------------------------------------------------------
-SUBPIXEL_INSTALL = PRELUDE + r"""
+SUBPIXEL_INSTALL = (
+    PRELUDE
+    + r"""
 local MTE, tw = world()
 if type(tw) ~= 'table' then return '!no tiledWorld - are you in the overworld?!' end
 
@@ -1903,8 +1986,11 @@ Runtime:addEventListener('enterFrame', tick)
 return string.format('sub-pixel camera ON (grid=%s) (listener registered last, so it runs after the game)',
   s.grid and s.grid > 0 and ('1/' .. tostring(s.grid) .. ' content px') or 'continuous')
 """
+)
 
-SUBPIXEL_REPORT = PRELUDE + r"""
+SUBPIXEL_REPORT = (
+    PRELUDE
+    + r"""
 local s = _G.__subpix2
 if not s then return '!sub-pixel camera not installed!' end
 local _, tw = world()
@@ -1963,6 +2049,7 @@ else
 end
 return table.concat(out, '\n')
 """
+)
 
 SUBPIXEL_REMOVE = r"""
 local s = _G.__subpix2
@@ -2147,11 +2234,21 @@ def _axis_source():
 
 def selftest_subpixel(b):
     for grid in (3, 0):
-        print(_eval(b, SELFTEST_SUBPIXEL.replace("__GRID__", str(grid))
-                    .replace("__AXIS__", _axis_source()), timeout=30.0))
+        print(
+            _eval(
+                b,
+                SELFTEST_SUBPIXEL.replace("__GRID__", str(grid)).replace(
+                    "__AXIS__", _axis_source()
+                ),
+                timeout=30.0,
+            )
+        )
         print()
 
-TRACE_REPORT = PRELUDE + r"""
+
+TRACE_REPORT = (
+    PRELUDE
+    + r"""
 local t = _G.__mtetrace
 if not t then return '!not tracing!' end
 local rows = {}
@@ -2171,8 +2268,11 @@ if shown == 0 then out[#out + 1] = '  (nothing called yet)' end
 out[#out + 1] = '  ' .. shown .. ' of ' .. #rows .. ' functions were called'
 return table.concat(out, '\n')
 """
+)
 
-MEASURE_INSTALL = PRELUDE + r"""
+MEASURE_INSTALL = (
+    PRELUDE
+    + r"""
 local MTE, tw = world()
 if type(tw) ~= 'table' then return '!tiledWorld not found - are you in the overworld?!' end
 local s = { tw = tw, frames = 0, times = {}, fx = {}, fy = {}, label = _G.__scrollfix and 'fixed' or 'baseline' }
@@ -2190,6 +2290,7 @@ s.listener = sample
 Runtime:addEventListener('enterFrame', sample)
 return 'measuring (' .. s.label .. ')'
 """
+)
 
 MEASURE_COLLECT = r"""
 local s = _G.__measure
@@ -2258,7 +2359,9 @@ return table.concat(out, '\n')
 #     frames of wall clock really did pass. The double step then lands on a
 #     LONG frame, at any phase.
 # ---------------------------------------------------------------------------
-WALK_DIAG_INSTALL = PRELUDE + r"""
+WALK_DIAG_INSTALL = (
+    PRELUDE
+    + r"""
 local MTE, tw = world()
 if type(tw) ~= 'table' then return '!no tiledWorld - are you in the overworld?!' end
 local spr
@@ -2291,6 +2394,7 @@ s.l = tick
 Runtime:addEventListener('enterFrame', tick)
 return 'recording (about 11 minutes of frames). Play normally, then run --walk-diag report'
 """
+)
 
 # Stop recording without producing a report.
 WALK_DIAG_OFF = r"""
@@ -2546,8 +2650,13 @@ def _bridge():
 
 def _lua_quote(text):
     """Render Python text as a Lua short string literal."""
-    out = (text.replace('\\', '\\\\').replace('"', '\\"')
-               .replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t'))
+    out = (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
     return '"' + out + '"'
 
 
@@ -2557,23 +2666,29 @@ def luacheck(b):
     A chunk that fails to parse would otherwise be discovered the hard way: an
     error inside a per-frame listener froze this process once. Nothing here runs.
     """
-    chunks = [('WALK_FIX', WALK_FIX), ('WALK_LOCK_INSTALL', WALK_LOCK_INSTALL),
-              ('WALK_LOCK_REPORT', WALK_LOCK_REPORT),
-              ('WALK_LOCK_REMOVE', WALK_LOCK_REMOVE),
-              ('WALK_DIAG_INSTALL', WALK_DIAG_INSTALL),
-              ('WALK_DIAG_COLLECT', WALK_DIAG_COLLECT), ('WALK_DIAG_OFF', WALK_DIAG_OFF),
-              ('WALK_REPORT', WALK_REPORT)]
+    chunks = [
+        ("WALK_FIX", WALK_FIX),
+        ("WALK_LOCK_INSTALL", WALK_LOCK_INSTALL),
+        ("WALK_LOCK_REPORT", WALK_LOCK_REPORT),
+        ("WALK_LOCK_REMOVE", WALK_LOCK_REMOVE),
+        ("WALK_DIAG_INSTALL", WALK_DIAG_INSTALL),
+        ("WALK_DIAG_COLLECT", WALK_DIAG_COLLECT),
+        ("WALK_DIAG_OFF", WALK_DIAG_OFF),
+        ("WALK_REPORT", WALK_REPORT),
+    ]
     bad = 0
     for name, text in chunks:
-        code = ("local f, e = loadstring(%s, '%s')\n"
-                "return f and 'ok' or (' ' .. tostring(e))" % (_lua_quote(text), name))
+        code = (
+            "local f, e = loadstring(%s, '%s')\n"
+            "return f and 'ok' or (' ' .. tostring(e))" % (_lua_quote(text), name)
+        )
         r = _eval(b, code)
-        if r is None or r.strip() != 'ok':
+        if r is None or r.strip() != "ok":
             bad += 1
-            print('  FAIL %-18s %s' % (name, (r or '').strip()))
+            print("  FAIL %-18s %s" % (name, (r or "").strip()))
         else:
-            print('  ok   %-18s (%d lines)' % (name, text.count('\n') + 1))
-    print('%d of %d chunks parse in the game\'s Lua' % (len(chunks) - bad, len(chunks)))
+            print("  ok   %-18s (%d lines)" % (name, text.count("\n") + 1))
+    print("%d of %d chunks parse in the game's Lua" % (len(chunks) - bad, len(chunks)))
     return bad
 
 
@@ -2635,91 +2750,233 @@ def _measure_dt(b):
     return dt if dt > 0 else 1000.0 / 60.0
 
 
+def _frame_dt(b, fps="60"):
+    """Frame time in ms for the assumed frame rate.
+
+    The fix turns the tile duration into a whole number of frames, so the frame
+    time is the one input that has to be right.  The game is vsync-locked at 60
+    (`display.fps == 60`, `display.msPerFrame == 16.6667`), so it is ASSUMED
+    rather than measured: no 1.5 s pause before the fix goes in, no noise from
+    the sampling window, and the same durations on every run.
+
+    Pass "auto" (`--fps auto`) to measure it live instead.
+    """
+    s = str(fps).strip().lower()
+    if s in ("auto", "measure", ""):
+        return _measure_dt(b)
+    try:
+        f = float(s)
+    except ValueError:
+        print(f"  ! unrecognised --fps {fps!r} - assuming 60")
+        f = 60.0
+    if f <= 0:
+        return _measure_dt(b)
+    return 1000.0 / f
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--process", default="coromon.exe")
-    ap.add_argument("--status", action="store_true", help="show whether the fix is installed")
+    ap.add_argument(
+        "--status", action="store_true", help="show whether the fix is installed"
+    )
     ap.add_argument("--on", action="store_true", help="install the constant-step fix")
     ap.add_argument("--off", action="store_true", help="restore the original functions")
     ap.add_argument("--measure", action="store_true", help="log per-frame world deltas")
-    ap.add_argument("--ab", action="store_true",
-                    help="measure baseline, install, measure again, then leave it installed")
-    ap.add_argument("--trace", action="store_true",
-                    help="count calls into every public MTE function (walk while it runs)")
-    ap.add_argument("--trace-report", action="store_true",
-                    help="print the MTE call counts accumulated so far")
-    ap.add_argument("--snap", action="store_true",
-                    help="round the per-frame movement delta to whole content pixels")
-    ap.add_argument("--snap-report", action="store_true",
-                    help="show what the snap wrapper has been catching")
-    ap.add_argument("--find-speed", action="store_true",
-                    help="locate the movementSpeed upvalue in the walk code")
-    ap.add_argument("--trace-spawn", action="store_true",
-                    help="count calls into the player spawnable's own methods")
-    ap.add_argument("--trace-spawn-report", action="store_true",
-                    help="print the player spawnable method counts")
-    ap.add_argument("--walk-scale", type=float, default=None,
-                    help="scale getGridMoveTimeBySpeed uniformly (1.0 = observe)")
-    ap.add_argument("--walk-fix", action="store_true",
-                    help="measure the frame time and set the tile durations for a whole-pixel step")
-    ap.add_argument("--walk-speed", type=float, default=None,
-                    help="sanity check: force a specific px/frame (e.g. 10). Restore with --walk-fix")
-    ap.add_argument("--walk-calibrate", action="store_true",
-                    help="closed loop: measure the real step and correct until it is exactly 1 px/frame")
-    ap.add_argument("--walk-const", type=float, nargs=2, default=None,
-                    metavar=("NORMAL_MS", "FAST_MS"),
-                    help="apply fixed tile durations, skipping the frame-time measurement")
-    ap.add_argument("--iters", type=int, default=0,
-                    help="max calibration passes (0 = until it converges, default)")
-    ap.add_argument("--walk-report", action="store_true",
-                    help="show the baseline getGridMoveTimeBySpeed descriptors")
-    ap.add_argument("--apply", action="store_true",
-                    help="reapply everything after a game restart: tile duration + walk lock ")
-                    # + recorder
-    ap.add_argument("--no-record", action="store_true",
-                    help="with --apply, skip starting the frame recorder")
-    ap.add_argument("--walk-enter", nargs="?", const="on", default=None,
-                    choices=["on", "off", "report"],
-                    help="wrap transition.enterFrame so the counter's position is "
-                         "re-asserted last in every frame")
-    ap.add_argument("--walk-tick", nargs="?", const="on", default=None,
-                    choices=["on", "off", "report"],
-                    help="the counter: one whole pixel per rendered frame, integer "
-                         "positions, no fraction and no clock")
-    ap.add_argument("--walk-frames", nargs="?", const="on", default=None,
-                    choices=["on", "off", "report"],
-                    help="observe MTE's per-frame tile-move callback: what it is "
-                         "called with and what the world does per frame")
-    ap.add_argument("--walk-step", nargs="?", const="on", default=None,
-                    choices=["on", "off", "report"],
-                    help="frame-counted walk: progress = frame/N, so walking is "
-                         "exactly 1 px per frame whatever the framerate does")
-    ap.add_argument("--walk-lock", nargs="?", const="on", default=None,
-                    choices=["on", "off", "report", "check"],
-                    help="drive the sprite from the frame count so it advances a whole number "
-                         "of pixels every frame, with no 0 or 2 px steps (on|off|report)")
-    ap.add_argument("--walk-diag", nargs="?", const="on", default=None,
-                    choices=["on", "off", "report"],
-                    help="camera-step recorder: 'on' records in the background while you play "
-                         "(no waiting on you), 'report' prints the analysis, 'off' stops it")
-    ap.add_argument("--walk-subpixel", nargs="?", const="on", default=None,
-                    choices=["on", "off", "report", "grid"],
-                    help="re-inject the fraction math.round() discards: 'on' = continuous, "
-                         "'grid' = snap to whole device pixels (crisp pixel art, 1 device px "
-                         "of motion granularity), off/report")
-    ap.add_argument("--subpixel-grid", type=float, default=3.0,
-                    help="device pixels per content pixel for --walk-subpixel grid (default 3)")
-    ap.add_argument("--selftest-lock", action="store_true",
-                    help="replay whole tile moves against the real walk lock code and check "
-                         "the axes (pure math, touches no game state, needs no input)")
-    ap.add_argument("--selftest-subpixel", action="store_true",
-                    help="replay a simulated walk against the real sub-pixel camera code "
-                         "(pure math, touches no game state, needs no input)")
-    ap.add_argument("--set-speed", type=float, default=None,
-                    help="set movementSpeed (want 2 * fps: 110 at 55 fps, 120 at 60 fps)")
-    ap.add_argument("--seconds", type=float, default=None,
-                    help="seconds per measurement (default 6, and 90 as the walking wait "
-                         "budget for --walk-diag)")
+    ap.add_argument(
+        "--ab",
+        action="store_true",
+        help="measure baseline, install, measure again, then leave it installed",
+    )
+    ap.add_argument(
+        "--trace",
+        action="store_true",
+        help="count calls into every public MTE function (walk while it runs)",
+    )
+    ap.add_argument(
+        "--trace-report",
+        action="store_true",
+        help="print the MTE call counts accumulated so far",
+    )
+    ap.add_argument(
+        "--snap",
+        action="store_true",
+        help="round the per-frame movement delta to whole content pixels",
+    )
+    ap.add_argument(
+        "--snap-report",
+        action="store_true",
+        help="show what the snap wrapper has been catching",
+    )
+    ap.add_argument(
+        "--find-speed",
+        action="store_true",
+        help="locate the movementSpeed upvalue in the walk code",
+    )
+    ap.add_argument(
+        "--trace-spawn",
+        action="store_true",
+        help="count calls into the player spawnable's own methods",
+    )
+    ap.add_argument(
+        "--trace-spawn-report",
+        action="store_true",
+        help="print the player spawnable method counts",
+    )
+    ap.add_argument(
+        "--walk-scale",
+        type=float,
+        default=None,
+        help="scale getGridMoveTimeBySpeed uniformly (1.0 = observe)",
+    )
+    ap.add_argument(
+        "--walk-fix",
+        action="store_true",
+        help="measure the frame time and set the tile durations for a whole-pixel step",
+    )
+    ap.add_argument(
+        "--walk-speed",
+        type=float,
+        default=None,
+        help="sanity check: force a specific px/frame (e.g. 10). Restore with --walk-fix",
+    )
+    ap.add_argument(
+        "--walk-calibrate",
+        action="store_true",
+        help="closed loop: measure the real step and correct until it is exactly 1 px/frame",
+    )
+    ap.add_argument(
+        "--walk-const",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("NORMAL_MS", "FAST_MS"),
+        help="apply fixed tile durations, skipping the frame-time measurement",
+    )
+    ap.add_argument(
+        "--iters",
+        type=int,
+        default=0,
+        help="max calibration passes (0 = until it converges, default)",
+    )
+    ap.add_argument(
+        "--walk-report",
+        action="store_true",
+        help="show the baseline getGridMoveTimeBySpeed descriptors",
+    )
+    ap.add_argument(
+        "--apply",
+        action="store_true",
+        help="reapply everything after a game restart: tile duration + walk lock ",
+    )
+    # + recorder
+    ap.add_argument(
+        "--no-record",
+        action="store_true",
+        help="with --apply, skip starting the frame recorder",
+    )
+    ap.add_argument(
+        "--walk-enter",
+        nargs="?",
+        const="on",
+        default=None,
+        choices=["on", "off", "report"],
+        help="wrap transition.enterFrame so the counter's position is "
+        "re-asserted last in every frame",
+    )
+    ap.add_argument(
+        "--walk-tick",
+        nargs="?",
+        const="on",
+        default=None,
+        choices=["on", "off", "report"],
+        help="the counter: one whole pixel per rendered frame, integer "
+        "positions, no fraction and no clock",
+    )
+    ap.add_argument(
+        "--walk-frames",
+        nargs="?",
+        const="on",
+        default=None,
+        choices=["on", "off", "report"],
+        help="observe MTE's per-frame tile-move callback: what it is "
+        "called with and what the world does per frame",
+    )
+    ap.add_argument(
+        "--walk-step",
+        nargs="?",
+        const="on",
+        default=None,
+        choices=["on", "off", "report"],
+        help="frame-counted walk: progress = frame/N, so walking is "
+        "exactly 1 px per frame whatever the framerate does",
+    )
+    ap.add_argument(
+        "--walk-lock",
+        nargs="?",
+        const="on",
+        default=None,
+        choices=["on", "off", "report", "check"],
+        help="drive the sprite from the frame count so it advances a whole number "
+        "of pixels every frame, with no 0 or 2 px steps (on|off|report)",
+    )
+    ap.add_argument(
+        "--walk-diag",
+        nargs="?",
+        const="on",
+        default=None,
+        choices=["on", "off", "report"],
+        help="camera-step recorder: 'on' records in the background while you play "
+        "(no waiting on you), 'report' prints the analysis, 'off' stops it",
+    )
+    ap.add_argument(
+        "--walk-subpixel",
+        nargs="?",
+        const="on",
+        default=None,
+        choices=["on", "off", "report", "grid"],
+        help="re-inject the fraction math.round() discards: 'on' = continuous, "
+        "'grid' = snap to whole device pixels (crisp pixel art, 1 device px "
+        "of motion granularity), off/report",
+    )
+    ap.add_argument(
+        "--subpixel-grid",
+        type=float,
+        default=3.0,
+        help="device pixels per content pixel for --walk-subpixel grid (default 3)",
+    )
+    ap.add_argument(
+        "--selftest-lock",
+        action="store_true",
+        help="replay whole tile moves against the real walk lock code and check "
+        "the axes (pure math, touches no game state, needs no input)",
+    )
+    ap.add_argument(
+        "--selftest-subpixel",
+        action="store_true",
+        help="replay a simulated walk against the real sub-pixel camera code "
+        "(pure math, touches no game state, needs no input)",
+    )
+    ap.add_argument(
+        "--set-speed",
+        type=float,
+        default=None,
+        help="set movementSpeed (want 2 * fps: 110 at 55 fps, 120 at 60 fps)",
+    )
+    ap.add_argument(
+        "--seconds",
+        type=float,
+        default=None,
+        help="seconds per measurement (default 6, and 90 as the walking wait "
+        "budget for --walk-diag)",
+    )
+    ap.add_argument(
+        "--fps",
+        default="60",
+        help="frame rate to assume for the tile-duration math, or 'auto' to "
+        "measure it live (default 60 - the game is vsync-locked there, "
+        "so this is exact and needs no sampling)",
+    )
     args = ap.parse_args()
     secs = args.seconds if args.seconds is not None else 6.0
 
@@ -2751,16 +3008,20 @@ def main():
             print(_eval(b, WALK_SCALE.replace("__FACTOR__", repr(args.walk_scale))))
         elif args.walk_fix:
             print(_eval(b, REMOVE))
-            dt = _measure_dt(b)
+            dt = _frame_dt(b, args.fps)
             # px/frame = (tilewidth / duration_ms) * dt_ms.  Want exactly 1 for
             # normal and exactly 2 for fast => 16*dt and 8*dt.
             fn = (16.0 * dt) / 280.0
             ff = (8.0 * dt) / 133.0
-            print(f"avg frame time = {dt:.4f} ms  ({1000.0 / dt:.2f} fps)")
+            print(f"frame time = {dt:.4f} ms  ({1000.0 / dt:.2f} fps assumed)")
             print(f"  normal 280 ms -> {280.0 * fn:.2f} ms   = 1 px/frame")
             print(f"  fast   133 ms -> {133.0 * ff:.2f} ms   = 2 px/frame")
-            print(f"  slow   400 ms unchanged (0.67 px/frame; making it whole would equal normal)")
-            code = WALK_FIX.replace("__FACTORS__", _lua_factors({"normal": fn, "fast": ff}))
+            print(
+                f"  slow   400 ms unchanged (0.67 px/frame; making it whole would equal normal)"
+            )
+            code = WALK_FIX.replace(
+                "__FACTORS__", _lua_factors({"normal": fn, "fast": ff})
+            )
             print(_eval(b, code))
             print(_eval(b, WALK_REPORT))
         elif args.walk_calibrate:
@@ -2772,31 +3033,41 @@ def main():
             # refining after it reaches target, so the value can be watched for
             # stability before being locked in as a constant. Ctrl+C prints the
             # lockable durations.
-            print(_eval(b, WALK_FIX.replace(
-                "__FACTORS__", _lua_factors({"normal": 1.0, "fast": 1.0}))))
+            print(
+                _eval(
+                    b,
+                    WALK_FIX.replace(
+                        "__FACTORS__", _lua_factors({"normal": 1.0, "fast": 1.0})
+                    ),
+                )
+            )
             print(_eval(b, WALK_REPORT))
             print()
             print("Calibrating indefinitely - KEEP WALKING. Press Ctrl+C to stop")
             print(f"and print the durations to lock in. Each pass samples {secs:g}s.")
             print()
-            print("  pass  frames  walk%     step px/frame    normal_x     fast_x   action")
+            print(
+                "  pass  frames  walk%     step px/frame    normal_x     fast_x   action"
+            )
             hist = []
             try:
-                for it in range(1, (args.iters if args.iters > 0 else 10 ** 9) + 1):
+                for it in range(1, (args.iters if args.iters > 0 else 10**9) + 1):
                     print(_eval(b, RATE_INSTALL))
                     time.sleep(secs)
                     raw = _eval(b, RATE_COLLECT).strip()
                     try:
                         parts = raw.split("\t")
-                        n = int(parts[0])          # total frames sampled
-                        runN = int(parts[1])       # longest uninterrupted walk
+                        n = int(parts[0])  # total frames sampled
+                        runN = int(parts[1])  # longest uninterrupted walk
                         runSum = float(parts[2])
                     except Exception:
                         print(f"  {it:<6} unparsable: {raw!r}")
                         continue
                     if runN < 60:
-                        print(f"  {it:<6} no continuous walk "
-                              f"({runN} frames in the longest stretch) - keep walking")
+                        print(
+                            f"  {it:<6} no continuous walk "
+                            f"({runN} frames in the longest stretch) - keep walking"
+                        )
                         continue
                     rate = runSum / runN
                     ratio = runN / n
@@ -2808,12 +3079,14 @@ def main():
                         # DAMPED. Applying the full measured error makes the loop
                         # chase quantisation noise and wander instead of settling:
                         # half the error in log space converges smoothly.
-                        corr = rate ** 0.5
+                        corr = rate**0.5
                         _eval(b, WALK_ADJUST.replace("__RATE__", repr(corr)))
                         cur = _parse_factors(_eval(b, WALK_FACTORS))
                         action = f"adjust x{corr:.5f}"
-                    print(f"  {it:<6}{n:<8}{ratio * 100:>5.1f}   {rate:>11.5f}   "
-                          f"{cur.get('normal', 0):>9.6f}  {cur.get('fast', 0):>9.6f}   {action}")
+                    print(
+                        f"  {it:<6}{n:<8}{ratio * 100:>5.1f}   {rate:>11.5f}   "
+                        f"{cur.get('normal', 0):>9.6f}  {cur.get('fast', 0):>9.6f}   {action}"
+                    )
             except KeyboardInterrupt:
                 print()
                 print("---- stopped by user ----")
@@ -2830,34 +3103,45 @@ def main():
                 print(f"passes run: {len(hist)}   usable readings: {len(rates)}")
                 if rates:
                     best = min(rates, key=lambda x: abs(x - 1.0))
-                    print(f"  last step = {rates[-1]:.5f}    closest to 1.0 = {best:.5f}")
+                    print(
+                        f"  last step = {rates[-1]:.5f}    closest to 1.0 = {best:.5f}"
+                    )
                 print()
                 print("LOCKED FOR THIS FRAME RATE")
-                print(f"  normal = {nmms:.3f} ms     fast = {fmms:.3f} ms     slow = {smms:.3f} ms")
+                print(
+                    f"  normal = {nmms:.3f} ms     fast = {fmms:.3f} ms     slow = {smms:.3f} ms"
+                )
                 print()
                 print("Lock that in as a fixed constant (no frame-time measurement):")
-                print(f"  python tools/scroll_fix.py --walk-const {nmms:.3f} {fmms:.3f}")
+                print(
+                    f"  python tools/scroll_fix.py --walk-const {nmms:.3f} {fmms:.3f}"
+                )
         elif args.walk_const is not None:
             # Absolute durations, no measurement - reproducible and lockable.
             nm, fm = args.walk_const
             factors = {"normal": nm / 280.0, "fast": fm / 133.0}
             print(f"applying fixed durations: normal {nm:.3f} ms, fast {fm:.3f} ms")
-            print(f"  (slow left at 400 ms; multipliers normal x{factors['normal']:.6f} "
-                  f"fast x{factors['fast']:.6f})")
+            print(
+                f"  (slow left at 400 ms; multipliers normal x{factors['normal']:.6f} "
+                f"fast x{factors['fast']:.6f})"
+            )
             print(_eval(b, WALK_FIX.replace("__FACTORS__", _lua_factors(factors))))
             print(_eval(b, WALK_REPORT))
         elif args.walk_speed is not None:
             # Deliberately wrong on purpose: a big obvious speed change proves the
             # wrapper really is driving the walk speed. Restore with --walk-fix.
             print(_eval(b, REMOVE))
-            dt = _measure_dt(b)
+            dt = _frame_dt(b, args.fps)
             f = (16.0 * dt / args.walk_speed) / 280.0
-            print(f"avg frame time = {dt:.4f} ms")
+            print(f"frame time = {dt:.4f} ms  ({1000.0 / dt:.2f} fps assumed)")
             print(f"  target {args.walk_speed} px/frame -> all durations x{f:.5f}")
-            print(f"  normal 280 -> {280.0 * f:.3f} ms, fast 133 -> {133.0 * f:.3f} ms, "
-                  f"slow 400 -> {400.0 * f:.3f} ms")
+            print(
+                f"  normal 280 -> {280.0 * f:.3f} ms, fast 133 -> {133.0 * f:.3f} ms, "
+                f"slow 400 -> {400.0 * f:.3f} ms"
+            )
             code = WALK_FIX.replace(
-                "__FACTORS__", _lua_factors({"normal": f, "fast": f, "slow": f}))
+                "__FACTORS__", _lua_factors({"normal": f, "fast": f, "slow": f})
+            )
             print(_eval(b, code))
             print(_eval(b, WALK_REPORT))
         elif args.set_speed is not None:
@@ -2868,17 +3152,34 @@ def main():
             # Everything the fix needs, in the order it needs to happen. Run this
             # once per game launch, while in the overworld (the tile duration is
             # applied to the live player spawnable, which only exists in a map).
-            dt = _measure_dt(b)
+            # The frame time is ASSUMED (60 fps by default) rather than measured,
+            # so this is deterministic and goes in immediately.
+            dt = _frame_dt(b, args.fps)
             fn = (16.0 * dt) / 280.0
             ff = (8.0 * dt) / 133.0
-            print("1) tile duration: "
-                  f"frame time {dt:.4f} ms -> normal {280.0 * fn:.2f} ms = 16 frames, "
-                  f"fast {133.0 * ff:.2f} ms = 8 frames")
-            print("   " + _eval(b, WALK_FIX.replace(
-                "__FACTORS__", _lua_factors({"normal": fn, "fast": ff}))))
+            print(
+                "1) tile duration: "
+                f"assuming {1000.0 / dt:.2f} fps = {dt:.4f} ms/frame -> "
+                f"normal {280.0 * fn:.2f} ms = 16 frames, "
+                f"fast {133.0 * ff:.2f} ms = 8 frames"
+            )
+            print(
+                "   "
+                + _eval(
+                    b,
+                    WALK_FIX.replace(
+                        "__FACTORS__", _lua_factors({"normal": fn, "fast": ff})
+                    ),
+                )
+            )
             print()
             print("2) nothing else - the duration timing is the whole fix")
-            for off in (WALK_ENTER_OFF, WALK_TICK_OFF, WALK_STEP_REMOVE, WALK_LOCK_REMOVE):
+            for off in (
+                WALK_ENTER_OFF,
+                WALK_TICK_OFF,
+                WALK_STEP_REMOVE,
+                WALK_LOCK_REMOVE,
+            ):
                 _eval(b, off)
             print()
             if not args.no_record:
@@ -2933,10 +3234,18 @@ def main():
             else:
                 if args.walk_subpixel in ("on", "grid"):
                     grid = args.subpixel_grid if args.walk_subpixel == "grid" else 0.0
-                    print(_eval(b, SUBPIXEL_INSTALL.replace("__GRID__", repr(float(grid)))))
+                    print(
+                        _eval(
+                            b, SUBPIXEL_INSTALL.replace("__GRID__", repr(float(grid)))
+                        )
+                    )
                     print()
-                    print("NOTE: this is live from the first frame, but it only has something to")
-                    print("do while you are MOVING - the camera only exists relative to the")
+                    print(
+                        "NOTE: this is live from the first frame, but it only has something to"
+                    )
+                    print(
+                        "do while you are MOVING - the camera only exists relative to the"
+                    )
                     print("player. Walk a few steps, then:")
                     print("    python tools/scroll_fix.py --walk-subpixel report")
                     print()
@@ -2964,33 +3273,63 @@ def main():
             print(__doc__.strip())
             print()
             print("EVERYDAY COMMANDS")
-            print("  --apply         APPLY THE FIX after each game launch (run it in the")
-            print("                  overworld - it measures the frame time and installs both")
+            print(
+                "  --apply         APPLY THE FIX after each game launch (run it in the"
+            )
+            print(
+                "                  overworld - it measures the frame time and installs both"
+            )
             print("                  parts, then starts the recorder)")
             print("  --walk-lock     the exact-step part on its own (on|off|report)")
             print("  --walk-report   show whether the tile duration scaling is active")
-            print("  --off           undo it immediately (also undone by closing the game)")
+            print(
+                "  --off           undo it immediately (also undone by closing the game)"
+            )
             print()
             print("CALIBRATION")
-            print("  --walk-calibrate --seconds 8   closed loop: corrects until the measured")
-            print("                                 step is 1 px/frame, printing every pass and")
+            print(
+                "  --walk-calibrate --seconds 8   closed loop: corrects until the measured"
+            )
+            print(
+                "                                 step is 1 px/frame, printing every pass and"
+            )
             print("                                 the durations to lock in")
-            print("  --walk-const NORMAL FAST       apply fixed durations (no measurement)")
+            print(
+                "  --walk-const NORMAL FAST       apply fixed durations (no measurement)"
+            )
             print()
             print("DIAGNOSTICS (none of these wait on you)")
             print("  --walk-diag on|report|off")
-            print("                              records camera step, sprite sub-pixel phase")
-            print("                              and frame time per frame while you play;")
-            print("                              'report' analyses whatever it captured")
+            print(
+                "                              records camera step, sprite sub-pixel phase"
+            )
+            print(
+                "                              and frame time per frame while you play;"
+            )
+            print(
+                "                              'report' analyses whatever it captured"
+            )
             print("  --walk-subpixel on|grid|off|report")
-            print("                              DEPRECATED - a failed experiment. It does move the")
-            print("                              camera in fractions, but our focus formula is off by")
-            print("                              a constant, so the player drifts off-centre and the")
-            print("                              camera motion goes non-linear. Kept for the notes.")
-            print("  --measure --seconds 8   per-frame world step histogram, to verify it worked")
+            print(
+                "                              DEPRECATED - a failed experiment. It does move the"
+            )
+            print(
+                "                              camera in fractions, but our focus formula is off by"
+            )
+            print(
+                "                              a constant, so the player drifts off-centre and the"
+            )
+            print(
+                "                              camera motion goes non-linear. Kept for the notes."
+            )
+            print(
+                "  --measure --seconds 8   per-frame world step histogram, to verify it worked"
+            )
             print()
             print("Leftovers from the investigation, not needed for normal use:")
-            print("  --on --snap --trace --trace-spawn --find-speed --set-speed --walk-scale")
+            print(
+                "  --on --snap --trace --trace-spawn --find-speed --set-speed --walk-scale"
+            )
             print("  --status --ab --trace-report --snap-report --trace-spawn-report")
     finally:
         b.detach()
