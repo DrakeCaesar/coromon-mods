@@ -79,6 +79,21 @@ SETTINGS = [
     ("key_in", list(KEY_IN), "keys that zoom in one stop"),
     ("key_reset", list(KEY_RESET), "keys that go back to the game's own scale"),
     (
+        "fix_collision_reach",
+        True,
+        "keep the game's own hitboxes out of the zoom: display:isColliding builds them from "
+        "unscaled world-unit boxes, so without this the Mescher Realm dark souls, the dart "
+        "traps and the Swurmy minigames reach 1/k further away when you zoom out",
+    ),
+    (
+        "fix_light_circle",
+        True,
+        "keep the visible-area circle on the player: the game offsets its mask by "
+        "MTE.getConstrainedDistanceOfCamera, a world-unit distance spent as content pixels, "
+        "so without this the hole drifts by (1-k) x clamped - which is zero mid-map and grows "
+        "as you approach an edge",
+    ),
+    (
         "recenter",
         False,
         "one-shot repair: put the camera back on the player if an older build displaced "
@@ -328,11 +343,97 @@ do
     elseif f.kreset[k] then setScale(1) end
   end
 
+  -- Some of the game's own checks compare content-space rectangles built from world-unit
+  -- hitboxes. display:isColliding -> getCollisionObjectsFor does
+  --     xMin = obj.contentBounds.xMin + c.x
+  -- where contentBounds is already in content units but c.x / c.width are authored in world
+  -- units. At scale 1 those are the same unit, so it is right; under a zoom of k the
+  -- separation of two objects shrinks by k while their hitboxes do not, so the reach grows
+  -- by 1/k. Measured in the Mescher Realm: a dark soul's 10x10 box against the player's
+  -- 16x16 killed from two tiles away at k = 0.5, where at k = 1 it kills from one.
+  --
+  -- Scaling those offsets and sizes by the object's own local-to-content scale converts them
+  -- into content units, which is the whole fix. It is reimplemented rather than wrapped
+  -- because the units are already mixed by the time the function returns, so the two halves
+  -- cannot be told apart afterwards. Patched in place so every caller gets the corrected
+  -- reach, and put back on teardown.
+  local collidingBoxIndex
+  local collidingOriginalBoxes
+  local function withZoomIndependentReach()
+    for i = 1, 10 do
+      local name, value = debug.getupvalue(display.isColliding, i)
+      if not name then break end
+      if name == 'getCollisionObjectsFor' and type(value) == 'function' then
+        collidingBoxIndex, collidingOriginalBoxes = i, value
+      end
+    end
+    if not collidingBoxIndex then return false end
+    local function zoomAwareBoxes(obj)
+      local cb = obj.contentBounds
+      local boxes = obj.collisionObjects
+      if type(boxes) ~= 'table' then return { cb } end
+      local sx, sy = 1, 1
+      pcall(function()
+        local ax, ay = obj:localToContent(0, 0)
+        local bx = obj:localToContent(1, 0)
+        local _, cy = obj:localToContent(0, 1)
+        sx, sy = bx - ax, cy - ay
+      end)
+      local out = {}
+      for _, c in pairs(boxes) do
+        out[#out + 1] = {
+          xMin = cb.xMin + c.x * sx,
+          xMax = cb.xMin + (c.x + c.width) * sx,
+          yMin = cb.yMin + c.y * sy,
+          yMax = cb.yMin + (c.y + c.height) * sy,
+        }
+      end
+      return out
+    end
+    return pcall(function()
+      debug.setupvalue(display.isColliding, collidingBoxIndex, zoomAwareBoxes)
+    end)
+  end
+
+  -- The visible-area circle is a screen-space black rect with a mask, and the game places the
+  -- hole in it with
+  --     darknessRect.maskX = MTE.getConstrainedDistanceOfCamera()   (+ a per-direction offset)
+  -- That value is how far the camera was clamped back from the map edge, and at scale 1 it is
+  -- exactly the player's offset from the middle of the screen - measured live in the Mescher
+  -- Realm: 48.0 for both, with the player 48.0 px right of centre. That is why the circle lines
+  -- up in the middle of a map and drifts as you walk towards an edge, where clamped stops being
+  -- zero. Under a zoom of k the world slides by k times that distance while the mask is moved by
+  -- one, so the hole lags by (1 - k) * clamped. Scaling the value at its source fixes all three
+  -- mask modes (dark, flashlight, big flashlight) and the fruit drone overlay, which are its
+  -- only consumers.
+  local cameraDistanceOriginal
+  local function withZoomAwareCameraDistance()
+    local M = _G.MTE or package.loaded['classes.modules.mte.mte']
+    if type(M) ~= 'table' or type(M.getConstrainedDistanceOfCamera) ~= 'function' then
+      return false
+    end
+    cameraDistanceOriginal = M.getConstrainedDistanceOfCamera
+    M.getConstrainedDistanceOfCamera = function(...)
+      local x, y = cameraDistanceOriginal(...)
+      local w = twNode()
+      local k = (w and w.xScale) or 1
+      if k ~= 1 then
+        if type(x) == 'number' then x = x * k end
+        if type(y) == 'number' then y = y * k end
+      end
+      return x, y
+    end
+    return true
+  end
+
   f.kout, f.kin, f.kreset = __KOUT__, __KIN__, __KRESET__
   f.koutTxt, f.kinTxt, f.kresetTxt = __KOUTTXT__, __KINTXT__, __KRESETTXT__
   z.scale = 1
   z.seen = {}
   z.sticky = setmetatable({}, { __mode = 'k' })
+
+  if __FIXREACH__ then withZoomIndependentReach() end
+  if __FIXCIRCLE__ then withZoomAwareCameraDistance() end
 
   f.kill = function()
     f.on = false
@@ -353,6 +454,17 @@ do
       end
     end
     z.sticky = setmetatable({}, { __mode = 'k' })
+    if collidingBoxIndex and collidingOriginalBoxes then
+      pcall(function()
+        debug.setupvalue(display.isColliding, collidingBoxIndex, collidingOriginalBoxes)
+      end)
+      collidingBoxIndex, collidingOriginalBoxes = nil, nil
+    end
+    if cameraDistanceOriginal then
+      local M = _G.MTE or package.loaded['classes.modules.mte.mte']
+      if type(M) == 'table' then M.getConstrainedDistanceOfCamera = cameraDistanceOriginal end
+      cameraDistanceOriginal = nil
+    end
   end
 
   f.on = true
@@ -371,6 +483,8 @@ end
         .replace("__KINTXT__", "'" + "/".join(kin) + "'")
         .replace("__KRESETTXT__", "'" + "/".join(kreset) + "'")
         .replace("__PIXELS__", str(pixels))
+        .replace("__FIXREACH__", "true" if cfg["fix_collision_reach"] else "false")
+        .replace("__FIXCIRCLE__", "true" if cfg["fix_light_circle"] else "false")
     )
 
 

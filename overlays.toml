@@ -36,5 +36,9 @@ key_out = ["-", "minus", "["]
 key_in = ["+", "=", "plus", "]"]
 # keys that go back to the game's own scale
 key_reset = ["0"]
+# keep the game's own hitboxes out of the zoom: display:isColliding builds them from unscaled world-unit boxes, so without this the Mescher Realm dark souls, the dart traps and the Swurmy minigames reach 1/k further away when you zoom out
+fix_collision_reach = true
+# keep the visible-area circle on the player: the game offsets its mask by MTE.getConstrainedDistanceOfCamera, a world-unit distance spent as content pixels, so without this the hole drifts by (1-k) x clamped - which is zero mid-map and grows as you approach an edge
+fix_light_circle = true
 # one-shot repair: put the camera back on the player if an older build displaced it. Set it true, run once, then set it back to false.
 recenter = false
