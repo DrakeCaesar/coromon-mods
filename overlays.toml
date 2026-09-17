@@ -1,0 +1,40 @@
+# overlays.toml - settings for overlays.py
+#
+# Edit this file, then run:   python overlays.py
+#
+# There are no command line options; everything comes from here. A run makes the game match
+# this file - it tears down whatever was installed last time and installs what is enabled
+# below - so setting `enabled` to false and running again is how you remove a feature.
+
+# the process to attach to
+process = "coromon.exe"
+
+[potential]
+# install the battle Potential readout (screen overlay)
+enabled = true
+
+[items]
+# install the item markers
+enabled = true
+# also mark item chests (itemChest / pyramidItemChest)
+show_chests = true
+# mark every item-carrying class (hidden items, chests, drill/gem spots, ground items, tree items)
+show_all_items = true
+# draw the item name above each marker
+labels = true
+# label font: "small" is outline_8, "big" is outline_10_bold   (one of: big, small)
+font = "small"
+
+[zoom]
+# install the overworld zoom
+enabled = true
+# install already zoomed out, to this many screen pixels per texture pixel; 0 is the game's own scale (no zoom)
+pixels = 0
+# keys that zoom out one stop
+key_out = ["-", "minus", "["]
+# keys that zoom in one stop
+key_in = ["+", "=", "plus", "]"]
+# keys that go back to the game's own scale
+key_reset = ["0"]
+# one-shot repair: put the camera back on the player if an older build displaced it. Set it true, run once, then set it back to false.
+recenter = false

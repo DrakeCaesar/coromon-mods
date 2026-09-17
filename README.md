@@ -152,24 +152,67 @@ scale is a live number (`0.25` the other way round), not a fixed integer factor.
 
 ## Other tools
 
+`overlays.py` is the combined entry point: the battle Potential readout, the item markers
+and the overworld zoom, all driven from one settings file.
+
 | file | purpose |
 |---|---|
+| `overlays.py` | **all three live helpers, one command** — a thin front end over `ingame/` |
+| `overlays.toml` | the settings: which features are on, and every option they have |
+| `ingame/config.py` | the settings file — its schema, its defaults, reading it back |
+| `ingame/core.py` | the hook-up to the game, the Lua every feature shares, and the harness |
+| `ingame/potential.py` | the battle Potential readout |
+| `ingame/items.py` | the markers over the map's collectable objects |
+| `ingame/zoom.py` | the overworld zoom keys |
 | `coromon_starter.py` | the useful one — read the 3 starter potentials and draw them on screen |
-| `hidden_items.py` | find and highlight the hidden overworld items (`--list`, `--off`) |
-| `battle_potential.py` | show every opponent's Potential during battle (`--once`, `--off`) |
-| `map_zoom.py` | zoom the overworld in and out with in-game keys |
 | `scroll_fix.py` | make the overworld scroll a constant number of pixels per frame |
 | `pad_drive.py` | hold a direction in the game window from outside (test instrument) |
 | `coromon_lua.py` | generic Lua injection bridge (`--eval`, `--file`, or REPL) |
 | `car_extract.py` | Solar2D `resource.car` reader/extractor (`--list`, `--extract`) |
 | `luadis.py` | Lua 5.1 bytecode reader/disassembler/string dumper for `.lu` chunks |
 
+### Everything at once (`overlays.py`)
+
+The three live helpers started as three separate programs and drifted into three copies of
+the same scaffolding: the Frida bridge, the `tiledWorld` lookup (done two different ways),
+the `localise` wrapper (two different wrappers, same `???` trap), the `display.newRect` and
+`textHelper` helpers, the state-table-plus-timer pattern, and a teardown each. Running all
+three meant three attachments to the game and three Lua chunks.
+
+`overlays.py` is one command with one attachment and one Lua chunk — but deliberately *not*
+one file, and deliberately not flag-driven either:
+
+```bash
+python overlays.py
+```
+
+That is the whole interface. Everything — which features are on, the zoom keys, which item
+classes are marked, the label font — lives in `overlays.toml` beside it, and a run makes the
+game match that file: it tears down whatever was installed last time and installs what is
+switched on, then prints what it installed, the current state of each feature, and what is
+around you. Turning something off is setting its `enabled` to `false` and running again.
+
+The file documents itself, because it is *generated*: each module declares its settings as
+`(key, default, comment)` in `SETTINGS`, `ingame/config.py` renders `overlays.toml` from
+those, and a value that does not match its default's type — or the values a setting allows —
+is reported and the default used instead. Delete the file and it is written back out of the
+defaults. Adding a setting is one line in the module that owns it.
+
+`ingame/core.py` owns the bridge and the shared Lua; each feature is its own module
+implementing the same small surface (settings, query Lua, install block, teardown, and the
+summary/status/report lines). Core asks the modules for those and composes them, so it never
+has to know what the features are, and the features install, remove and report independently.
+Re-running replaces the previous install rather than stacking on it, and it tears down the old
+`__battlepot` / `__hidden` / `__mapzoom` globals, so you cannot end up with two of everything
+on screen. The per-feature detail in the sections below is what the modules took over
+unchanged.
+
 ### Overworld zoom
 
 Coromon has no zoom. `debugSettings` has no scale key, the camera
 (`classes.modules.interface.scrollViewBuilder`) takes no scale parameter, and the only zoom
 knob anywhere is `debugHexagonWorldScaleMultiplier` — debug tooling for the Rogue Planet map
-generator, not reachable in a normal save. So `map_zoom.py` scales the overworld node
+generator, not reachable in a normal save. So `ingame/zoom.py` scales the overworld node
 (`tiledWorld`) itself, with the player inside it, about the middle of the viewport.
 
 | key | action |
@@ -183,8 +226,10 @@ k = 1, 0.75, 0.5, 0.25. Nothing in between, and nothing above 1, deliberately �
 with nearest-neighbour filtering, so a fractional scale gives some texels 3 screen pixels and
 others 2, which shows up as uneven pixel sizes and a faint shimmer while the map scrolls. The
 stops are read from the game's own `display.contentToScreenScale`, so they stay honest if the
-window size changes. `--pixels 2` installs already zoomed out, `--status` prints the scale,
-the px-per-texel and every key the game has seen, and `--off` removes it.
+window size changes. The keys themselves are `key_out`, `key_in` and `key_reset` in the
+`[zoom]` table of `overlays.toml`, and `pixels` installs already zoomed out — 0, the default,
+is no zoom. The status the script prints shows the scale, the px-per-texel and every key the
+game has seen, which is how you find a key's real name when one does not react.
 
 Two things to know before touching it:
 
@@ -195,7 +240,8 @@ Two things to know before touching it:
   until the new node stops being positioned (measured: the position standing still for four
   frames, about 80 ms). Writing the node outright destroys the engine's base permanently: the
   first version left the world 446 px out, and the offset survived walking, map changes and a
-  reset. `--recenter` is the escape hatch for a world an older build displaced that way.
+  reset. `recenter = true` in `[zoom]` is the escape hatch for a world an older build
+  displaced that way: set it, run once, set it back to false.
 
   Deriving the offset from where the player is looks like it should work and does not. It pins
   them to one spot: fine on a large map, where the engine parks them at the centre, but wrong
@@ -229,11 +275,8 @@ There is no separate "potency" field anywhere on the Monster object — it is al
 `potential`. The tier is not hardcoded either; it comes from the game's own
 `monsterUtility:getPotentialCategoryForPotential()`.
 
-```bash
-python tools/battle_potential.py          # draw it during battle
-python tools/battle_potential.py --once   # print the current opponent and exit
-python tools/battle_potential.py --off    # remove the overlay
-```
+Switched off with `enabled = false` in the `[potential]` table of `overlays.toml`; the report
+the script prints always lists the current opponents.
 
 The opponent is found through the live battle instance:
 
@@ -277,13 +320,17 @@ Coromon scatters items that stay invisible until you walk onto their tile. They 
 plain Tiled objects with `class = "hiddenItem"` in an object layer (usually
 `interactObjects`), carrying their contents in up to three slots:
 
-```bash
-python tools/hidden_items.py --list    # print them with tile coords
-python tools/hidden_items.py           # draw a marker over each one
-python tools/hidden_items.py --crates  # also mark item chests (amber borders)
-python tools/hidden_items.py --all     # every item-carrying class
-python tools/hidden_items.py --off     # remove the markers
-```
+Settings, in the `[items]` table of `overlays.toml`:
+
+| setting | default | effect |
+|---|---|---|
+| `enabled` | `true` | draw the markers |
+| `show_chests` | `false` | also mark item chests (amber borders) |
+| `show_all_items` | `false` | mark every item-carrying class |
+| `labels` | `true` | draw the item name above each marker |
+| `font` | `"small"` | label font, `"small"` or `"big"` |
+
+The report the script prints lists them with tile coordinates.
 
 **Which classes carry items.** Inventoried across all 194 shipped map files, with
 Tiled templates resolved (most of these objects get their class from a template, not
@@ -293,33 +340,33 @@ scan of inline `class` fields misses nearly all of them):
 | class | count | item property | covered by |
 |---|---|---|---|
 | `hiddenItem` | 371 | `item1_UID` | default |
-| `itemChest` | 310 | `item1_UID` | `--crates` |
+| `itemChest` | 310 | `item1_UID` | `show_chests` |
 | `fruitGrowingPot` | 41 | `itemUID` | never — see below |
-| `pyramidItemChest` | 30 | `item1_UID` | `--crates` |
-| `drillShovelItem` | 11 | `item1_UID` | `--all` |
-| `item` | 9 | `itemUID` | `--all` |
-| `treeItem` | 1 | `itemUID` | `--all` |
+| `pyramidItemChest` | 30 | `item1_UID` | `show_chests` |
+| `drillShovelItem` | 11 | `item1_UID` | `show_all_items` |
+| `item` | 9 | `itemUID` | `show_all_items` |
+| `treeItem` | 1 | `itemUID` | `show_all_items` |
 
-`fruitGrowingPot` is excluded even from `--all`: it is a repeatable harvester (plant a
-fruit, take the yield), not a one-time pickup, so "already collected" has no meaning.
+`fruitGrowingPot` is excluded even from `show_all_items`: it is a repeatable harvester
+(plant a fruit, take the yield), not a one-time pickup, so "already collected" has no
+meaning.
 
 **Containers hold up to three items**, in `item<N>_UID` / `item<N>_amount` slots — an
 empty slot is a nil UID with amount 0, so both are tested. Every item is shown: the
 first is the "top name" and the rest stack underneath it on screen, with the block
-lifted so its last line still sits just above the tile. In `--list` the extras are
+lifted so its last line still sits just above the tile. In the report the extras are
 indented under the first.
 
-**Label font** is one choice for every line, set by the `FONT` variable at the top of
-`hidden_items.py`:
+**Label font** is one choice for every line, set by `font` in `[items]`:
 
-| `FONT` | fontType | measured | line spacing |
+| `font` | fontType | measured | line spacing |
 |---|---|---|---|
-| `"small"` (current) | `outline_8` | 60×15 | 10px |
-| `"big"` | `outline_10_bold` | 80×18 | 12px |
+| `small` (default) | `outline_8` | 60×15 | 10px |
+| `big` | `outline_10_bold` | 80×18 | 12px |
 
 The spacing is deliberately tighter than the measured height, because Solar2D reports
 `contentHeight == height` — the whole padded line box — while the pixel glyphs occupy
-well under it. Tune the numbers in the `FONTS` table.
+well under it. Tune the numbers in the `FONTS` table in `ingame/items.py`.
 
 The game ships only two text sizes — **8 and 10**, with `_bold` only at 10 — so there
 is no third option. `plain_*` variants exist but would not stay legible over a busy
@@ -333,7 +380,7 @@ conditional variants like `interactObjects#whileChristmas`, `afterDEFEAT_GHOST_T
 and `whileDEMO`. Matching on the runtime **name prefix** is both necessary and
 sufficient, since the runtime name is the Tiled name plus a suffix.
 
-**Chests** are off by default (they're visible objects anyway). `--crates` adds
+**Chests** are off by default (they're visible objects anyway). `show_chests = true` adds
 `itemChest` / `pyramidItemChest`, drawn with amber borders so the two kinds are
 distinguishable.
 
@@ -374,13 +421,13 @@ suffix (`hiddenItem_31_44` → `hiddenItem_31_44_front`). For reference,
 `playerStats:getAmountOfHiddenItemsFound()` only tracks a global counter for the
 `FIND_150_HIDDEN_ITEMS` achievement, with no per-item flag anywhere in
 `playerWorldData`. The watchdog re-checks every second, so a marker disappears as soon
-as the item is taken. `--list` still shows collected ones, tagged `[already collected]`.
+as the item is taken. The report still shows collected ones, tagged `[already collected]`.
 
 **Gotcha:** Coromon's wrapped `display.newRect` has **no stroke support** —
 `setStrokeColor` is `nil` on it (and `strokeWidth` is a plain field that does nothing).
 Wrapping the call in `pcall` hides this and silently leaves you with a filled square.
 The border is therefore drawn as four 1px filled edges, anchored at 0,0 on integer
-coordinates to stay crisp at the game's x3 content scale. `rectHelper:newLineRect`
+coordinates to stay crisp at the game's content-to-screen scale. `rectHelper:newLineRect`
 exists and builds the same four lines internally, but its 5th parameter wants a
 game-internal "rect mutator" object (it indexes `fillColor` / `anchorX`), not a table.
 

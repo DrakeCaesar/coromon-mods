@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""
+items.py - markers over the collectable objects on the overworld map.
+
+Coromon scatters items that are invisible until you walk into the tile they sit on. They
+are plain Tiled objects with `class = "hiddenItem"` in an object layer, carrying their
+contents in up to three item<N>_UID / item<N>_amount slots. Containers (chests) use the
+same slot layout, so every item in them is shown.
+
+This reads the live map out of the running game and draws a marker over each one, so you
+can see where they are without walking the whole map. Labels show the item's display name,
+resolved through the game's own localisation so they match the selected language
+(`localise('items.<UID>.name')`).
+
+Collected objects drop out of the markers, but the classes do NOT all share one mechanism
+- see stillPresent() below. Only hidden items and chests have been verified for that; the
+--show-all-items extras are unverified.
+
+The markers are children of the game's own `tiledWorld` node, positioned in map pixel
+coordinates, so they scroll with the map for free - and, with the zoom on, scale with it,
+which is what you want for something drawn in map space.
+"""
+
+NAME = "items"
+
+# Which Tiled object classes to mark. Chests do NOT share the hidden items' mechanism
+# despite abstractItemChest:shouldAutomaticallyRemoveItemSpawnable() being a bare
+# `return true` in the bytecode: measured on an opened chest after save + reload, it is
+# still spawned with its sprite at alpha 1 and the state lives in a consistent save
+# property instead (itemChestIsOpened). stillPresent() handles both.
+HIDDEN_CLASSES = ["hiddenItem"]
+CHEST_CLASSES = ["itemChest", "pyramidItemChest"]
+# Every other class that carries an item, inventoried across all 194 shipped map files with
+# Tiled templates resolved (most of these objects get their class via a template, not
+# inline): hiddenItem 371, itemChest 310, fruitGrowingPot 41, pyramidItemChest 30,
+# drillShovelItem 11, item 9, treeItem 1.
+#
+# fruitGrowingPot is deliberately excluded even from --show-all-items: it is a repeatable
+# harvester (you plant a fruit and take the yield), not a one-time pickup, so "already
+# collected" has no meaning for it.
+OTHER_CLASSES = ["drillShovelItem", "item", "treeItem"]
+
+# Marker label font. The game ships only two text sizes - 8 and 10, with _bold only at 10 -
+# so this is a straight choice between them, and it applies to EVERY line. Change it here.
+#     "small" -> outline_8         (measured 60x15)
+#     "big"   -> outline_10_bold   (measured 80x18)
+# The line spacing is deliberately tighter than the text object's height: Solar2D reports
+# contentHeight == height, i.e. the whole padded line box, and the pixel font's glyphs
+# occupy well under that. Lower these further if the stack still looks loose.
+FONTS = {
+    "small": ("outline_8", 10),
+    "big": ("outline_10_bold", 12),
+}
+
+DEFAULT_FONT = "small"
+
+# The settings this feature reads, in the order they are written into overlays.toml:
+# (key, default, comment).
+SETTINGS = [
+    ("enabled", True, "install the item markers"),
+    ("show_chests", False, "also mark item chests (itemChest / pyramidItemChest)"),
+    (
+        "show_all_items",
+        False,
+        "mark every item-carrying class (hidden items, chests, drill/gem spots, ground "
+        "items, tree items)",
+    ),
+    ("labels", True, "draw the item name above each marker"),
+    (
+        "font",
+        DEFAULT_FONT,
+        'label font: "small" is outline_8, "big" is outline_10_bold',
+        sorted(FONTS),
+    ),
+]
+
+
+def class_list(cfg):
+    out = list(HIDDEN_CLASSES)
+    if cfg["show_chests"] or cfg["show_all_items"]:
+        out += CHEST_CLASSES
+    if cfg["show_all_items"]:
+        out += OTHER_CLASSES
+    return out
+
+
+def lua(cfg):
+    """The queries. show_chests / show_all_items decide which classes are marked, so the
+    class table is substituted in here rather than read from a constant."""
+    classes = "{" + ", ".join("'" + c + "'" for c in class_list(cfg)) + "}"
+    return r"""
+-- The object classes treated as collectable.
+local ITEM_CLASSES = __CLASSES__
+
+local function isItemClass(c)
+  for _, n in ipairs(ITEM_CLASSES) do
+    if c == n then return true end
+  end
+  return false
+end
+
+-- Is this item still lying on the map, or has it been picked up?
+--
+-- The static Tiled data in map.layers is useless for this: it keeps every entry forever,
+-- even across a save and reload (verified). The live state is on the runtime objects from
+-- MTE.getObjectsAtTile(), and there are TWO different mechanisms:
+--
+--   * hidden items are REMOVED from the runtime list - their tile keeps only a collision
+--     object, so no matching entry means collected;
+--   * chests STAY spawned (they have to render their opened sprite) and instead flip a
+--     consistent save property: consistentSaveProperties.itemChestIsOpened = true (read off
+--     a live collected chest, after save + reload).
+--
+-- Both are matched by name prefix: the runtime name is the Tiled name plus a suffix
+-- (hiddenItem_31_44 -> hiddenItem_31_44_front).
+local function runtimeEntry(o)
+  local n = o.name
+  if type(n) ~= 'string' or n == '' then return nil end
+  local m = mte()
+  if not m or type(m.getObjectsAtTile) ~= 'function' then return nil end
+  local ok, list = pcall(function() return m.getObjectsAtTile(o.tileX, o.tileY) end)
+  if not ok or type(list) ~= 'table' then return nil end
+  -- Deliberately NOT restricted to the 'interactObjects' layer. Item carriers also live on
+  -- layers named items, gems, birds, interactObjects_custom, and on conditional variants
+  -- like interactObjects#whileChristmas or afterDEFEAT_GHOST_TITAN. The runtime name is
+  -- specific enough on its own, so matching that prefix is necessary and sufficient.
+  for _, e in pairs(list) do
+    if type(e) == 'table' and type(e.name) == 'string' and e.name:sub(1, #n) == n then
+      return e
+    end
+  end
+end
+
+local function stillPresent(o)
+  if type(o.name) ~= 'string' or o.name == '' then return true end
+  local e = runtimeEntry(o)
+  if not e then return false end                       -- removed: hidden items
+  local sp = e.properties and e.properties.spawnable   -- still spawned: chests
+  local csp = type(sp) == 'table' and sp.consistentSaveProperties
+  if type(csp) == 'table' then
+    for k, v in pairs(csp) do
+      -- itemChestIsOpened; matched loosely so a variant flag still works
+      if type(k) == 'string' and k:lower():find('opened') and v then return false end
+    end
+  end
+  return true
+end
+
+-- Every item-carrying object on the loaded map. Hidden items live on map.layers[*].objects,
+-- NOT in MTE.getObjects(), which only returns tile-collision objects.
+local function itemCollect()
+  local m = mte()
+  if not m or type(m.getMap) ~= 'function' then return nil, nil end
+  local ok, map = pcall(m.getMap)
+  if not ok or type(map) ~= 'table' then return nil, nil end
+  local items = {}
+  for _, L in pairs(map.layers) do
+    if type(L) == 'table' and type(L.objects) == 'table' then
+      for _, o in pairs(L.objects) do
+        if type(o) == 'table' and isItemClass(o.class)
+           and type(o.tileX) == 'number' and type(o.tileY) == 'number' then
+          -- properties turn up under either name depending on the object
+          local P = o.tiledProperties or o.properties or {}
+          -- Containers can hold up to THREE items, in item<N>_UID / item<N>_amount slots.
+          -- An empty slot is a nil UID with amount 0, so both are tested. Growing pots,
+          -- ground items and tree items use a plain itemUID instead.
+          local lines, uids = {}, {}
+          for n = 1, 3 do
+            local u = P['item' .. n .. '_UID']
+            local a = tonumber(P['item' .. n .. '_amount']) or 0
+            if u ~= nil and a > 0 then
+              local nm = loc('items.' .. tostring(u) .. '.name', tostring(u))
+              -- counts are only appended above 1 - "Silver Spinner x1" is noise
+              lines[#lines + 1] = a > 1 and (nm .. ' x' .. a) or nm
+              uids[#uids + 1] = tostring(u)
+            end
+          end
+          if #lines == 0 and P.itemUID ~= nil then
+            lines[1] = loc('items.' .. tostring(P.itemUID) .. '.name', tostring(P.itemUID))
+            uids[1] = tostring(P.itemUID)
+          end
+          if #lines == 0 then
+            lines[1], uids[1] = '?', '?'
+          end
+          items[#items + 1] = {
+            tx = o.tileX, ty = o.tileY,
+            uid = uids[1], name = lines[1],
+            lines = lines, uids = uids, kind = o.class,
+            collected = not stillPresent(o),
+          }
+        end
+      end
+    end
+  end
+  table.sort(items, function(a, b)
+    if a.ty ~= b.ty then return a.ty < b.ty end
+    return a.tx < b.tx
+  end)
+  return map, items
+end
+
+local function playerTile()
+  local tx, ty
+  pcall(function()
+    local i = spawnableHelper:getPlayerSpawnable()
+    if i then tx, ty = i.currentTileX, i.currentTileY end
+  end)
+  return tx, ty
+end
+""".replace("__CLASSES__", classes)
+
+
+def section(cfg):
+    if not cfg["enabled"]:
+        return ""
+    font, line_h = FONTS.get(cfg["font"], FONTS[DEFAULT_FONT])
+    return (
+        r"""
+do
+  local f = makeFeature('items', 1000)
+  f.labels = __LABELS__
+  f.count = 0
+
+  local function clear()
+    drop(f.group)
+    f.group, f.world, f.map, f.sig = nil, nil, nil, nil
+  end
+
+  local function signature(items)
+    local parts = {}
+    for _, it in ipairs(items) do parts[#parts + 1] = it.tx .. ':' .. it.ty end
+    return table.concat(parts, ',')
+  end
+
+  local function draw(map, items, tw)
+    clear()
+    local g = display.newGroup()
+    pcall(function() g.name = 'itemMarks' end)
+    for _, it in ipairs(items) do
+      -- map-local pixel space: the tile's top-left corner is (tx*16, ty*16), which is
+      -- exactly where the engine places a sprite's tile
+      local x0, y0 = it.tx * 16, it.ty * 16
+      -- white for hidden items, amber for chests, so the two are distinguishable
+      local col = (it.kind == 'hiddenItem') and { 1, 1, 1, 0.85 } or { 1, 0.82, 0.25, 0.9 }
+      rect(g, x0,      y0,      16, 1,  col)    -- top
+      rect(g, x0,      y0 + 15, 16, 1,  col)    -- bottom
+      rect(g, x0,      y0,      1,  16, col)    -- left
+      rect(g, x0 + 15, y0,      1,  16, col)    -- right
+      if f.labels then
+        -- Every line uses the same font. The block is lifted so its LAST line still sits
+        -- just above the tile, which keeps the first item highest.
+        local n = #it.lines
+        for i = 1, n do
+          text(g, __FONT__, it.lines[i], x0 + 8, y0 - 2 - (n - i) * __LINE_H__)
+        end
+      end
+    end
+    tw:insert(g)          -- appended last, so drawn over every map layer
+    f.group, f.world, f.map, f.sig, f.count = g, tw, map, signature(items), #items
+  end
+
+  local function update()
+    if not f.on then return end
+    local tw = twNode()
+    if type(tw) ~= 'table' then return end
+    local map, items = itemCollect()
+    if not map or not items then return end
+    local vis = {}
+    for _, it in ipairs(items) do
+      if not it.collected then vis[#vis + 1] = it end
+    end
+    -- redraw on map change, if our group was dropped, or when the set of items that are
+    -- still there changed - i.e. the moment you walk onto one and pick it up
+    if map == f.map and tw == f.world and f.group and f.group.parent
+       and signature(vis) == f.sig then
+      return
+    end
+    draw(map, vis, tw)
+  end
+
+  f.update, f.kill, f.on = update, clear, true
+end
+""".replace("__LABELS__", "true" if cfg["labels"] else "false")
+        .replace("__FONT__", "'" + font + "'")
+        .replace("__LINE_H__", str(line_h))
+    )
+
+
+def summary(cfg):
+    return r"""(function()
+  local map = itemCollect()
+  if not map then return 'item markers (will draw once a map is loaded)' end
+  local f = _G.__hud.feats.items
+  return string.format('item markers (%d marked on %s%s)', (f and f.count) or 0,
+    tostring(map.path or ''), tostring(map.filename or ''))
+end)()"""
+
+
+def status(cfg):
+    return r"""(function()
+  local h = _G.__hud
+  local f = h and h.feats.items
+  if not f or not f.on then return nil end
+  return string.format('item markers: %d marked on this map%s',
+    f.count or 0, f.labels and '' or ' (labels off)')
+end)()"""
+
+
+def report(cfg):
+    return r"""(function()
+  local map, items = itemCollect()
+  if not map then return 'overworld - no map loaded' end
+  local out = {
+    string.format('overworld - %s%s   %sx%s tiles   %d collectable object(s)',
+      tostring(map.path), tostring(map.filename),
+      tostring(map.width), tostring(map.height), #items),
+  }
+  local ptx, pty = playerTile()
+  if ptx then
+    out[#out + 1] = string.format('player is on tile (%d, %d)', ptx, pty)
+  end
+  for _, it in ipairs(items) do
+    local tag = ''
+    if ptx then
+      local dx, dy = it.tx - ptx, it.ty - pty
+      if math.abs(dx) + math.abs(dy) == 1 then
+        tag = '   <-- adjacent to you (' .. (dx == -1 and 'left' or dx == 1 and 'right'
+          or dy == -1 and 'up' or 'down') .. ')'
+      end
+    end
+    local kind = (it.kind == 'hiddenItem') and '' or ('   [' .. it.kind .. ']')
+    out[#out + 1] = string.format('  tile (%3d,%3d)  %-24s   (%s)%s%s%s',
+      it.tx, it.ty, it.lines[1], it.uids[1], kind,
+      it.collected and '   [already collected]' or '', tag)
+    -- a container can hold up to three items; the rest sit under the top name
+    for i = 2, #it.lines do
+      out[#out + 1] = string.format('  %-13s  %-24s   (%s)', '', it.lines[i], it.uids[i])
+    end
+  end
+  return table.concat(out, '\n')
+end)()"""
