@@ -73,7 +73,13 @@ def focus(hwnd):
     if tid_fg and tid_fg != tid_me:
         attached = bool(user32.AttachThreadInput(tid_fg, tid_me, True))
     try:
-        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        # Only un-minimise, and only when actually minimised. SW_RESTORE also restores a
+        # *maximised* window to its original size and position - and Coromon's fullscreen is
+        # exactly that - so calling it unconditionally dropped the game out of fullscreen
+        # into a 1216x808 window every time we focused it. Measured on the live window:
+        # 1936x1060 zoomed=True -> SW_RESTORE -> 1216x808 zoomed=False.
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
         user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
         user32.SetFocus(hwnd)
