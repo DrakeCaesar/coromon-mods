@@ -58,6 +58,21 @@ Three things this gets right that the earlier attempts did not:
     timed: once the node's position has stood still for four frames the zoom goes straight
     back on, so a normal transition costs about 80ms of scale 1 rather than a fixed 750ms.
 
+One more thing the game does that the zoom has to respect. Some maps mark a whole Tiled layer
+`stickToScreen` (`worldRainOverlay`, in every map checked - it is the dark sheet drawn over the
+map), and the builder pins such a layer to the screen by translating it by the exact opposite of
+the world's translation on every camera move (`tiledWorldBuilder.moveCamera`, lines 363-365). The
+pinning itself survives the zoom untouched, because the zoom only ever reads the engine's value,
+so the sum the pinning depends on stays intact. What does not survive is the layer's SIZE: it is
+laid out to fill the viewport at scale 1, so at a zoom of k it draws k times too small and covers
+only the middle of the screen - the dark rectangle that stops short of the edges. Measured at
+k = 0.5, a 512x297 overlay covering the whole 480x265 screen shrank to 256x148.5 dead centre,
+which is the old viewport exactly. So the zoom counter-scales every screen-locked layer by 1/k,
+and because their content is not centred on their own anchor (this one's image sits 480 units to
+the right of it) it measures the shift that scaling introduces and puts it back, rather than
+assuming the offcentre. They cover the screen at every stop and land back on their exact original
+layout at k = 1. `--status` lists them.
+
 Because the engine's value is carried through rather than replaced, its edge clamp keeps
 working: near a map border the player sits off-centre as usual, and zooming scales that
 around the player rather than fighting it.
@@ -145,6 +160,94 @@ local function stepScale(k, dir)
   if i > s then i = s end
   return i / s
 end
+
+-- Coromon marks whole Tiled layers `stickToScreen` (in the maps checked there is exactly one,
+-- `worldRainOverlay`). The builder collects them and, every time the camera moves, translates
+-- each one by the exact opposite of the world's translation - `tiledWorldBuilder.moveCamera`,
+-- lines 363-365: the world goes one way and the layer the other, so the layer stands still on
+-- screen while the map slides underneath it.
+--
+-- Zooming does not break that pinning. The zoom only ever reads the engine's own value, so the
+-- world + layer sum the pinning depends on survives untouched, and the layer stays put. What
+-- it does break is the layer's SIZE: it is laid out to fill the viewport at scale 1, so under a
+-- zoom of k it draws k times too small and covers only the middle of the screen - that is the
+-- dark rectangle that stops short of the edges once you zoom out. Measured at k = 0.5: a
+-- 512x297 overlay that covers the whole 480x265 screen shrank to 256x148.5 dead centre, which
+-- is the old viewport exactly.
+--
+-- So give it its size back: scale it by 1/k. That fixes the size but not the position - the
+-- content is not centred on the layer's own anchor (this overlay's image sits 480 units to the
+-- right of it), so scaling slides it sideways. Measured: the centre jumps 240 -> 480. Rather
+-- than hard-code the offcentre, measure it: scale, see how far the content's centre moved, and
+-- put it back. The correction is a plain offset, so the previous one is undone before the next
+-- is derived - nothing is ever computed from a position we wrote ourselves, and at k = 1 the
+-- layer lands back exactly where it started.
+local function stickyLayerNodes(w)
+  local out = {}
+  local m = package.loaded['classes.modules.mte.mte']
+  if type(m) ~= 'table' or type(m.getLayers) ~= 'function' then return out end
+  local ok, layers = pcall(function() return m:getLayers() end)
+  if not ok or type(layers) ~= 'table' then return out end
+  -- The builder adds one group per layer, in order, so layer n is child n. Disabled layers
+  -- still get their (empty) group, which is why the mapping stays one-to-one.
+  if (w.numChildren or 0) < #layers then return out end
+  for i = 1, #layers do
+    local props = layers[i] and layers[i].properties
+    if type(props) == 'table' and props.stickToScreen then
+      local node = w[i]
+      if type(node) == 'table' and type(node.x) == 'number' then out[#out + 1] = node end
+    end
+  end
+  return out
+end
+
+-- Centre of everything the node actually draws, in content coordinates. Going through the
+-- leaves means it does not matter where the node's anchor sits or how it is built inside.
+local function contentCentre(node)
+  local x1, y1, x2, y2 = math.huge, math.huge, -math.huge, -math.huge
+  local function walk(n, depth)
+    if depth > 4 or type(n) ~= 'table' then return end
+    if n.path ~= nil and type(n.width) == 'number' and type(n.height) == 'number' then
+      local ok1, ax, ay = pcall(function() return n:localToContent(-n.width / 2, -n.height / 2) end)
+      local ok2, bx, by = pcall(function() return n:localToContent(n.width / 2, n.height / 2) end)
+      if ok1 and ok2 then
+        x1, y1 = math.min(x1, ax, bx), math.min(y1, ay, by)
+        x2, y2 = math.max(x2, ax, bx), math.max(y2, ay, by)
+      end
+    end
+    for i = 1, (n.numChildren or 0) do walk(n[i], depth + 1) end
+  end
+  walk(node, 0)
+  if x1 == math.huge then return nil end
+  return (x1 + x2) / 2, (y1 + y2) / 2
+end
+
+local function fixStickyLayers(w, k, store)
+  local nodes = stickyLayerNodes(w)
+  for i = 1, #nodes do
+    local node = nodes[i]
+    local rec = store[node]
+    if not rec then rec = {corrx = 0, corry = 0}; store[node] = rec end
+    -- Undo the last correction before looking at anything, so both measurements below are of
+    -- the layer's own layout and never of a position we wrote.
+    node.x, node.y = node.x - rec.corrx, node.y - rec.corry
+    node.xScale, node.yScale = 1, 1
+    rec.corrx, rec.corry = 0, 0
+    if k ~= 1 then
+      local bx, by = contentCentre(node)
+      if bx then
+        node.xScale, node.yScale = 1 / k, 1 / k
+        local ax, ay = contentCentre(node)
+        if ax then
+          -- Moving the node by d moves its content by k * d, so divide the error by k.
+          rec.corrx, rec.corry = (bx - ax) / k, (by - ay) / k
+          node.x, node.y = node.x + rec.corrx, node.y + rec.corry
+        end
+      end
+    end
+  end
+  return #nodes
+end
 """
 
 
@@ -157,6 +260,25 @@ _G.__mapzoom = st
 st.on = true
 st.kout, st.kin, st.kreset = __KOUT__, __KIN__, __KRESET__
 st.seen = st.seen or {}
+-- Weak-keyed: a location change builds new layer groups, and the old ones are then free to go.
+st.sticky = st.sticky or setmetatable({}, {__mode = 'k'})
+
+-- Re-fit the screen-locked layers, but only when something they depend on has changed - the
+-- zoom, the world node (a location change swaps it) or the viewport size. Doing it every
+-- frame would be wasted work; not doing it at all would let the game re-lay the layers out
+-- from under us.
+local function syncSticky(w, k)
+  local z = _G.__mapzoom
+  local store = z.sticky
+  if not store then
+    store = setmetatable({}, {__mode = 'k'})
+    z.sticky = store
+  end
+  local cw, ch = display.contentWidth, display.contentHeight
+  if z.fixNode == w and z.fixK == k and z.fixW == cw and z.fixH == ch then return end
+  z.fixNode, z.fixK, z.fixW, z.fixH = w, k, cw, ch
+  fixStickyLayers(w, k, store)
+end
 
 -- How long to leave a newly built world alone after a location change. The new map is not
 -- positioned in a single frame, and the game's own writes while doing it are absolute values
@@ -207,6 +329,7 @@ local function apply()
     z.wx, z.wy = w.x, w.y
     if (z.stable or 0) < SETTLE_STABLE_FRAMES then
       w.xScale, w.yScale = 1, 1
+      syncSticky(w, 1)
       return
     end
     -- Settled - fall through and put the zoom back on this very frame.
@@ -227,6 +350,7 @@ local function apply()
     w.xScale, w.yScale = 1, 1
     w.x, w.y = z.w0x, z.w0y
     z.wx, z.wy = w.x, w.y
+    syncSticky(w, 1)
     return
   end
 
@@ -248,6 +372,9 @@ local function apply()
   w.x = k * z.w0x + (1 - k) * cx
   w.y = k * z.w0y + (1 - k) * cy
   z.wx, z.wy = w.x, w.y
+
+  -- After the world scale, not before: the fit is measured through it.
+  syncSticky(w, k)
 end
 
 local function setScale(k)
@@ -315,6 +442,15 @@ if w then
   out[#out + 1] = string.format(
     'worldScale=%.4f  =  %.2f screen px per texel (game scale %s)  engineBase=(%.2f, %.2f)',
     w.xScale or 1, (z.scale or 1) * s, tostring(s), z.w0x or 0, z.w0y or 0)
+  local sticky = stickyLayerNodes(w)
+  if #sticky > 0 then
+    local parts = {}
+    for i = 1, #sticky do
+      parts[#parts + 1] = string.format('%dx%d at scale %.3f',
+        sticky[i].width or 0, sticky[i].height or 0, sticky[i].xScale or 1)
+    end
+    out[#out + 1] = 'screen-locked layers (fit by the zoom): ' .. table.concat(parts, ', ')
+  end
   local p = playerSprite()
   if p then
     local ok, lx, ly = pcall(function() return p:localToContent(0, 0) end)
@@ -381,6 +517,17 @@ if type(m) == 'table' then
       v.xScale, v.yScale = 1, 1
     end
   end
+end
+-- Hand the screen-locked layers their size and position back, or they stay scaled up by the
+-- last zoom we applied.
+if z.sticky then
+  for node, rec in pairs(z.sticky) do
+    if type(node) == 'table' then
+      node.x, node.y = node.x - (rec.corrx or 0), node.y - (rec.corry or 0)
+      node.xScale, node.yScale = 1, 1
+    end
+  end
+  z.sticky = nil
 end
 _G.__mapzoom = nil
 return 'map zoom removed, world scale restored to 1.0'

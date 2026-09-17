@@ -145,8 +145,10 @@ drawn *after* everything else (world, dialogs), so they end up on top. Two gotch
   game appends its own groups to the stage when it changes scene, which would
   otherwise cover the overlay.
 
-Content resolution is 485×283 and the window is scaled up from there, so overlay
-coordinates are in that space (not pixels).
+Content resolution: overlay coordinates are in content space, not pixels. The content size
+tracks the window rather than being fixed — measured, `display.contentWidth/Height` was
+480×265 at a 1920-wide window, where `display.contentToScreenScale` reads exactly 4. That
+scale is a live number (`0.25` the other way round), not a fixed integer factor.
 
 ## Other tools
 
@@ -155,11 +157,61 @@ coordinates are in that space (not pixels).
 | `coromon_starter.py` | the useful one — read the 3 starter potentials and draw them on screen |
 | `hidden_items.py` | find and highlight the hidden overworld items (`--list`, `--off`) |
 | `battle_potential.py` | show every opponent's Potential during battle (`--once`, `--off`) |
+| `map_zoom.py` | zoom the overworld in and out with in-game keys |
 | `scroll_fix.py` | make the overworld scroll a constant number of pixels per frame |
 | `pad_drive.py` | hold a direction in the game window from outside (test instrument) |
 | `coromon_lua.py` | generic Lua injection bridge (`--eval`, `--file`, or REPL) |
 | `car_extract.py` | Solar2D `resource.car` reader/extractor (`--list`, `--extract`) |
 | `luadis.py` | Lua 5.1 bytecode reader/disassembler/string dumper for `.lu` chunks |
+
+### Overworld zoom
+
+Coromon has no zoom. `debugSettings` has no scale key, the camera
+(`classes.modules.interface.scrollViewBuilder`) takes no scale parameter, and the only zoom
+knob anywhere is `debugHexagonWorldScaleMultiplier` — debug tooling for the Rogue Planet map
+generator, not reachable in a normal save. So `map_zoom.py` scales the overworld node
+(`tiledWorld`) itself, with the player inside it, about the middle of the viewport.
+
+| key | action |
+| --- | --- |
+| `-` | zoom out one stop |
+| `+` | zoom in one stop |
+| `0` | back to the game's own scale |
+
+The stops are whole screen pixels per texture pixel: **4 → 3 → 2 → 1** at a 4× window, i.e.
+k = 1, 0.75, 0.5, 0.25. Nothing in between, and nothing above 1, deliberately — the game draws
+with nearest-neighbour filtering, so a fractional scale gives some texels 3 screen pixels and
+others 2, which shows up as uneven pixel sizes and a faint shimmer while the map scrolls. The
+stops are read from the game's own `display.contentToScreenScale`, so they stay honest if the
+window size changes. `--pixels 2` installs already zoomed out, `--status` prints the scale,
+the px-per-texel and every key the game has seen, and `--off` removes it.
+
+Two things to know before touching it:
+
+* **The camera is incremental.** Measured live, `tiledWorld.x + sprite.x` stays pinned at a
+  constant while walking, so the engine carries its own camera value and adds the sprite's
+  movement each frame. The zoom therefore *tracks* that value — it only ever reads the node,
+  never writes it — and re-seeds whenever a location change swaps the node, holding at scale 1
+  until the new node stops being positioned (measured: the position standing still for four
+  frames, about 80 ms). Writing the node outright destroys the engine's base permanently: the
+  first version left the world 446 px out, and the offset survived walking, map changes and a
+  reset. `--recenter` is the escape hatch for a world an older build displaced that way.
+
+  Deriving the offset from where the player is looks like it should work and does not. It pins
+  them to one spot: fine on a large map, where the engine parks them at the centre, but wrong
+  in a small area, where the engine leaves the camera alone and walks the player across the
+  screen — there it dragged the world along with them at (1 − k) per pixel of movement.
+
+* **Screen-locked layers need their size back.** Maps mark a whole Tiled layer
+  `stickToScreen` (`worldRainOverlay` — the full-screen sheet drawn over the map), and the
+  builder pins such a layer to the screen by translating it by the exact opposite of the
+  world's translation on every camera move (`tiledWorldBuilder.moveCamera`, lines 363-365). The
+  pinning survives the zoom untouched, but the layer is laid out to fill the viewport at scale
+  1, so at a zoom of k it draws k times too small and covers only the middle of the screen. The
+  zoom counter-scales it by 1/k, and because its content is not centred on its own anchor it
+  measures the shift that introduces rather than assuming it. The cost is that at 1 px per texel
+  the overlay texture is magnified 4×, so its detail is chunky.
+
 
 ### Battle Potential overlay
 
