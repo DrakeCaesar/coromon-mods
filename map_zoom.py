@@ -50,12 +50,13 @@ Three things this gets right that the earlier attempts did not:
     additionally off by (1 - k) * anchorOffset, a small diagonal shift that reversed with
     the zoom direction and vanished at k = 1.)
   * the tracking is RE-SEEDED whenever the world node is swapped - which is what a location
-    change does - and the new world is then left alone for 45 frames. Reconstructing the
-    engine's value from deltas only means anything while the node is the same object, and a
-    new map is not positioned in a single frame either; both of those broke the camera on
-    location transitions while zoomed, in a way only resetting the zoom and transitioning
-    again could clear. During the settle window the view shows at scale 1, then the zoom
-    re-applies itself.
+    change does - and the zoom is held off only until the game has finished writing the new
+    node's position. Reconstructing the engine's value from deltas only means anything while
+    the node is the same object, and a new map is not positioned in a single frame either;
+    both of those broke the camera on location transitions while zoomed, in a way only
+    resetting the zoom and transitioning again could clear. The hold-off is measured, not
+    timed: once the node's position has stood still for four frames the zoom goes straight
+    back on, so a normal transition costs about 80ms of scale 1 rather than a fixed 750ms.
 
 Because the engine's value is carried through rather than replaced, its edge clamp keeps
 working: near a map border the player sits off-centre as usual, and zooming scales that
@@ -158,9 +159,16 @@ st.kout, st.kin, st.kreset = __KOUT__, __KIN__, __KRESET__
 st.seen = st.seen or {}
 
 -- How long to leave a newly built world alone after a location change. The new map is not
--- positioned in a single frame, and the game's own writes while doing it are absolute
--- values rather than movements.
-local SETTLE_FRAMES = 45
+-- positioned in a single frame, and the game's own writes while doing it are absolute values
+-- rather than movements, so they cannot be folded into the delta total below.
+--
+-- Rather than waiting a fixed number of frames, wait for the writes to actually stop: the
+-- node's position standing still for a few frames means the map has finished being placed.
+-- The old fixed 45-frame window (three quarters of a second at 60fps) left the map on screen
+-- at scale 1 for that whole time, which is very visible when you are playing zoomed out.
+-- The maximum is only a safety net for a map that somehow keeps moving.
+local SETTLE_STABLE_FRAMES = 4
+local SETTLE_MAX_FRAMES = 90
 
 local function apply()
   local z = _G.__mapzoom
@@ -183,16 +191,26 @@ local function apply()
   -- absorbing them into the delta total below would leave it wrong by exactly our own last
   -- correction. So hold off - leave the node at scale 1 and just watch until it settles.
   if w ~= z.node or z.wx == nil then
-    z.settle = SETTLE_FRAMES
+    z.settle, z.stable = SETTLE_MAX_FRAMES, 0
   end
   z.node = w
 
   if z.settle and z.settle > 0 then
     z.settle = z.settle - 1
-    w.xScale, w.yScale = 1, 1
+    -- We are not writing the node while settling, so any change in it is the game's own.
+    if w.x == z.wx and w.y == z.wy then
+      z.stable = (z.stable or 0) + 1
+    else
+      z.stable = 0
+    end
     z.w0x, z.w0y = w.x, w.y
     z.wx, z.wy = w.x, w.y
-    return
+    if (z.stable or 0) < SETTLE_STABLE_FRAMES then
+      w.xScale, w.yScale = 1, 1
+      return
+    end
+    -- Settled - fall through and put the zoom back on this very frame.
+    z.settle = 0
   end
 
   -- The engine's camera is incremental: measured live, `tiledWorld.x + sprite.x` stays
