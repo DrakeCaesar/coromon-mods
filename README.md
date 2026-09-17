@@ -49,8 +49,11 @@ game's UI). The overlay stays on screen after the tool exits, so use
 `--clear-overlay` when you are done; while the tool runs it stays in sync with
 every reload.
 
-In Coromon **Potential** goes 0–21: **20 = "potent"** (aura/shiny-style sprite),
-**21 = "perfect"**. Those lines are highlighted in green/gold on the overlay.
+In Coromon **Potential** goes 1–21 and the game sorts it into three categories:
+**1–16 = Standard**, **17–20 = Potent** (aura/shiny-style sprite), **21 = Perfect**.
+Those are the game's *internal* tier names `A`/`B`/`C` — see
+[Battle Potential overlay](#battle-potential-overlay) for how they are labelled.
+Potent and Perfect lines are highlighted in green/gold on the overlay.
 
 ### Forcing the roll (`--perfect`)
 
@@ -97,7 +100,10 @@ with the forced value rather than corrected afterwards. If you start the tool wh
 already standing at the reveal, the existing objects get edited in place instead — the
 end state is the same either way.
 
-Category tiers: potential 1–16 = A, 17–20 = B, **21 = C** (the only value in the top tier).
+Category tiers, straight from `monsterPotentialUtility:getCategories()`:
+potential 1–16 = A, 17–20 = B, **21 = C** (the only value in the top tier). The game
+localises those letters through `global.monsterPotentialCategory.<cat>` as
+**Standard / Potent / Perfect**.
 
 Requires `frida` (`pip install frida`) and the game running. It attaches read-only:
 no memory is patched, nothing is written to the save.
@@ -148,11 +154,70 @@ coordinates are in that space (not pixels).
 |---|---|
 | `coromon_starter.py` | the useful one — read the 3 starter potentials and draw them on screen |
 | `hidden_items.py` | find and highlight the hidden overworld items (`--list`, `--off`) |
+| `battle_potential.py` | show every opponent's Potential during battle (`--once`, `--off`) |
 | `scroll_fix.py` | make the overworld scroll a constant number of pixels per frame |
 | `pad_drive.py` | hold a direction in the game window from outside (test instrument) |
 | `coromon_lua.py` | generic Lua injection bridge (`--eval`, `--file`, or REPL) |
 | `car_extract.py` | Solar2D `resource.car` reader/extractor (`--list`, `--extract`) |
 | `luadis.py` | Lua 5.1 bytecode reader/disassembler/string dumper for `.lu` chunks |
+
+### Battle Potential overlay
+
+Coromon hides a monster's Potential until you catch it, and the two high tiers are what
+make a catch worth keeping. This draws it over the battle so you can decide before
+spending a spinner:
+
+| `potential` | Tier | Wild odds | Overlay colour |
+| --- | --- | --- | --- |
+| 1–16 | Standard | ~97.1% | white |
+| 17–20 | Potent | ~2.9% | green |
+| 21 | Perfect | ~0.03% | gold |
+
+There is no separate "potency" field anywhere on the Monster object — it is always
+`potential`. The tier is not hardcoded either; it comes from the game's own
+`monsterUtility:getPotentialCategoryForPotential()`.
+
+```bash
+python tools/battle_potential.py          # draw it during battle
+python tools/battle_potential.py --once   # print the current opponent and exit
+python tools/battle_potential.py --off    # remove the overlay
+```
+
+The opponent is found through the live battle instance:
+
+```
+Battle:get()                        -- the live battle instance
+  :getMonsterSpritesInBattle()      -- the on-field sprites
+    [i].side == 'front'             -- 'front' is the opponent, 'back' is yours
+    [i].monster                     -- the Monster object; .potential is the number
+```
+
+`side` is the reliable discriminator. "The monster with no `catchDate`" also works for a
+wild encounter, but it matches every opposing monster in a trainer battle, where no
+monster has been caught.
+
+**Double battles.** More than one `front` sprite can be on the field at once, so the tool
+does not stop at the first match — it collects every opponent and draws a separate
+name/level + potential block per opponent, ordered left-to-right by the sprite's `x` so
+the blocks line up with what is on screen. Verified against a 1v2: two `SAND_MOLE_1` at
+Lv7 / potential 7 and Lv9 / potential 10 both show, where the earlier first-match
+version silently reduced that to one arbitrary opponent.
+
+Nothing is hardcoded, including the tier label. The name comes from the game's own
+localisation (`localise('monsters.<UID>.name')` → "Buzzlet", the same pattern as
+`items.<UID>.name`) and the tier from `monsterUtility:getPotentialCategoryForPotential()`,
+which returns the game's internal letter — `A`/`B`/`C`, the same letters the game's own
+potential handbook popup uses before substituting them. Running that letter back through
+`localise('global.monsterPotentialCategory.<cat>')` turns it into the word the game shows
+the player, so the overlay reads `Potential 11  (Standard)` rather than `(A)`.
+
+The ranges are confirmed by `monsterPotentialUtility:getCategories()` and match the wiki:
+`A` = 1–16, `B` = 17–20, `C` = 21.
+
+The overlay carries its own 250 ms Lua timer, so the Python process exits immediately
+and it keeps working for every later encounter. Each tick it is re-inserted at the end
+of the stage so the battle cannot draw over it, and it removes itself when no opponent
+is on the field rather than leaving a stale readout.
 
 ### Hidden items
 
