@@ -17,10 +17,12 @@ Usage
 
 `Bridge` here still wants the game already running. A caller that has to cope with the game
 not being up yet, or being closed and started again, uses `Bridge.try_attach()` (None when
-the process is not there), watches `Bridge.gone` / `Bridge.wait()`, and treats a `GameGone`
+the process cannot be attached to *yet* - either it is not there, or it is still starting up
+or shutting down), watches `Bridge.gone` / `Bridge.wait()`, and treats a `GameGone`
 raised out of `core.eval_` as "start over" rather than as an error to report. `lua.dll` is
 resolved on a timer inside the script, so attaching during the game's own start-up works.
 """
+
 import argparse
 import sys
 import threading
@@ -182,14 +184,40 @@ rpc.exports = {
 """
 
 
-DEFAULT_HOOKS = ["lua_gettop", "lua_pushnumber", "lua_pushstring", "lua_pushvalue",
-                 "lua_getfield", "lua_settop", "lua_type", "lua_pcall"]
+DEFAULT_HOOKS = [
+    "lua_gettop",
+    "lua_pushnumber",
+    "lua_pushstring",
+    "lua_pushvalue",
+    "lua_getfield",
+    "lua_settop",
+    "lua_type",
+    "lua_pcall",
+]
 MINIMAL_HOOKS = ["lua_gettop"]
+
+# Attach failures that mean "not yet" rather than "never". A game that comes and goes gets
+# attached to over and over, and a process that is only just starting up - or already on its
+# way out - is the normal case, not an error. Measured on this game: re-attaching right after
+# it closed raises
+#     frida.TransportError: unexpected error allocating memory in target process
+#                           (VirtualAllocEx returned 0x00000005)
+# 0x5 is ACCESS_DENIED - the dying process is still listed, so the name lookup finds it, but
+# it will not let the injector allocate inside it any more. Retrying a moment later picks up
+# the process that replaced it. Frida 17 raises all of these straight off Exception with no
+# common Frida base class, so they have to be named.
+RETRYABLE_ATTACH_ERRORS = (
+    frida.ProcessNotFoundError,
+    frida.TransportError,
+    frida.PermissionDeniedError,
+    frida.ProcessNotRespondingError,
+)
 
 
 def build_js(hooks=None):
     """BRIDGE JS with the hook list substituted in."""
     import json as _json
+
     return JS.replace("__HOOK_TARGETS__", _json.dumps(list(hooks or DEFAULT_HOOKS)))
 
 
@@ -209,21 +237,38 @@ class Bridge:
         self._ready = None
         self._ev = threading.Event()
         self._gone = threading.Event()
-        self.session = frida.attach(target)
-        # The session outlives the script, and it is what tells us the game went away -
-        # which matters as much as the Lua answers do, because the game gets closed and
-        # started again and the caller has to notice.
-        self.session.on("detached", self._on_detached)
-        self.script = self.session.create_script(build_js(hooks))
-        self.script.on("message", self._on_message)
-        self.script.load()
+        self.session = None
+        self.script = None
+        try:
+            self.session = frida.attach(target)
+            # The session outlives the script, and it is what tells us the game went away -
+            # which matters as much as the Lua answers do, because the game gets closed and
+            # started again and the caller has to notice.
+            self.session.on("detached", self._on_detached)
+            self.script = self.session.create_script(build_js(hooks))
+            self.script.on("message", self._on_message)
+            self.script.load()
+        except Exception:
+            # Half-built. Let go of the session before letting the error out, so a caller
+            # that retries in a loop (see try_attach) cannot pile up stale attachments - the
+            # process is on its way out and the next attempt needs it to be gone.
+            self.detach()
+            raise
 
     @classmethod
-    def try_attach(cls, target="coromon.exe", hooks=None):
-        """Attach, or None if the process is not running (yet)."""
+    def try_attach(cls, target="coromon.exe", hooks=None, on_retry=None):
+        """Attach, or None if the game cannot be attached to yet.
+
+        None covers both "not running" and "there, but not ready" - a game that has only
+        just been launched refuses the injector while it starts, and one that is closing
+        refuses it too. `on_retry` is handed the underlying exception so the caller can say
+        why it is waiting, without having to know which Frida errors are worth waiting for.
+        """
         try:
             return cls(target, hooks=hooks)
-        except frida.ProcessNotFoundError:
+        except RETRYABLE_ATTACH_ERRORS as exc:
+            if on_retry is not None:
+                on_retry(exc)
             return None
 
     def _on_detached(self, *args):
@@ -256,6 +301,26 @@ class Bridge:
         after the attach, because the game may still be starting up when we get there."""
         return bool(self._ready)
 
+    @property
+    def _session_detached(self):
+        """Whether Frida itself considers the session dead.
+
+        frida exposes `is_detached` as a plain attribute in 17.x and as a method in older
+        versions, and a wrong guess here is not harmless: calling a bool raises TypeError,
+        and if that lands in a bare except the check silently never fires - which is a
+        watcher that sits there forever instead of noticing the game closed. So accept both.
+        """
+        session = self.session
+        if session is None:
+            return True
+        flag = getattr(session, "is_detached", None)
+        if flag is None:
+            return False
+        try:
+            return bool(flag() if callable(flag) else flag)
+        except Exception:
+            return False
+
     def wait(self, timeout=None):
         """Block until the game goes away. True if it did, False if it is still there.
 
@@ -263,6 +328,8 @@ class Bridge:
         as well: a watcher sitting here forever because one notification went missing is the
         one failure this cannot afford.
         """
+        if self.session is None:
+            return True  # never attached properly - nothing to wait for
         deadline = None if timeout is None else time.time() + timeout
         while True:
             if self._gone.is_set():
@@ -270,12 +337,9 @@ class Bridge:
             if deadline is not None and time.time() >= deadline:
                 return False
             self._gone.wait(0.5)
-            try:
-                if self.session.is_detached():
-                    self._on_detached()
-                    return True
-            except Exception:
-                pass
+            if self._session_detached:
+                self._on_detached()
+                return True
 
     def _closed(self):
         return {"out": None, "err": "the game closed", "state": None, "closed": True}
@@ -301,8 +365,11 @@ class Bridge:
             if self.gone:
                 self._results.pop(rid, None)
                 return self._closed()
-        return {"out": None, "err": "timeout waiting for Lua execution (is the game idle / paused?)",
-                "state": None}
+        return {
+            "out": None,
+            "err": "timeout waiting for Lua execution (is the game idle / paused?)",
+            "state": None,
+        }
 
     def status(self):
         """The script's own state, or None once the game has gone (or the script is dead)."""
@@ -314,10 +381,18 @@ class Bridge:
             return None
 
     def detach(self):
-        try:
-            self.session.detach()
-        except Exception:
-            pass
+        """Let go of the session, whatever state it is in. Safe to call twice, and safe on a
+        bridge that never finished attaching - `_gone` is set defensively because a detach can
+        be reached from the failure path inside __init__, where nothing can be assumed."""
+        session, self.session, self.script = self.session, None, None
+        gone = getattr(self, "_gone", None)  # an eval after this is "the game is gone"
+        if gone is not None:
+            gone.set()
+        if session is not None:
+            try:
+                session.detach()
+            except Exception:
+                pass
 
 
 def main():
@@ -330,7 +405,9 @@ def main():
     b = Bridge(args.process)
     time.sleep(0.2)
     st = b.status() or {}
-    print(f"[bridge] state={st.get('state')} hook_hits={st.get('hooks')}", file=sys.stderr)
+    print(
+        f"[bridge] state={st.get('state')} hook_hits={st.get('hooks')}", file=sys.stderr
+    )
     if st.get("state") is None:
         print("[bridge] no lua_State captured yet - waiting...", file=sys.stderr)
 

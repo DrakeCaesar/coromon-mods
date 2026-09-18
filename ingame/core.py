@@ -290,7 +290,11 @@ def compose(parts):
 
 # Settings for the top level of overlays.toml. Each feature declares its own section.
 CORE_SETTINGS = [
-    ("process", "coromon.exe", "the process to attach to - it is waited for, so it need not be running"),
+    (
+        "process",
+        "coromon.exe",
+        "the process to attach to - it is waited for, so it need not be running",
+    ),
 ]
 
 CONFIG_PATH = os.path.join(_TOOLS, config.FILENAME)
@@ -375,17 +379,42 @@ def wait_for_state(b, log, every=5.0):
 def wait_for_game(process, log=print):
     """Block until the game is running and its Lua state is reachable, then hand back the
     bridge. Started before the game, this waits for it; started while it runs, it attaches
-    straight away."""
+    straight away.
+
+    Neither "not there yet" nor "there but not attachable yet" is fatal. The second one is
+    what a restart looks like from here: the closed process is still listed for a moment, and
+    while it is on its way out it refuses the injector outright - measured, that is a
+    frida.TransportError (VirtualAllocEx -> ACCESS_DENIED). Retrying picks up whatever
+    replaced it, so the loop just keeps going and says why it is waiting, once.
+    """
     waiting = False
+    said = None
+    reason = None
+
+    def note(exc):
+        nonlocal reason
+        reason = str(exc)
+
     while True:
-        b = Bridge.try_attach(process, hooks=MINIMAL_HOOKS)
+        reason = None
+        b = Bridge.try_attach(process, hooks=MINIMAL_HOOKS, on_retry=note)
         if b is None:
             if not waiting:
                 waiting = True
-                log("waiting for %s ...  (start the game whenever; Ctrl+C to stop)" % process)
+                log(
+                    "waiting for %s ...  (start the game whenever; Ctrl+C to stop)"
+                    % process
+                )
+            if reason and reason != said:
+                log("  %s is not attachable yet:" % process)
+                log("    %s" % reason)
+                log(
+                    "    retrying - normal while the game is still starting, or still closing"
+                )
+            said = reason
             time.sleep(POLL)
             continue
-        waiting = False
+        waiting, said = False, None
         log("attached to %s" % process)
         if wait_for_state(b, log):
             return b

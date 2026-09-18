@@ -200,6 +200,14 @@ process, the loop notices, waits for the new one, re-reads `overlays.toml` and p
 feature back. So the settings can be edited while the game is down and the next launch picks
 them up. Ctrl+C stops it; whatever is on screen stays until the game is closed.
 
+Waiting covers a game that is there but not ready, which is the normal case right after a
+restart: a closed process stays listed for a moment, and while it is on its way out it
+refuses the injector outright — measured, `frida.TransportError` with
+`VirtualAllocEx returned 0x00000005` (ACCESS_DENIED). That, a missing process, and the
+other transient Frida failures are all in `RETRYABLE_ATTACH_ERRORS` in `coromon_lua.py`;
+`try_attach()` returns `None` for them and the loop retries once a second, saying why it is
+waiting, once, rather than dying on a traceback.
+
 The file documents itself, because it is *generated*: each module declares its settings as
 `(key, default, comment)` in `SETTINGS`, `ingame/config.py` renders `overlays.toml` from
 those, and a value that does not match its default's type — or the values a setting allows —
