@@ -8,6 +8,12 @@ Nothing here knows what the features are. Each feature module exposes the same s
 surface (documented in `ingame/__init__.py`) and this module asks for it, which is what
 lets any subset be installed, removed and reported on without the others knowing they
 exist.
+
+It also owns the process lifecycle, and that is a loop rather than an attach: started
+before the game is up it waits for it, and when the game is closed and started again it
+re-attaches and puts every feature back on its own. The game is the thing that comes and
+goes; the settings file is read once per session there too, so an edit made while the game
+is down is picked up by the next launch.
 """
 
 import os
@@ -18,7 +24,7 @@ import time
 _TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _TOOLS not in sys.path:
     sys.path.insert(0, _TOOLS)
-from coromon_lua import MINIMAL_HOOKS, Bridge  # noqa: E402
+from coromon_lua import MINIMAL_HOOKS, Bridge, GameGone  # noqa: E402
 
 from . import config  # noqa: E402
 
@@ -284,7 +290,7 @@ def compose(parts):
 
 # Settings for the top level of overlays.toml. Each feature declares its own section.
 CORE_SETTINGS = [
-    ("process", "coromon.exe", "the process to attach to"),
+    ("process", "coromon.exe", "the process to attach to - it is waited for, so it need not be running"),
 ]
 
 CONFIG_PATH = os.path.join(_TOOLS, config.FILENAME)
@@ -330,53 +336,130 @@ def action_code(feature, lua, cfg):
     return compose([LUA, feature.lua(cfg), lua])
 
 
-def connect(process):
-    b = Bridge(process, hooks=MINIMAL_HOOKS)
-    for _ in range(150):
-        if b.status().get("state"):
-            break
-        time.sleep(0.2)
-    return b
+# How often to look for the game while it is not running, and how often to look for its
+# Lua state once we are attached to it.
+POLL = 1.0
+STATE_POLL = 0.2
 
 
 def eval_(b, code, timeout=30.0):
+    """Run one chunk. Raises GameGone if the game closed while it was being run, so a
+    restart never gets mistaken for a feature that failed."""
     r = b.eval(code, timeout=timeout)
+    if r.get("closed"):
+        raise GameGone()
     return r.get("out") or r.get("err")
 
 
-def main(features):
-    """Read overlays.toml and make the game match it. No arguments, by design: the file is
-    the only place settings live."""
+def wait_for_state(b, log, every=5.0):
+    """Wait until the bridge has captured the game's lua_State. False if the game went
+    away first, which is not an error - it just means wait for the next one."""
+    last = time.time()
+    while True:
+        st = b.status()
+        if st is None:
+            return False
+        if st.get("state"):
+            return st
+        now = time.time()
+        if now - last >= every:
+            last = now
+            log(
+                "  hooked lua.dll, waiting for the game to run some Lua"
+                if st.get("ready")
+                else "  waiting for the game to load lua.dll"
+            )
+        time.sleep(STATE_POLL)
+
+
+def wait_for_game(process, log=print):
+    """Block until the game is running and its Lua state is reachable, then hand back the
+    bridge. Started before the game, this waits for it; started while it runs, it attaches
+    straight away."""
+    waiting = False
+    while True:
+        b = Bridge.try_attach(process, hooks=MINIMAL_HOOKS)
+        if b is None:
+            if not waiting:
+                waiting = True
+                log("waiting for %s ...  (start the game whenever; Ctrl+C to stop)" % process)
+            time.sleep(POLL)
+            continue
+        waiting = False
+        log("attached to %s" % process)
+        if wait_for_state(b, log):
+            return b
+        log("  %s closed before its Lua state could be reached" % process)
+        b.detach()
+
+
+def apply(b, features, cfg):
+    """Make the game match the config: the one-shot repairs first, then the features, then
+    say what was installed and what it looks like from in there."""
+    for f in features:
+        for name, lua in getattr(f, "ACTIONS", {}).items():
+            if cfg[f.NAME].get(name):
+                print(eval_(b, action_code(f, lua, cfg[f.NAME])))
+
+    print("--- applied ---")
+    print(eval_(b, install_code(features, cfg), timeout=60.0))
+    print()
+    print("--- status ---")
+    print(eval_(b, status_code(features, cfg)))
+    print()
+    print("--- report ---")
+    print(eval_(b, report_code(features, cfg)))
+
+
+def read_config(features, warn=None):
+    """Read overlays.toml, writing it from the defaults if it is not there yet. Returns
+    None if it cannot be read at all."""
+    warn = warn or (lambda m: print(m, file=sys.stderr))
     try:
         cfg, warnings, created = config.load(CONFIG_PATH, CORE_SETTINGS, features)
     except config.ConfigError as exc:
-        print("config: %s" % exc, file=sys.stderr)
-        return 2
-
+        warn("config: %s" % exc)
+        return None
     for w in warnings:
-        print("config: %s" % w, file=sys.stderr)
+        warn("config: %s" % w)
     if created:
-        print(
-            "config: wrote a fresh %s from the defaults" % CONFIG_PATH, file=sys.stderr
-        )
+        warn("config: wrote a fresh %s from the defaults" % CONFIG_PATH)
+    return cfg
 
-    b = connect(cfg["core"]["process"])
+
+def main(features):
+    """Watch the game: wait for it, install what overlays.toml asks for, stay out of the
+    way while it runs, and do it all again when it is closed and started again. No
+    arguments, by design: the file is the only place settings live."""
+    cfg = read_config(features)
+    if cfg is None:
+        return 2
+    process = cfg["core"]["process"]
+
     try:
-        # A one-shot repair runs first, then the settings are applied as usual, so a
-        # displaced camera can be fixed and the features put back in the same run.
-        for f in features:
-            for name, lua in getattr(f, "ACTIONS", {}).items():
-                if cfg[f.NAME].get(name):
-                    print(eval_(b, action_code(f, lua, cfg[f.NAME])))
-
-        print("--- applied ---")
-        print(eval_(b, install_code(features, cfg), timeout=60.0))
-        print()
-        print("--- status ---")
-        print(eval_(b, status_code(features, cfg)))
-        print()
-        print("--- report ---")
-        print(eval_(b, report_code(features, cfg)))
-    finally:
-        b.detach()
+        while True:
+            b = wait_for_game(process)
+            try:
+                apply(b, features, cfg)
+                print()
+                print(
+                    "watching %s - this stays attached until the game closes and re-attaches"
+                    % process
+                )
+                print("by itself when it is started again. Ctrl+C to stop.")
+                b.wait()
+            except GameGone:
+                pass
+            finally:
+                b.detach()
+            print()
+            print("--- the game closed - waiting for it to come back ---")
+            # Reload between sessions, so an edit made while the game is down is picked up
+            # by the next launch. A file that will not parse keeps the last good settings.
+            fresh = read_config(features)
+            if fresh is not None:
+                cfg = fresh
+                process = cfg["core"]["process"]
+    except KeyboardInterrupt:
+        print("\nstopped.")
     return 0

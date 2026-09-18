@@ -36,6 +36,10 @@ HEADER = """\
 # There are no command line options; everything comes from here. A run makes the game match
 # this file - it tears down whatever was installed last time and installs what is enabled
 # below - so setting `enabled` to false and running again is how you remove a feature.
+#
+# overlays.py waits for the game if it is not running yet, and re-attaches by itself when
+# the game is closed and started again - it re-reads this file for each new session, so an
+# edit made while the game is down is picked up by the next launch.
 """
 
 

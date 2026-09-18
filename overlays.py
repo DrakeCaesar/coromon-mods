@@ -8,10 +8,16 @@ this file:
 
     python overlays.py
 
-A run makes the game match that file - it tears down whatever was installed last time and
+It makes the game match that file - it tears down whatever was installed last time and
 installs whatever is switched on there - and then prints what it installed, the current
 state of each feature, and what is around you. Turning a feature off is setting its
 `enabled` to false and running again; there is nothing to remember on the command line.
+
+It does not need the game to be up, and it does not stop when the game does. Start it
+first and it waits for the game to appear; leave it running and closing and restarting the
+game costs nothing - it re-attaches and installs everything again by itself, and re-reads
+`overlays.toml` for the new session on the way. Ctrl+C stops it, and the game keeps
+whatever is on screen until it is closed.
 
 The settings file documents itself: it is generated from the settings each module declares,
 and if it goes missing it is written back out from those defaults. So the place to look for
@@ -36,7 +42,9 @@ ended up, folded in and then deleted.
 
 What each feature does, and the notes behind it, is documented at the top of its module.
 
-Requires frida (`pip install frida`), Python 3.11 or newer for tomllib, and the game running.
+Requires frida (`pip install frida`) and Python 3.11 or newer for tomllib. The game can be
+running, or not yet, or closed and started again - the wait and the re-attach are in
+`ingame/core.py`.
 """
 
 import os

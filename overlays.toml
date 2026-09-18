@@ -6,7 +6,7 @@
 # this file - it tears down whatever was installed last time and installs what is enabled
 # below - so setting `enabled` to false and running again is how you remove a feature.
 
-# the process to attach to
+# the process to attach to - it is waited for, so it need not be running
 process = "coromon.exe"
 
 [potential]

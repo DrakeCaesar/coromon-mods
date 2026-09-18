@@ -157,7 +157,7 @@ and the overworld zoom, all driven from one settings file.
 
 | file | purpose |
 |---|---|
-| `overlays.py` | **all three live helpers, one command** — a thin front end over `ingame/` |
+| `overlays.py` | **all three live helpers, one command** — a thin front end over `ingame/`; waits for the game, re-attaches when it restarts |
 | `overlays.toml` | the settings: which features are on, and every option they have |
 | `ingame/config.py` | the settings file — its schema, its defaults, reading it back |
 | `ingame/core.py` | the hook-up to the game, the Lua every feature shares, and the harness |
@@ -191,6 +191,14 @@ classes are marked, the label font — lives in `overlays.toml` beside it, and a
 game match that file: it tears down whatever was installed last time and installs what is
 switched on, then prints what it installed, the current state of each feature, and what is
 around you. Turning something off is setting its `enabled` to `false` and running again.
+
+The game does not have to be up, and closing it does not end the run. Start `overlays.py`
+whenever — before the game, at the title screen, mid-save — and it waits for `coromon.exe`
+to appear, attaches, and installs as soon as the Lua state is reachable. Close the game and
+start it again and the same happens on its own: the old attachment goes away with the
+process, the loop notices, waits for the new one, re-reads `overlays.toml` and puts every
+feature back. So the settings can be edited while the game is down and the next launch picks
+them up. Ctrl+C stops it; whatever is on screen stays until the game is closed.
 
 The file documents itself, because it is *generated*: each module declares its settings as
 `(key, default, comment)` in `SETTINGS`, `ingame/config.py` renders `overlays.toml` from
