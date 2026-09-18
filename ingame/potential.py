@@ -14,20 +14,29 @@ How the monsters are found:
         [i].side == 'front'             -- 'front' is an opponent, 'back' is yours
         [i].monster                     -- the Monster object
           .potential                    -- the number (1-21)
+          .traitUID                     -- its trait, as a string ('DIMENSIONAL_EYE')
           :getLevel()                   -- its level
 
 A double battle fields more than one 'front' sprite at once, so every one of them is
-collected - ordered left-to-right by sprite x - and each gets its own block.
+collected - ordered left-to-right by sprite x - and each gets its own line.
 
 Nothing is hardcoded: the display name comes from the game's own localisation
-(`localise('monsters.<UID>.name')` -> "Buzzlet"), and the tier from
-`monsterUtility:getPotentialCategoryForPotential()` -> 'A'/'B'/'C', which the game then
-localises through `global.monsterPotentialCategory.<cat>`:
+(`localise('monsters.<UID>.name')` -> "Buzzlet") and so does the trait
+(`localise('traits.<UID>.name')` -> "Dimensional Eye"), the same pattern as items. The tier
+comes from `monsterUtility:getPotentialCategoryForPotential()` -> 'A'/'B'/'C', which the
+game then localises through `global.monsterPotentialCategory.<cat>`:
 
     A = Standard (1-16)      B = Potent (17-20)      C = Perfect (21)
 
-The letter is the game's own internal name for the tier; the word is what the game shows
-the player, so that is what gets drawn.
+Each opponent gets ONE line, the way it reads on screen:
+
+    Lunarpup L17 P8 (Dimensional Eye)
+
+Name, level, potential, trait. The trait is shown rather than the tier's word because the
+tier is already carried by the line's colour, and which trait an opponent has matters far
+more at the moment you decide whether to spend a spinner. `m.traitUID` is a plain string on
+the Monster; `m:getTrait()` returns only its behaviour classes, no name, so the UID is what
+has to go through localisation.
 
 The overlay itself is screen-space, on the display stage, so it does not move with the map
 and is unaffected by the overworld zoom.
@@ -76,11 +85,20 @@ local function potentialFactFor(m)
   local cat = 'A'
   local okc, c = pcall(function() return monsterUtility:getPotentialCategoryForPotential(pot) end)
   if okc and type(c) == 'string' then cat = c end
+  -- The trait. A plain string field on the Monster; getTrait() gives only its behaviour
+  -- classes, not a name, so the UID is what goes through localisation. loc() falls back to
+  -- the raw UID rather than '???' when a trait has no localised name.
+  local traitUID = tostring(m.traitUID or '')
+  local traitName = nil
+  if traitUID ~= '' and traitUID ~= 'nil' then
+    traitName = loc('traits.' .. traitUID .. '.name', traitUID)
+  end
   return {
     uid = uid,
     name = loc('monsters.' .. uid .. '.name', uid),
     level = lvl, pot = pot, cat = cat,
     catName = loc('global.monsterPotentialCategory.' .. cat, cat),
+    traitUID = traitUID, traitName = traitName,
   }
 end
 
@@ -93,6 +111,7 @@ local function potentialFacts()
     if f then
       out[#out + 1] = f
       sig[#sig + 1] = f.uid .. '|' .. tostring(f.pot) .. '|' .. tostring(f.level)
+        .. '|' .. tostring(f.traitUID)
     end
   end
   return out, table.concat(sig, ';')
@@ -123,20 +142,16 @@ do
     f.group, f.bg, f.texts, f.key = nil, nil, {}, nil
   end
 
-  -- one block per opponent: a name/level line, then the potential line under it, with a
-  -- small gap before the next opponent so the blocks stay visually separate
+  -- one compact line per opponent - "Lunarpup L17 P8 (Dimensional Eye)". The trait goes
+  -- in the parentheses rather than the tier's word: the tier is already the line's colour,
+  -- and the trait is the thing that changes what you want to do this turn. The block is
+  -- still a LIST of lines so a second line needs no change here.
   local function blockFor(fact)
-    return {
-      {
-        text = string.format('%s%s', fact.name,
-          fact.level and ('   Lv' .. tostring(fact.level)) or ''),
-        col = WHITE,
-      },
-      {
-        text = string.format('Potential %d  (%s)', fact.pot, fact.catName),
-        col = COL[fact.cat] or WHITE,
-      },
-    }
+    local s = fact.name
+    if fact.level then s = s .. ' L' .. tostring(fact.level) end
+    s = s .. ' P' .. tostring(fact.pot)
+    if fact.traitName then s = s .. ' (' .. tostring(fact.traitName) .. ')' end
+    return { { text = s, col = COL[fact.cat] or WHITE } }
   end
 
   local function render(facts, key)
@@ -233,8 +248,9 @@ def report(cfg):
     out[#out + 1] = 'battle - ' .. #facts .. ' opponent(s) on the field:'
     for i = 1, #facts do
       local f = facts[i]
-      out[#out + 1] = string.format('  %s   Lv%s     Potential %d  (%s)',
-        f.name, tostring(f.level), f.pot, f.catName)
+      out[#out + 1] = string.format('  %s   Lv%s     Potential %d  (%s)' .. '%s',
+        f.name, tostring(f.level), f.pot, f.catName,
+        f.traitName and ('     trait: ' .. tostring(f.traitName)) or '')
     end
   else
     out[#out + 1] = 'battle - no opponent on the field'

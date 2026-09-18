@@ -301,6 +301,7 @@ Battle:get()                        -- the live battle instance
   :getMonsterSpritesInBattle()      -- the on-field sprites
     [i].side == 'front'             -- 'front' is the opponent, 'back' is yours
     [i].monster                     -- the Monster object; .potential is the number
+      .traitUID                     -- its trait, a plain string ('DIMENSIONAL_EYE')
 ```
 
 `side` is the reliable discriminator. "The monster with no `catchDate`" also works for a
@@ -309,8 +310,8 @@ monster has been caught.
 
 **Double battles.** More than one `front` sprite can be on the field at once, so the tool
 does not stop at the first match — it collects every opponent and draws a separate
-name/level + potential block per opponent, ordered left-to-right by the sprite's `x` so
-the blocks line up with what is on screen. Verified against a 1v2: two `SAND_MOLE_1` at
+name/level/potential line per opponent, ordered left-to-right by the sprite's `x` so
+the lines line up with what is on screen. Verified against a 1v2: two `SAND_MOLE_1` at
 Lv7 / potential 7 and Lv9 / potential 10 both show, where the earlier first-match
 version silently reduced that to one arbitrary opponent.
 
@@ -320,7 +321,20 @@ localisation (`localise('monsters.<UID>.name')` → "Buzzlet", the same pattern 
 which returns the game's internal letter — `A`/`B`/`C`, the same letters the game's own
 potential handbook popup uses before substituting them. Running that letter back through
 `localise('global.monsterPotentialCategory.<cat>')` turns it into the word the game shows
-the player, so the overlay reads `Potential 11  (Standard)` rather than `(A)`.
+the player.
+
+Each opponent is **one line** — name, level, potential, trait:
+
+```
+Lunarpup L17 P8 (Dimensional Eye)
+```
+
+The trait goes in the parentheses rather than the tier's word, because the tier is already
+carried by the line's colour (green for Potent, gold for Perfect), and which trait an
+opponent has matters more at the moment you decide whether to spend a spinner. `m.traitUID`
+is a plain string on the Monster — `m:getTrait()` returns only the trait's behaviour classes
+and no name — so it is the UID that goes through localisation, as `traits.<UID>.name`. An
+unlocalised trait shows its raw UID rather than `???`, the same fallback the item names use.
 
 The ranges are confirmed by `monsterPotentialUtility:getCategories()` and match the wiki:
 `A` = 1–16, `B` = 17–20, `C` = 21.
