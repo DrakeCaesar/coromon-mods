@@ -14,7 +14,10 @@ resolved through the game's own localisation so they match the selected language
 
 Collected objects drop out of the markers, but the classes do NOT all share one mechanism
 - see stillPresent() below. Only hidden items and chests have been verified for that; the
---show-all-items extras are unverified.
+show_all_items extras are unverified.
+
+Items that share a tile are merged into a single marker with one label line each - see
+mergeByTile() below for why, and for how often it happens.
 
 The markers are children of the game's own `tiledWorld` node, positioned in map pixel
 coordinates, so they scroll with the map for free - and, with the zoom on, scale with it,
@@ -30,10 +33,13 @@ NAME = "items"
 # property instead (itemChestIsOpened). stillPresent() handles both.
 HIDDEN_CLASSES = ["hiddenItem"]
 CHEST_CLASSES = ["itemChest", "pyramidItemChest"]
-# Every other class that carries an item, inventoried across all 194 shipped map files with
-# Tiled templates resolved (most of these objects get their class via a template, not
-# inline): hiddenItem 371, itemChest 310, fruitGrowingPot 41, pyramidItemChest 30,
-# drillShovelItem 11, item 9, treeItem 1.
+# Every other class that carries an item. Counted from the maps the game actually loads -
+# Resources/optimizedMaps, 195 maps, where the class is always written inline so a plain
+# scan is enough: hiddenItem 380, drillShovelItem 370, itemChest 326, fruitGrowingPot 42,
+# pyramidItemChest 30, item 11, treeItem 1. The loose Resources/maps copies are the Tiled
+# source of the same project (192 maps, 1122 carriers) and mostly agree, but their classes
+# live in templates, so they MUST be resolved before counting - read raw, every hiddenItem
+# looks unclassed. See the README for the tile-level differences that remain.
 #
 # fruitGrowingPot is deliberately excluded even from --show-all-items: it is a repeatable
 # harvester (you plant a fruit and take the yield), not a one-time pickup, so "already
@@ -62,8 +68,10 @@ SETTINGS = [
     (
         "show_all_items",
         False,
-        "mark every item-carrying class (hidden items, chests, drill/gem spots, ground "
-        "items, tree items)",
+        (
+            "mark every item-carrying class (hidden items, chests, drill/gem spots, "
+            "ground items, tree items)"
+        ),
     ),
     ("labels", True, "draw the item name above each marker"),
     (
@@ -207,6 +215,53 @@ local function playerTile()
   end)
   return tx, ty
 end
+
+-- One tile can carry more than one collectable: the carriers are separate Tiled objects on
+-- separate layers, so a hidden item and a drill/gem spot can share a square. A marker per
+-- object would stack two identical 16x16 boxes and two labels in the same spot, so items
+-- sharing a tile are merged into one marker and their names become stacked label lines.
+--
+-- Exhaustive scan of the 195 maps the game loads (Resources/optimizedMaps): 1160 item
+-- carriers, and exactly four tiles hold two of them - three of which are mutually exclusive
+-- conditional variants (the same object duplicated on whileX / afterX layers, only one of
+-- which ever loads). The one real case is desertRoute_5 (8,33): GOLD x2000 and Green Gem,
+-- so this matters for a single tile in the game - and only until the gold is picked up.
+local function mergeByTile(items)
+  local by, order = {}, {}
+  for _, it in ipairs(items) do
+    local key = it.tx .. ':' .. it.ty
+    local e = by[key]
+    if not e then
+      e = {
+        tx = it.tx, ty = it.ty, kind = it.kind,
+        lines = {}, uids = {}, collected = it.collected,
+      }
+      by[key] = e
+      order[#order + 1] = e
+    end
+    for i = 1, #it.lines do
+      e.lines[#e.lines + 1] = it.lines[i]
+      e.uids[#e.uids + 1] = it.uids[i]
+    end
+    -- a chest or gem spot outranks a plain hidden item, so the amber marker wins
+    if it.kind ~= 'hiddenItem' then e.kind = it.kind end
+    if not it.collected then e.collected = false end
+  end
+  for _, e in ipairs(order) do
+    e.name, e.uid = e.lines[1], e.uids[1]
+  end
+  return order
+end
+
+-- What is still lying on the map, one entry per tile (collected items are dropped before
+-- merging, so a picked-up item never shows up alongside a live one on the same tile).
+local function visibleByTile(items)
+  local out = {}
+  for _, it in ipairs(items) do
+    if not it.collected then out[#out + 1] = it end
+  end
+  return mergeByTile(out)
+end
 """.replace("__CLASSES__", classes)
 
 
@@ -265,10 +320,7 @@ do
     if type(tw) ~= 'table' then return end
     local map, items = itemCollect()
     if not map or not items then return end
-    local vis = {}
-    for _, it in ipairs(items) do
-      if not it.collected then vis[#vis + 1] = it end
-    end
+    local vis = visibleByTile(items)
     -- redraw on map change, if our group was dropped, or when the set of items that are
     -- still there changed - i.e. the moment you walk onto one and pick it up
     if map == f.map and tw == f.world and f.group and f.group.parent

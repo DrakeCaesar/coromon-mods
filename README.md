@@ -332,20 +332,35 @@ Settings, in the `[items]` table of `overlays.toml`:
 
 The report the script prints lists them with tile coordinates.
 
-**Which classes carry items.** Inventoried across all 194 shipped map files, with
-Tiled templates resolved (most of these objects get their class from a template, not
-inline — 369 `hiddenItem` and 253 `itemChest` entries are template-based, so a naive
-scan of inline `class` fields misses nearly all of them):
+**Which classes carry items.** Counted from the maps the game actually loads,
+`Resources/optimizedMaps/**/*.json` — 195 maps, and every one of these 1160 carriers has
+its class written inline, so a plain scan is enough there:
 
 | class | count | item property | covered by |
 |---|---|---|---|
-| `hiddenItem` | 371 | `item1_UID` | default |
-| `itemChest` | 310 | `item1_UID` | `show_chests` |
-| `fruitGrowingPot` | 41 | `itemUID` | never — see below |
+| `hiddenItem` | 380 | `item1_UID` | default |
+| `drillShovelItem` | 370 | `item1_UID` | `show_all_items` |
+| `itemChest` | 326 | `item1_UID` | `show_chests` |
+| `fruitGrowingPot` | 42 | `itemUID` | never — see below |
 | `pyramidItemChest` | 30 | `item1_UID` | `show_chests` |
-| `drillShovelItem` | 11 | `item1_UID` | `show_all_items` |
-| `item` | 9 | `itemUID` | `show_all_items` |
+| `item` | 11 | `itemUID` | `show_all_items` |
 | `treeItem` | 1 | `itemUID` | `show_all_items` |
+
+**The tool reads the live map, not these files.** `MTE.getMap()` returns the map table the
+engine actually built, and `itemCollect()` walks `map.layers[*].objects` on it — so the
+markers always follow the running game, and no map file is ever opened. The counts above
+are offline reference only.
+
+**`optimizedMaps` vs the loose `maps` copy.** Both are the same Tiled project, and they
+mostly agree: 195 maps / 1160 carriers against 192 / 1122. The loose copy is the *source*,
+with most carriers' classes living in Tiled templates rather than inline — read raw, every
+`hiddenItem` looks unclassed, so its templates must be resolved before any count means
+anything (that mistake produced a bogus "11 `drillShovelItem`" reading of these files
+once). Differences are tile-level and rare, e.g. `desertRoute_5` (8,33) is `GOLD` x2000 +
+`GEM_GREEN_2` in `optimizedMaps` but a lone desert plant in the loose copy.
+`resource.car` carries both forms as well (`classes.maps.<path>.lu`, plus an
+`optimizedMaps.…` entry), and the loaded map's own `map.path` / `map.filename` name it
+fastest — `desertRoute/desertRoute_5/desertRoute_5` is the path form, not a folder pair.
 
 `fruitGrowingPot` is excluded even from `show_all_items`: it is a repeatable harvester
 (plant a fruit, take the yield), not a one-time pickup, so "already collected" has no
@@ -356,6 +371,19 @@ empty slot is a nil UID with amount 0, so both are tested. Every item is shown: 
 first is the "top name" and the rest stack underneath it on screen, with the block
 lifted so its last line still sits just above the tile. In the report the extras are
 indented under the first.
+
+**Two things can share a tile.** The carriers are independent Tiled objects on separate
+layers, so a hidden item and a drill/gem spot can occupy the same square — `desertRoute_5`
+(8,33) is `GOLD` x2000 on `interactObjects` plus `GEM_GREEN_2` on `gems`. A marker per
+object would stack two identical boxes and two labels in the same spot, so items sharing a
+tile are merged: one box, and the names become stacked label lines, exactly like a
+container's. A non-`hiddenItem` on the tile wins, so the merged marker is amber.
+
+Collected items are dropped *before* merging, so a picked-up item never reappears as an
+extra line next to a live one. Exhaustively, over all 195 maps: 1160 carriers, and only
+four tiles hold two at once — three of which are mutually exclusive conditional variants
+(the same object duplicated on `whileX` / `afterX` layers, only one of which ever loads).
+So this affects exactly one tile in the game, and only until its gold is taken.
 
 **Label font** is one choice for every line, set by `font` in `[items]`:
 
