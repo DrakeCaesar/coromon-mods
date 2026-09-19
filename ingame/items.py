@@ -16,6 +16,12 @@ Collected objects drop out of the markers, but the classes do NOT all share one 
 - see stillPresent() below. Only hidden items and chests have been verified for that; the
 show_all_items extras are unverified.
 
+Objects with no Tiled name are a special case: there is nothing to match a runtime object
+against, so they are held to their layer instead. Conditional layers (whileDEMO,
+whileChristmas, afterDEFEAT_GHOST_TITAN, ...) are only instantiated when they apply, and the
+objects on the ones that do not apply are not in the game - the demo's chest in harbor being
+the one that prompted this.
+
 A location change is NOT handled by the 1 Hz poll: the map is watched every frame (two
 cheap reads) and its markers are dropped the moment it changes, then redrawn over a short
 settling window while the new map's runtime objects appear. See watch() below.
@@ -159,8 +165,34 @@ local function runtimeEntry(o)
   end
 end
 
-local function stillPresent(o)
-  if type(o.name) ~= 'string' or o.name == '' then return true end
+local function stillPresent(o, layerName)
+  if type(o.name) ~= 'string' or o.name == '' then
+    -- No name to match a runtime object against. The one thing that still says whether this
+    -- object exists in the running game is its LAYER: MTE only instantiates objects for the
+    -- layer variants that are active, and the maps are full of conditional ones - whileDEMO,
+    -- whileChristmas, afterDEFEAT_GHOST_TITAN - whose objects are simply not there.
+    --
+    -- Measured on harbor (12,14): an `itemChest` on layer whileDEMO carrying the demo's
+    -- starter handout (5000 GOLD, 5 SPINNER_REGULAR_3, 10 SCENT_ADD_POTENTIAL_ROLL). The
+    -- game had nothing at that tile but the player's own spawnables, so it is not collectable
+    -- and must not be marked. A chest stays spawned even once opened, so "no object at all"
+    -- means the layer is inactive - not that it was already looted.
+    --
+    -- So: present only if the tile holds a runtime object on the same layer, comparing base
+    -- names because an active conditional layer resolves to its base (interactObjects).
+    if not layerName then return true end
+    local m = mte()
+    if not m or type(m.getObjectsAtTile) ~= 'function' then return true end
+    local base = layerName:gsub('#.*$', '')
+    local ok, list = pcall(function() return m.getObjectsAtTile(o.tileX, o.tileY) end)
+    if not ok or type(list) ~= 'table' then return true end
+    for _, e in pairs(list) do
+      if type(e) == 'table' and type(e.layerName) == 'string' then
+        if e.layerName == layerName or e.layerName:gsub('#.*$', '') == base then return true end
+      end
+    end
+    return false
+  end
   local e = runtimeEntry(o)
   if not e then return false end                       -- removed: hidden items
   local sp = e.properties and e.properties.spawnable   -- still spawned: chests
@@ -214,7 +246,8 @@ local function itemCollect()
             tx = o.tileX, ty = o.tileY,
             uid = uids[1], name = lines[1],
             lines = lines, uids = uids, kind = o.class,
-            collected = not stillPresent(o),
+            layer = L.name,
+            collected = not stillPresent(o, L.name),
           }
         end
       end
@@ -498,8 +531,11 @@ def report(cfg):
       end
     end
     local kind = (it.kind == 'hiddenItem') and '' or ('   [' .. it.kind .. ']')
-    out[#out + 1] = string.format('  tile (%3d,%3d)  %-24s   (%s)%s%s%s',
-      it.tx, it.ty, it.lines[1], it.uids[1], kind,
+    -- the layer matters: an object on a conditional layer that does not apply to this save
+    -- (whileDEMO and friends) is not in the game at all and cannot be collected
+    local where = it.layer and ('   on ' .. it.layer) or ''
+    out[#out + 1] = string.format('  tile (%3d,%3d)  %-24s   (%s)%s%s%s%s',
+      it.tx, it.ty, it.lines[1], it.uids[1], kind, where,
       it.collected and '   [already collected]' or '', tag)
     -- a container can hold up to three items; the rest sit under the top name
     for i = 2, #it.lines do
