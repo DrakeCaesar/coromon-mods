@@ -58,7 +58,7 @@ lives only in the running process - it is gone when the game closes.
 
 USAGE
 -----
-    python tools/scroll_fix.py --apply
+    python coromon-tools/scroll_fix.py --apply
 
 Run that once per game launch, while the game is open and you are standing in
 the overworld. It assumes 60 fps (see above), computes the durations, and applies
@@ -3114,7 +3114,7 @@ def main():
                 print()
                 print("Lock that in as a fixed constant (no frame-time measurement):")
                 print(
-                    f"  python tools/scroll_fix.py --walk-const {nmms:.3f} {fmms:.3f}"
+                    f"  python coromon-tools/scroll_fix.py --walk-const {nmms:.3f} {fmms:.3f}"
                 )
         elif args.walk_const is not None:
             # Absolute durations, no measurement - reproducible and lockable.
@@ -3247,7 +3247,7 @@ def main():
                         "do while you are MOVING - the camera only exists relative to the"
                     )
                     print("player. Walk a few steps, then:")
-                    print("    python tools/scroll_fix.py --walk-subpixel report")
+                    print("    python coromon-tools/scroll_fix.py --walk-subpixel report")
                     print()
                 print(_eval(b, SUBPIXEL_REPORT))
         elif args.selftest_lock:

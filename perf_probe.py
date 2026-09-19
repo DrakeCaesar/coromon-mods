@@ -8,8 +8,8 @@ per-frame times, then repeats the measurement with a minimal hook set and with
 the full hook set, and prints a comparison.
 
 Usage (game must be running):
-    python tools/perf_probe.py                 # 6s per mode
-    python tools/perf_probe.py --seconds 10
+    python coromon-tools/perf_probe.py                 # 6s per mode
+    python coromon-tools/perf_probe.py --seconds 10
 """
 import argparse
 import re

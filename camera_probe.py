@@ -28,8 +28,8 @@ This tool only READS fields and upvalues. It never calls a wrapped game/display 
 (doing that crashed the game once - see the notes in README.md).
 
 Usage (game must be running):
-    python tools/camera_probe.py --discover
-    python tools/camera_probe.py --watch --seconds 10     # walk in-game meanwhile
+    python coromon-tools/camera_probe.py --discover
+    python coromon-tools/camera_probe.py --watch --seconds 10     # walk in-game meanwhile
 """
 import argparse
 import sys

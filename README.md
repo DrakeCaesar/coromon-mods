@@ -10,13 +10,13 @@ and/or talking to the live Lua state inside `coromon.exe`.
 ## Quick start — starter Potential reader
 
 ```bash
-python tools/coromon_starter.py                  # run it and leave it running
-python tools/coromon_starter.py --perfect        # force all three starters to 21
-python tools/coromon_starter.py --force-potential 20   # ... or any value 1-21
-python tools/coromon_starter.py --once           # read the roll a single time and exit
-python tools/coromon_starter.py --verbose        # also show the object path + attributes
-python tools/coromon_starter.py --clear-overlay  # remove the on-screen overlay
-python tools/coromon_starter.py --no-overlay     # console output only
+python coromon-tools/coromon_starter.py                  # run it and leave it running
+python coromon-tools/coromon_starter.py --perfect        # force all three starters to 21
+python coromon-tools/coromon_starter.py --force-potential 20   # ... or any value 1-21
+python coromon-tools/coromon_starter.py --once           # read the roll a single time and exit
+python coromon-tools/coromon_starter.py --verbose        # also show the object path + attributes
+python coromon-tools/coromon_starter.py --clear-overlay  # remove the on-screen overlay
+python coromon-tools/coromon_starter.py --no-overlay     # console output only
 ```
 
 Start it any time — even at the title screen or before the starters exist. It keeps
@@ -171,6 +171,7 @@ and the overworld zoom, all driven from one settings file.
 | `coromon_lua.py` | generic Lua injection bridge (`--eval`, `--file`, or REPL) |
 | `car_extract.py` | Solar2D `resource.car` reader/extractor (`--list`, `--extract`) |
 | `luadis.py` | Lua 5.1 bytecode reader/disassembler/string dumper for `.lu` chunks |
+| `engine_source.py` | clone the Solar2D engine source at the tag this game was built from (`--clone`, `--update`) |
 
 ### Everything at once (`overlays.py`)
 
@@ -519,10 +520,10 @@ Anything else is ignored and `fFPS` keeps its default of **30** — so writing 1
 config.lua without patching that check makes the game run at *half* speed. Hence:
 
 ```bash
-python tools/fps_patch.py                              # what the files say now
-python tools/fps_patch.py --set 120                    # the one supported step up
-python tools/fps_patch.py --unlock-engine --set 165    # any 1-255, e.g. a 165 Hz panel
-python tools/fps_patch.py --restore                    # back to the shipped 60 / locked
+python coromon-tools/fps_patch.py                              # what the files say now
+python coromon-tools/fps_patch.py --set 120                    # the one supported step up
+python coromon-tools/fps_patch.py --unlock-engine --set 165    # any 1-255, e.g. a 165 Hz panel
+python coromon-tools/fps_patch.py --restore                    # back to the shipped 60 / locked
 ```
 
 It writes the double next to the `fps` key in the compiled `config.lua` inside
@@ -544,10 +545,10 @@ necessarily what you get — measure it with `perf_probe.py`.
 ### Poking around yourself
 
 ```bash
-python tools/coromon_lua.py                       # interactive REPL inside the game
-python tools/coromon_lua.py --eval "return tostring(_G.Monster)"
-python tools/car_extract.py Resources/resource.car --list | grep -i starter
-python tools/luadis.py <file.lu> --tree --strings --globals
+python coromon-tools/coromon_lua.py                       # interactive REPL inside the game
+python coromon-tools/coromon_lua.py --eval "return tostring(_G.Monster)"
+python coromon-tools/car_extract.py Resources/resource.car --list | grep -i starter
+python coromon-tools/luadis.py <file.lu> --tree --strings --globals
 ```
 
 `resource.car` notes: magic `rac\x01`, TOC starts at offset `0x10`, each entry is

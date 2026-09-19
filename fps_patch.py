@@ -59,10 +59,10 @@ WHAT IT DOES NOT FIX
 
 USAGE
 -----
-    python tools/fps_patch.py                              # report what the files say now
-    python tools/fps_patch.py --set 120                    # the one supported step up
-    python tools/fps_patch.py --unlock-engine --set 165    # any value, e.g. a 165 Hz panel
-    python tools/fps_patch.py --restore                    # back to the shipped 60/locked
+    python coromon-tools/fps_patch.py                              # report what the files say now
+    python coromon-tools/fps_patch.py --set 120                    # the one supported step up
+    python coromon-tools/fps_patch.py --unlock-engine --set 165    # any value, e.g. a 165 Hz panel
+    python coromon-tools/fps_patch.py --restore                    # back to the shipped 60/locked
 
 Close the game before touching the DLL: Windows will not let anything write to a module
 that is loaded, and the tool will tell you so. The archive can be written while the game
@@ -318,7 +318,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Set Coromon's frame rate in the game's own files, and put it back.")
     ap.add_argument("--game-dir", default=DEFAULT_GAME,
-                    help="the folder holding coromon.exe (default: the parent of tools/)")
+                    help="the folder holding coromon.exe (default: the parent of this folder)")
     ap.add_argument("--set", dest="fps", type=float, default=None,
                     help="frame rate to write into config.lua (%d-%d; only %s unless the "
                          "engine is unlocked)" % (FPS_MIN, FPS_MAX,

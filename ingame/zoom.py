@@ -250,6 +250,33 @@ do
     fixSticky(w, k)
   end
 
+  -- Which tiles are drawn is the world builder's business, and it works its window out from
+  -- the world node itself - tiledWorld:contentToLocal(0, 0) and contentToLocal(screen width,
+  -- screen height), plus a culling margin per side - so the window follows the world's SCALE:
+  -- zooming out asks for a correspondingly wider block of tiles with nothing from us.
+  --
+  -- What it does not do is notice on its own. The window is only recomputed when the camera
+  -- moves, so after a zoom change the area that has just come into view stays undrawn until
+  -- the next step - which is exactly what it looks like: the old viewport's worth of map is
+  -- there, and the rest is blank. Entering a map has the same hole once the zoom is applied
+  -- over the freshly built world.
+  --
+  -- Measured, zooming from 0.6 to 0.3: the world drew 4020 objects before the change and 4020
+  -- after it, and 7761 once the camera was nudged. So ask for the recompute ourselves.
+  --
+  -- translateCamera is a module function, not a method - called with a colon it reads `self`
+  -- as its x delta and dies with "attempt to perform arithmetic on local '_deltaX'" - and a
+  -- zero distance adds nothing to the camera: it only runs the window update. Once per change
+  -- of applied scale, not once per frame.
+  local function refreshVisibleTiles(k)
+    if z.poked == k then return end
+    z.poked = k
+    local m = mte()
+    if type(m) == 'table' and type(m.translateCamera) == 'function' then
+      pcall(m.translateCamera, 0, 0)
+    end
+  end
+
   local function applyZoom()
     local h = _G.__hud
     if not h or h.zoomBody ~= applyZoom or not f.on then return end
@@ -259,7 +286,7 @@ do
       -- Out of the overworld (battle, menu, teardown). Drop everything - the node that comes
       -- back may well be a different object.
       z.node = nil
-      z.wx, z.wy, z.w0x, z.w0y, z.settle = nil, nil, nil, nil, nil
+      z.wx, z.wy, z.w0x, z.w0y, z.settle, z.poked = nil, nil, nil, nil, nil, nil
       return
     end
 
@@ -272,6 +299,7 @@ do
     -- correction. So hold off - leave the node at scale 1 and just watch until it settles.
     if w ~= z.node or z.wx == nil then
       z.settle, z.stable = SETTLE_MAX_FRAMES, 0
+      z.poked = nil    -- a new map has its own window to ask for
     end
     z.node = w
 
@@ -304,6 +332,7 @@ do
       w.x, w.y = z.w0x, z.w0y
       z.wx, z.wy = w.x, w.y
       syncSticky(w, 1)
+      refreshVisibleTiles(1)
       return
     end
 
@@ -318,6 +347,7 @@ do
 
     -- After the world scale, not before: the fit is measured through it.
     syncSticky(w, k)
+    refreshVisibleTiles(k)
   end
 
   local function setScale(k)
