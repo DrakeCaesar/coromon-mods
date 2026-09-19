@@ -88,3 +88,5 @@ margin_y = 8
 spacing = 9
 # what a finished countdown reads, as in "Traitformator: ready"
 ready_text = "ready"
+# also show the Potentiflator result. The game decides it the moment the Coromon is handed over, so it reads out before the 1000 steps are walked - a roll you do not want then costs a reload instead of the whole walk
+show_potential = true

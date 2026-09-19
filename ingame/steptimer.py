@@ -50,6 +50,16 @@ has are shown as "Potentiflator" and "Traitformator", from a table keyed on the 
 the effect's class path. Anything else falls back to its own class name, spaced out, so an
 effect this does not know about still has a readable label. The NUMBERS are never from here.
 
+THE RESULT IS READABLE BEFORE THE WALK, and that is the most useful thing this does. The
+Potentiflator decides its answer AT HANDOVER, not when the steps are done: the game rerolls,
+writes the new value onto the Coromon and sets its `didRerollPotential` flag, then parks it in
+hidden monster storage. So the outcome can be read the instant you hand the Coromon over, and
+the 1000 steps only need walking once the answer is one you want. The counter shows
+"(P19 to P21 PERFECT)" or "(P19 to P20)" immediately. `show_potential` turns it off.
+
+That flag matters and is why it is checked: without it `mon.potential` would still be the
+untouched original, and an unset flag would mean the reroll has not been applied yet.
+
 HOW IT DRAWS, and the measurements behind it:
 
   * the block is drawn on the display stage, so it is screen-space - it does not move with
@@ -104,6 +114,13 @@ SETTINGS = [
         "overlap. Only worth changing if you want them further apart.",
     ),
     ("ready_text", "ready", "what a finished countdown reads, as in \"Traitformator: ready\""),
+    (
+        "show_potential",
+        True,
+        "also show the Potentiflator result. The game decides it the moment the Coromon is "
+        "handed over, so it reads out before the 1000 steps are walked - a roll you do not "
+        "want then costs a reload instead of the whole walk",
+    ),
 ]
 
 
@@ -123,6 +140,8 @@ def lua(cfg):
     """The queries. Always part of the chunk - the install summary, the status line and the
     report all read them, whether or not the overlay itself is installed."""
     return r"""
+local STEP_SHOW_POTENTIAL = __SHOW__
+
 -- The live save data, found by walking the loaded modules. It is not reachable from any
 -- global, from Game/Save/the player, or from any object on screen: it exists only as an
 -- upvalue of functions inside loaded modules, so this asks each function for its upvalues
@@ -173,6 +192,25 @@ local function effectName(e)
   return (s:sub(1, 1):upper() .. s:sub(2))
 end
 
+-- The Potentiflator's answer, if the game has already decided it. It decides AT HANDOVER:
+-- the new value is written onto the Coromon, which then waits in hidden monster storage
+-- until the steps are walked. So this reads immediately, which is the point - an unwanted
+-- roll then costs a reload rather than the full 1000-step walk.
+--
+-- Only the potential-reroll effect has these accessors, and `didRerollPotential` is the flag
+-- the game sets once it has applied the result; without it `mon.potential` would still be
+-- the untouched original, so it is checked rather than assumed.
+local function decidedPotential(e)
+  if type(e) ~= 'table' then return nil, nil end
+  if type(e.getOriginalPotential) ~= 'function' or type(e.getMonster) ~= 'function' then
+    return nil, nil        -- the trait reroll has no such accessors
+  end
+  local okM, mon = pcall(function() return e:getMonster() end)
+  if not okM or type(mon) ~= 'table' or not mon.didRerollPotential then return nil, nil end
+  local okO, from = pcall(function() return e:getOriginalPotential() end)
+  return (okO and tonumber(from) or nil), tonumber(mon.potential)
+end
+
 -- Every pending step-counted deposit, smallest remaining first. An entry counts only when it
 -- exposes getTargetPlayerSteps, which is what separates the two reroll services from the
 -- item effects (a magnet hat and a gold booster) sitting in the same list with no target.
@@ -190,7 +228,9 @@ local function stepJobs(settings)
       if target then
         local left = target - steps
         if left < 0 then left = 0 end
-        out[#out + 1] = { name = effectName(e), left = left, target = target }
+        local from, to = decidedPotential(e)
+        out[#out + 1] = { name = effectName(e), left = left, target = target,
+                          from = from, to = to }
       end
     end
   end
@@ -202,11 +242,29 @@ local function stepJobs(settings)
 end
 
 -- One line, e.g. "Traitformator: 498 steps" and - at one step - "Traitformator: 1 step".
+-- A decided Potentiflator result is appended as "(P19 to P21 PERFECT)", on the same line so
+-- no extra row is spent on it.
+--
+-- The arrow is spelled "to" rather than a glyph: the game draws text from a fixed glyph
+-- atlas, and a character it lacks would silently render as nothing.
 local function stepLine(job, ready)
-  if job.left <= 0 then return job.name .. ': ' .. ready end
-  return job.name .. ': ' .. tostring(job.left) .. ((job.left == 1) and ' step' or ' steps')
+  local s
+  if job.left <= 0 then
+    s = job.name .. ': ' .. ready
+  else
+    s = job.name .. ': ' .. tostring(job.left) .. ((job.left == 1) and ' step' or ' steps')
+  end
+  if STEP_SHOW_POTENTIAL and job.to then
+    local pre = ''
+    if job.from then pre = 'P' .. tostring(job.from) .. ' to ' end
+    s = s .. ' (' .. pre .. 'P' .. tostring(job.to)
+        .. ((job.to == 21) and ' PERFECT' or '') .. ')'
+  end
+  return s
 end
-""".replace("__NICE__", _nice_table())
+""".replace("__NICE__", _nice_table()).replace(
+        "__SHOW__", "true" if cfg["show_potential"] else "false"
+    )
 
 
 def section(cfg):
@@ -226,6 +284,8 @@ do
   f.ticks = 0
 
   local FONT = 'outline_10_bold'
+  local WHITE = { 1, 1, 1 }
+  local GOLD = { 1, 0.85, 0.2 }        -- the same gold the Potential readouts use for 21
   local CORNER = __CORNER__
   local MX, MY = __MX__, __MY__
   local SPACING = __SPACING__
@@ -276,7 +336,8 @@ do
       f.group = g
     end
     for i = 1, #jobs do
-      local s = stepLine(jobs[i], READY)
+      local job = jobs[i]
+      local s = stepLine(job, READY)
       local t = f.texts[i]
       if not t then
         t = text(f.group, FONT, s, 0, 0)
@@ -286,6 +347,9 @@ do
         pcall(function() t.text = s end)
       end
       t.__hudStep = s
+      -- a decided perfect is the one thing worth shouting about, so that line goes gold
+      local col = (job.to == 21) and GOLD or WHITE
+      pcall(function() t:setFillColor(col[1], col[2], col[3]) end)
     end
     for i = #jobs + 1, #f.texts do
       pcall(function() f.texts[i]:removeSelf() end)
