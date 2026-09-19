@@ -24,9 +24,18 @@ Adding a feature is one module plus one line in FEATURES below. Its settings doc
 themselves, because overlays.toml is generated from SETTINGS.
 """
 
-from . import config, core, items, potential, squad, zoom
+from . import config, core, items, potential, squad, steptimer, zoom
 
 # Order is only the order their lines appear in the installer's output.
-FEATURES = [potential, items, squad, zoom]
+FEATURES = [potential, items, squad, steptimer, zoom]
 
-__all__ = ["config", "core", "items", "potential", "squad", "zoom", "FEATURES"]
+__all__ = [
+    "config",
+    "core",
+    "items",
+    "potential",
+    "squad",
+    "steptimer",
+    "zoom",
+    "FEATURES",
+]

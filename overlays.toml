@@ -74,3 +74,17 @@ fix_collision_reach = true
 fix_light_circle = true
 # one-shot repair: put the camera back on the player if an older build displaced it. Set it true, run once, then set it back to false.
 recenter = false
+
+[steptimer]
+# show the Potentiflator / Traitformator step countdown
+enabled = true
+# which corner to put it in   (one of: top-left, top-right, bottom-left, bottom-right)
+corner = "top-left"
+# gap from the screen edge, in content units, horizontally
+margin_x = 8
+# gap from the screen edge, in content units, vertically
+margin_y = 8
+# distance between the two lines, in content units. Measured: the glyphs are 8 units tall, so the visible gap is spacing - 8, and 9 gives 5 px. Below 8.5 the lines overlap. Only worth changing if you want them further apart.
+spacing = 9
+# what a finished countdown reads, as in "Traitformator: ready"
+ready_text = "ready"
