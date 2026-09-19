@@ -94,6 +94,23 @@ SETTINGS = [
         "as you approach an edge",
     ),
     (
+        "settle_stable_frames",
+        4,
+        "consecutive still frames after a location change before the zoom comes back. "
+        "The new map is not positioned in one frame and the game's writes while doing "
+        "it are absolute, so the zoom is held off until the map has stopped being "
+        "moved. 4 was a safety margin that left the new location at the default zoom "
+        "for roughly 4-8 frames (~70-140 ms); 1 applies it on the first frame the game "
+        "stops moving the map, which is as close to instant as the hold-off can get. "
+        "If a location ever comes up with the map offset, raise this.",
+    ),
+    (
+        "settle_max_frames",
+        90,
+        "hard cap on the hold-off, in frames, so a node that never stops being moved "
+        "cannot leave the zoom off forever",
+    ),
+    (
         "recenter",
         False,
         "one-shot repair: put the camera back on the player if an older build displaced "
@@ -169,12 +186,56 @@ def section(cfg):
     kin = _keylist(cfg["key_in"], KEY_IN)
     kreset = _keylist(cfg["key_reset"], KEY_RESET)
     pixels = cfg["pixels"] if cfg["pixels"] > 0 else 0
+    stable = int(cfg["settle_stable_frames"])
+    maxf = int(cfg["settle_max_frames"])
     return (
         r"""
 do
   local f = makeFeature('zoom', 0)   -- every frame, so an enterFrame listener, not a slot
   local z = {}
   f.state = z
+
+  -- WHEN THE MAP IS READY. The hold-off below exists for two reasons: the game keeps
+  -- writing the node's position as absolute values while it sets the new map up, which
+  -- the movement-based offset arithmetic cannot absorb, and the tile grid is still
+  -- being filled, which culling cannot take (cullTile indexes a tile that is not there
+  -- yet). Both stop when the game has finished SPAWNING the map, and the trace shows
+  -- exactly where that happens: worldHelper -> tiledSpawnable.spawn -> onSpawn ->
+  -- onRender -> setSprite -> setCameraFocus -> ... -> cullTile.
+  --
+  -- onSpawn is a per-instance closure - it is in no table, so it cannot be found from
+  -- outside. The classes' new() is in package.loaded, though, so wrap that and hook the
+  -- instance's own callbacks as it is created. Every map after this one gets signalled;
+  -- the callback stamps the frame it finished on, and the apply loop compares that with
+  -- the frame this node appeared, which is order-independent.
+  do
+    local names = { 'classes.spawnables.abstractMovingSpawnable',
+                    'classes.spawnables.tiledSpawnable' }
+    for _, nm in ipairs(names) do
+      local cls = package.loaded[nm]
+      if type(cls) == 'table' and type(cls.new) == 'function' and not cls.__hudSpawnHooked then
+        cls.__hudSpawnHooked = true
+        local origNew = cls.new
+        cls.new = function(...)
+          local inst = origNew(...)
+          if type(inst) == 'table' then
+            for _, meth in ipairs({ 'onAfterSpawn', 'onSpawn' }) do
+              local orig = inst[meth]
+              if type(orig) == 'function' and not inst['__hudHooked_' .. meth] then
+                inst['__hudHooked_' .. meth] = true
+                inst[meth] = function(self, ...)
+                  local a, b, c = orig(self, ...)
+                  z.spawnedAt = z.frames or 0
+                  return a, b, c
+                end
+              end
+            end
+          end
+          return inst
+        end
+      end
+    end
+  end
 
   -- The zoom stops are whole numbers of screen pixels per texel: nativeScale, then one
   -- less, down to 1. `dir` of -1 zooms out a stop, +1 zooms in. k = pixels / nativeScale.
@@ -194,8 +255,9 @@ do
   -- node's position standing still for a few frames means the map has finished being placed.
   -- A fixed 45-frame window (three quarters of a second at 60fps) left the map on screen at
   -- scale 1 for that whole time, which is very visible when playing zoomed out.
-  local SETTLE_STABLE_FRAMES = 4
-  local SETTLE_MAX_FRAMES = 90
+  -- Both are settings now (overlays.toml): the delay is the first of them, in frames.
+  local SETTLE_STABLE_FRAMES = __SETTLE_STABLE__
+  local SETTLE_MAX_FRAMES = __SETTLE_MAX__
 
   -- Screen-locked layers. Maps mark a whole Tiled layer `stickToScreen` (worldRainOverlay -
   -- the full-screen sheet drawn over the map), and the builder pins such a layer to the
@@ -291,6 +353,7 @@ do
     end
 
     local k = z.scale
+    z.frames = (z.frames or 0) + 1
 
     -- A location change hands us a brand new node, and it is not built in one frame: the game
     -- goes on positioning it while the new map is set up. Re-seeding on the swap alone is not
@@ -300,6 +363,9 @@ do
     if w ~= z.node or z.wx == nil then
       z.settle, z.stable = SETTLE_MAX_FRAMES, 0
       z.poked = nil    -- a new map has its own window to ask for
+      z.nodeAt = z.frames          -- the frame this node appeared
+      z.heldFrames = 0             -- frames of this transition spent at the game's zoom
+      z.spawnHits = 0
     end
     z.node = w
 
@@ -313,12 +379,21 @@ do
       end
       z.w0x, z.w0y = w.x, w.y
       z.wx, z.wy = w.x, w.y
-      if (z.stable or 0) < SETTLE_STABLE_FRAMES then
+      z.heldFrames = (z.heldFrames or 0) + 1
+      -- Two ways out, whichever comes first: the game finished spawning this map (the
+      -- signal we want - it is exact, and it is not a guess about how long a map takes
+      -- to build), or the movement stopped for SETTLE_STABLE_FRAMES frames, which is the
+      -- old test and still the fallback for the first map, where nothing was hooked yet
+      -- when the node appeared.
+      local spawned = z.spawnedAt and z.nodeAt and z.spawnedAt >= z.nodeAt
+      if spawned then
+        z.spawnHits = (z.spawnHits or 0) + 1
+      elseif (z.stable or 0) < SETTLE_STABLE_FRAMES then
         w.xScale, w.yScale = 1, 1
         syncSticky(w, 1)
         return
       end
-      -- Settled - fall through and put the zoom back on this very frame.
+      -- Ready - fall through and put the zoom back on this very frame.
       z.settle = 0
     end
 
@@ -513,6 +588,8 @@ end
         .replace("__KINTXT__", "'" + "/".join(kin) + "'")
         .replace("__KRESETTXT__", "'" + "/".join(kreset) + "'")
         .replace("__PIXELS__", str(pixels))
+        .replace("__SETTLE_STABLE__", str(stable))
+        .replace("__SETTLE_MAX__", str(maxf))
         .replace("__FIXREACH__", "true" if cfg["fix_collision_reach"] else "false")
         .replace("__FIXCIRCLE__", "true" if cfg["fix_light_circle"] else "false")
     )

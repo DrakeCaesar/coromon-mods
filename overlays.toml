@@ -26,6 +26,13 @@ labels = true
 font = "small"
 
 [zoom]
+# Consecutive still frames after a location change before the zoom comes
+# back. The new map is not positioned in one frame, so the zoom is held off
+# until the game stops moving it. 4 (the old hard-coded value) left the new
+# location at the default zoom for ~4-8 frames; 1 is the first frame it stops.
+# Raise to 2 if a location ever appears with the map offset.
+settle_stable_frames = 4
+settle_max_frames = 90
 # install the overworld zoom
 enabled = true
 # install already zoomed out, to this many screen pixels per texture pixel; 0 is the game's own scale (no zoom)
