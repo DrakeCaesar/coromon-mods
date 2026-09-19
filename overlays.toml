@@ -8,6 +8,13 @@
 
 # the process to attach to - it is waited for, so it need not be running
 process = "coromon.exe"
+# map the gamepad's triggers to the zoom keys (the triggers reach the game nowhere else -
+# they are analogue and Solar2D emits no event for them)
+gamepad_zoom = true
+# how far a trigger must be pulled before it counts as pressed, in percent
+gamepad_trigger_percent = 35
+# how often a trigger that stays pulled repeats, so holding it keeps zooming
+gamepad_repeat_ms = 220
 
 [potential]
 # install the battle Potential readout (screen overlay)

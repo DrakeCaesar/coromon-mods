@@ -21,6 +21,7 @@ import hashlib
 import os
 import sys
 import tempfile
+import threading
 import time
 
 # coromon_lua.py sits next to the ingame/ package, not inside it.
@@ -298,6 +299,24 @@ CORE_SETTINGS = [
         "coromon.exe",
         "the process to attach to - it is waited for, so it need not be running",
     ),
+    (
+        "gamepad_zoom",
+        True,
+        (
+            "map the gamepad's triggers to the zoom keys (the triggers reach the game "
+            "nowhere else - they are analogue and Solar2D emits no event for them)"
+        ),
+    ),
+    (
+        "gamepad_trigger_percent",
+        35,
+        "how far a trigger must be pulled before it counts as pressed, in percent",
+    ),
+    (
+        "gamepad_repeat_ms",
+        220,
+        "how often a trigger that stays pulled repeats, so holding it keeps zooming",
+    ),
 ]
 
 CONFIG_PATH = os.path.join(_TOOLS, config.FILENAME)
@@ -567,6 +586,164 @@ def release_single_instance(path):
             pass
 
 
+# ===========================================================================
+# The pad's triggers -> the zoom keys.
+#
+# The triggers cannot be read inside the game, and that is measured rather than assumed.
+# Solar2D forwards a gamepad's DIGITAL buttons as ordinary key events - the game's own
+# listener sees `descriptor = "Gamepad 3: buttonA"`, `leftShoulderButton1`, the d-pad and so
+# on, and its inputHelper is built entirely around that. The triggers are ANALOGUE axes
+# though, and no event is emitted for them at all: measured with a listener on Runtime's key
+# event while L2 and R2 were pressed, the bumpers showed up and the triggers produced
+# nothing. So the game cannot use the triggers, and nothing can be stolen from it.
+#
+# They are therefore read out here, over XInput - the same API the game loads itself
+# (xinput1_4.dll is in its module list). A press is one small eval on the bridge that is
+# already attached, and it calls the zoom's owned key handler with the keys already
+# configured in overlays.toml. Nothing runs inside the game for this and no per-frame work is
+# added anywhere: a pad that misbehaves cannot take the game down with it.
+# ===========================================================================
+
+TRIGGER_MAX = 255
+
+
+class _XINPUT_GAMEPAD(ctypes.Structure):
+    # DWORD + this 12-byte block is 16 bytes with natural alignment, so ctypes' default
+    # packing is already the layout XInput expects - do not add _pack_ here.
+    _fields_ = [
+        ("wButtons", ctypes.c_ushort),
+        ("bLeftTrigger", ctypes.c_ubyte),
+        ("bRightTrigger", ctypes.c_ubyte),
+        ("sThumbLX", ctypes.c_short),
+        ("sThumbLY", ctypes.c_short),
+        ("sThumbRX", ctypes.c_short),
+        ("sThumbRY", ctypes.c_short),
+    ]
+
+
+class _XINPUT_STATE(ctypes.Structure):
+    _fields_ = [("dwPacketNumber", ctypes.c_ulong), ("Gamepad", _XINPUT_GAMEPAD)]
+
+
+def _load_xinput():
+    for name in ("xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"):
+        try:
+            return ctypes.WinDLL(name)
+        except OSError:
+            continue
+    return None
+
+
+class TriggerKeys(threading.Thread):
+    """Watches the pad's triggers and presses a key when one is pulled.
+
+    Held triggers repeat, so holding L2 keeps zooming out and holding R2 keeps zooming in.
+    A pad that is not connected is simply never seen: XInputGetState answers "disconnected"
+    and the loop idles."""
+
+    POLL = 1.0 / 30
+
+    def __init__(self, press, keys, threshold=0.35, repeat_ms=220):
+        super().__init__(daemon=True)
+        self._press = press
+        self._keys = dict(keys)          # {'left': '-', 'right': '+'}
+        self._threshold = threshold
+        self._repeat = max(0.05, float(repeat_ms) / 1000.0)
+        self._stop = threading.Event()
+        self._xinput = _load_xinput()
+        self.failed = None if self._xinput is not None else "xinput is not available"
+        self.presses = 0
+
+    @property
+    def keys(self):
+        return dict(self._keys)
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        if self._xinput is None:
+            return
+        due = {}                     # (pad, side) -> when the next repeat is allowed
+        while not self._stop.is_set():
+            try:
+                for pad in range(4):
+                    state = _XINPUT_STATE()
+                    if self._xinput.XInputGetState(pad, ctypes.byref(state)) != 0:
+                        continue
+                    for side, value in (("left", state.Gamepad.bLeftTrigger),
+                                        ("right", state.Gamepad.bRightTrigger)):
+                        key = self._keys.get(side)
+                        if not key:
+                            continue
+                        slot = (pad, side)
+                        now = time.monotonic()
+                        pulled = value / float(TRIGGER_MAX) >= self._threshold
+                        if not pulled:
+                            due.pop(slot, None)
+                            continue
+                        if now >= due.get(slot, 0.0):
+                            due[slot] = now + self._repeat
+                            self._fire(key)
+            except Exception as exc:              # a pad being unplugged mid-read, mostly
+                self.failed = str(exc)
+                time.sleep(0.5)
+            self._stop.wait(self.POLL)
+
+    def _fire(self, key):
+        try:
+            self._press(key)
+            self.presses += 1
+        except Exception as exc:                  # the game closing mid-press, mostly
+            self.failed = str(exc)
+
+
+def press_key_code(key):
+    """Lua that hands the zoom's own key handler one key event.
+
+    It is a direct call into the feature rather than a synthetic input event, so the game's
+    input system never sees it - only the zoom reacts."""
+    literal = '"%s"' % key.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "")
+    return (
+        "local h = _G.__hud\n"
+        "local k = h and h.keyBody\n"
+        "if type(k) ~= 'function' then return 'no key handler' end\n"
+        "local ok, err = pcall(k, { keyName = %s, phase = 'down' })\n"
+        "return ok and 'pressed' or tostring(err)\n" % literal
+    )
+
+
+def start_trigger_keys(cfg, features, b):
+    """Start the trigger bridge, or return None when it is switched off or pointless."""
+    core_cfg = cfg.get("core") or {}
+    if not core_cfg.get("gamepad_zoom", True):
+        return None
+    zoom_cfg = cfg.get("zoom") or {}
+    if not zoom_cfg.get("enabled", True):
+        return None
+    if not any(getattr(f, "NAME", "") == "zoom" for f in features):
+        return None
+
+    def first_key(name, fallback):
+        value = zoom_cfg.get(name)
+        if isinstance(value, (list, tuple)) and value:
+            return str(value[0])
+        if isinstance(value, str) and value:
+            return value
+        return fallback
+
+    keys = {"left": first_key("key_out", "-"), "right": first_key("key_in", "+")}
+    threshold = float(core_cfg.get("gamepad_trigger_percent", 35) or 35) / 100.0
+    pad = TriggerKeys(
+        press=lambda key: eval_(b, press_key_code(key), timeout=10.0),
+        keys=keys,
+        threshold=threshold,
+        repeat_ms=core_cfg.get("gamepad_repeat_ms", 220) or 220,
+    )
+    pad.start()
+    return pad
+
+
 def main(features):
     """Watch the game: wait for it, install what overlays.toml asks for, stay out of the
     way while it runs, and do it all again when it is closed and started again. No
@@ -579,18 +756,30 @@ def main(features):
     try:
         while True:
             b = wait_for_game(process)
+            pad = None
             try:
                 apply(b, features, cfg)
+                pad = start_trigger_keys(cfg, features, b)
                 print()
                 print(
                     "watching %s - this stays attached until the game closes and re-attaches"
                     % process
                 )
                 print("by itself when it is started again. Ctrl+C to stop.")
+                if pad is not None:
+                    if pad.failed:
+                        print("gamepad: not reading the triggers - %s" % pad.failed)
+                    else:
+                        print(
+                            "gamepad: %s zooms out, %s zooms in (hold to keep zooming)"
+                            % (pad.keys["left"], pad.keys["right"])
+                        )
                 b.wait()
             except GameGone:
                 pass
             finally:
+                if pad is not None:
+                    pad.stop()
                 b.detach()
             print()
             print("--- the game closed - waiting for it to come back ---")
