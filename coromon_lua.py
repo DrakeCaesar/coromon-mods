@@ -200,14 +200,17 @@ MINIMAL_HOOKS = ["lua_gettop"]
 # attached to over and over, and a process that is only just starting up - or already on its
 # way out - is the normal case, not an error. Measured on this game: re-attaching right after
 # it closed raises
-#     frida.TransportError: unexpected error allocating memory in target process
-#                           (VirtualAllocEx returned 0x00000005)
-# 0x5 is ACCESS_DENIED - the dying process is still listed, so the name lookup finds it, but
-# it will not let the injector allocate inside it any more. Retrying a moment later picks up
-# the process that replaced it. Frida 17 raises all of these straight off Exception with no
-# common Frida base class, so they have to be named.
+#     frida.NotSupportedError: unexpected error allocating memory in target process
+#                              (VirtualAllocEx returned 0x00000005)
+# and the same refusal has also come out as a frida.TransportError, depending on which call
+# trips over it. 0x5 is ACCESS_DENIED - the dying process is still listed, so the name lookup
+# finds it, but it will not let the injector allocate inside it any more. Retrying a moment
+# later picks up the process that replaced it. Frida 17 raises all of these straight off
+# Exception with no common Frida base class, so they have to be named: the two spellings above
+# are one condition, and both are named for that reason.
 RETRYABLE_ATTACH_ERRORS = (
     frida.ProcessNotFoundError,
+    frida.NotSupportedError,
     frida.TransportError,
     frida.PermissionDeniedError,
     frida.ProcessNotRespondingError,

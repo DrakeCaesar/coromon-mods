@@ -383,9 +383,11 @@ def wait_for_game(process, log=print):
 
     Neither "not there yet" nor "there but not attachable yet" is fatal. The second one is
     what a restart looks like from here: the closed process is still listed for a moment, and
-    while it is on its way out it refuses the injector outright - measured, that is a
-    frida.TransportError (VirtualAllocEx -> ACCESS_DENIED). Retrying picks up whatever
-    replaced it, so the loop just keeps going and says why it is waiting, once.
+    while it is on its way out it refuses the injector outright - measured, that is a Frida
+    attach error with VirtualAllocEx -> ACCESS_DENIED, which arrives as
+    frida.NotSupportedError or frida.TransportError depending on where it trips. Retrying
+    picks up whatever replaced it, so the loop just keeps going and says why it is waiting,
+    once.
     """
     waiting = False
     said = None
