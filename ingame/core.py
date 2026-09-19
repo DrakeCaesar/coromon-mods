@@ -16,8 +16,11 @@ goes; the settings file is read once per session there too, so an edit made whil
 is down is picked up by the next launch.
 """
 
+import ctypes
+import hashlib
 import os
 import sys
+import tempfile
 import time
 
 # coromon_lua.py sits next to the ingame/ package, not inside it.
@@ -456,6 +459,112 @@ def read_config(features, warn=None):
     if created:
         warn("config: wrote a fresh %s from the defaults" % CONFIG_PATH)
     return cfg
+
+
+# ===========================================================================
+# One instance at a time.
+#
+# A run stays alive for ever: it waits for the game, installs, and installs again every time
+# the game is closed and started again. Starting it a second time while one is already
+# running therefore used to leave two watchers, each holding its own copy of this module's
+# code, and every launch then got two installs racing to tear each other down. That is what
+# froze the game - an error thrown inside an install leaves Solar2D sitting on it and the
+# game never gets another frame.
+#
+# So a run claims a lock file and a second run refuses to start, naming the process that is
+# already watching. The lock lives in the system temp directory, never beside the tools
+# (they are under version control, and a lock file there would just be noise in git), and it
+# is keyed on this directory so two checkouts do not fight over one lock. A lock whose
+# process is gone is taken over silently, so a crashed or killed run cannot block the next.
+#
+# Claimed from the entry point rather than from main(), so that anything importing this
+# module to poke at it keeps working.
+# ===========================================================================
+
+LOCK_STEM = "coromon-overlays"
+
+
+def lock_path():
+    key = os.path.abspath(_TOOLS).lower().encode("utf-8", "replace")
+    return os.path.join(
+        tempfile.gettempdir(),
+        "%s-%s.lock" % (LOCK_STEM, hashlib.sha1(key).hexdigest()[:12]),
+    )
+
+
+def _pid_alive(pid):
+    """Is that pid still running? Anything other than a definite no counts as yes: taking
+    over a lock whose owner is still there is the mistake worth avoiding here."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # os.kill(pid, 0) is NOT a liveness probe on Windows - it calls TerminateProcess, so
+        # it would kill the very process it is supposedly asking about.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        ERROR_ACCESS_DENIED = 5
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            kernel32.CloseHandle(handle)
+            return True
+        # a process we may not open still exists, and that is an answer
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def claim_single_instance():
+    """Claim the lock for this run, or return None if another run holds it - having said
+    which one, and what to do about it. The lock path is returned otherwise, to hand back to
+    release_single_instance()."""
+    path = lock_path()
+    me = os.getpid()
+    for _ in range(3):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    owner = int(fh.read().strip() or 0)
+            except (OSError, ValueError):
+                owner = 0
+            if owner and owner != me and _pid_alive(owner):
+                print("overlays is ALREADY watching the game, in pid %d." % owner)
+                print("Stop that one first - Ctrl+C in its terminal - then run this again.")
+                print("Only one instance may run: each one installs its own copy of the code")
+                print("on every game launch, and two racing installs freeze the game.")
+                print("(If pid %d is really gone, delete %s.)" % (owner, path))
+                return None
+            # stale, or a torn write: clear it and try again
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(str(me))
+        return path
+    print("could not take %s - another run is starting?" % path, file=sys.stderr)
+    return None
+
+
+def release_single_instance(path):
+    """Drop the lock, but only if it is still ours - never delete someone else's."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            owner = int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        return
+    if owner == os.getpid():
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def main(features):

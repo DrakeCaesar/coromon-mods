@@ -19,6 +19,11 @@ game costs nothing - it re-attaches and installs everything again by itself, and
 `overlays.toml` for the new session on the way. Ctrl+C stops it, and the game keeps
 whatever is on screen until it is closed.
 
+Only ONE instance may run at a time, and a second one refuses to start rather than join in.
+That is not tidiness: a run installs its own copy of the code on every launch, so two of
+them race to tear each other down, and an error thrown inside an install leaves the game
+frozen on it. The run that is already going is named when you try.
+
 The settings file documents itself: it is generated from the settings each module declares,
 and if it goes missing it is written back out from those defaults. So the place to look for
 what can be set is the file itself.
@@ -55,4 +60,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ingame import FEATURES, core  # noqa: E402
 
 if __name__ == "__main__":
-    sys.exit(core.main(FEATURES))
+    lock = core.claim_single_instance()
+    if lock is None:
+        sys.exit(3)
+    try:
+        sys.exit(core.main(FEATURES))
+    finally:
+        core.release_single_instance(lock)

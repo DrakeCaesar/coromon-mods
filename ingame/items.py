@@ -16,6 +16,10 @@ Collected objects drop out of the markers, but the classes do NOT all share one 
 - see stillPresent() below. Only hidden items and chests have been verified for that; the
 show_all_items extras are unverified.
 
+A location change is NOT handled by the 1 Hz poll: the map is watched every frame (two
+cheap reads) and its markers are dropped the moment it changes, then redrawn over a short
+settling window while the new map's runtime objects appear. See watch() below.
+
 Items that share a tile are merged into a single marker with one label line each - see
 mergeByTile() below for why, and for how often it happens.
 
@@ -79,6 +83,22 @@ SETTINGS = [
         DEFAULT_FONT,
         'label font: "small" is outline_8, "big" is outline_10_bold',
         sorted(FONTS),
+    ),
+    (
+        "settle_frames",
+        30,
+        (
+            "frames to keep re-reading the map after a location change; ends early once "
+            "the marker set is stable"
+        ),
+    ),
+    (
+        "settle_stable_reads",
+        3,
+        (
+            "identical reads of the new map required before its markers are drawn; the "
+            "game has already-collected objects spawned for the first frames"
+        ),
     ),
 ]
 
@@ -314,13 +334,24 @@ do
     f.group, f.world, f.map, f.sig, f.count = g, tw, map, signature(items), #items
   end
 
+  -- The collectable objects still on the map, one entry per tile - or nil when there is
+  -- nothing readable yet (no world node, or no map).
+  local function current()
+    local tw = twNode()
+    if type(tw) ~= 'table' then return nil end
+    local map, items = itemCollect()
+    if not map or not items then return nil end
+    return map, visibleByTile(items), tw
+  end
+
   local function update()
     if not f.on then return end
-    local tw = twNode()
-    if type(tw) ~= 'table' then return end
-    local map, items = itemCollect()
-    if not map or not items then return end
-    local vis = visibleByTile(items)
+    -- While a location change is settling, watch() below owns the markers: it holds them
+    -- back until the answer stops moving, and this poll - which can land anywhere in that
+    -- window - must not draw the half-built set in the meantime.
+    if (f.settle or 0) > 0 then return end
+    local map, vis, tw = current()
+    if not map then return end
     -- redraw on map change, if our group was dropped, or when the set of items that are
     -- still there changed - i.e. the moment you walk onto one and pick it up
     if map == f.map and tw == f.world and f.group and f.group.parent
@@ -330,11 +361,97 @@ do
     draw(map, vis, tw)
   end
 
-  f.update, f.kill, f.on = update, clear, true
+  -- REACTING TO A LOCATION CHANGE.
+  --
+  -- The 1 Hz poll above is right for picking things up, but far too slow for a transition:
+  -- the map can change and the poll can be most of a second away, and until it runs f.sig
+  -- still holds the PREVIOUS map's markers. Measured with a per-frame recorder: entering
+  -- another map, our drawn set was the old map's for 13 frames before the poll corrected it.
+  --
+  -- So the map and the world node are watched every frame. Both reads are cheap, and a
+  -- location change is exactly when one of them changes. On a change the old markers are
+  -- dropped at once, so nothing from the previous map is ever left on screen.
+  --
+  -- Drawing immediately is NOT enough, and is what the first attempt got wrong. On the
+  -- frames right after a map loads the game has every carrier spawned and has not yet
+  -- removed or flagged the ones that were already collected, so the set reads as a SUPERSET:
+  -- measured on luxSolisTown, 12 markers - every carrier on the map - against the 7 that are
+  -- really still there, with the correct answer arriving two frames later. Drawing that
+  -- superset is the pop. So the new map is read every frame but drawn only once its answer
+  -- has stopped changing for SETTLE_STABLE_READS frames, which also means an empty set
+  -- (what a not-yet-populated map looks like) can never end the window early.
+  local settle, lastKey, same = 0, nil, 0
+
+  -- This runs on EVERY frame - including the title screen and the game's own start-up - so
+  -- it must not be able to take the game down. A listener that throws on every frame is
+  -- exactly what freezes a Solar2D game, so the body runs inside pcall: a bad frame is a
+  -- skipped frame, and if it keeps failing the watcher removes itself rather than throw for
+  -- ever. The 1 Hz poll below still draws, so the markers survive that too.
+  local function watchStep()
+    local tw = twNode()
+    local map
+    local m = mte()
+    if type(m) == 'table' and type(m.getMap) == 'function' then
+      local ok, got = pcall(m.getMap)
+      if ok then map = got end
+    end
+    -- only react to a positive signal, so a moment where neither is readable is not
+    -- mistaken for a location change
+    if (tw ~= nil and tw ~= f.world) or (map ~= nil and map ~= f.map) then
+      clear()
+      f.count = nil
+      settle, lastKey, same = __SETTLE_FRAMES__, nil, 0
+      -- Remember what is being settled FOR. clear() has just set both to nil, so without
+      -- this the test above would fire again next frame and reset the window for ever.
+      f.world, f.map = tw, map
+    end
+    f.settle = settle
+    if settle <= 0 then return end
+    settle = settle - 1
+    local rowMap, vis, rowTw = current()
+    if not rowMap then return end
+    local key = signature(vis)
+    if key == lastKey then
+      same = same + 1
+    else
+      same, lastKey = 0, key
+    end
+    if same >= __SETTLE_STABLE_READS__ or settle <= 0 then
+      -- drawn once the answer stopped moving - or, if the window ran out first, whatever
+      -- the latest read says, so the markers can never be held back for good
+      settle, f.settle = 0, 0
+      draw(rowMap, vis, rowTw)
+    end
+  end
+
+  local function watch()
+    if not f.on then return end
+    local ok, err = pcall(watchStep)
+    if ok then
+      f.watchFails = 0
+    else
+      f.watchFails = (f.watchFails or 0) + 1
+      f.lastWatchError = tostring(err)
+      if f.watchFails > 30 then
+        pcall(function() Runtime:removeEventListener('enterFrame', watch) end)
+        f.watchOff = true
+      end
+    end
+  end
+  Runtime:addEventListener('enterFrame', watch)
+
+  local function kill()
+    pcall(function() Runtime:removeEventListener('enterFrame', watch) end)
+    clear()
+  end
+
+  f.update, f.kill, f.on = update, kill, true
 end
 """.replace("__LABELS__", "true" if cfg["labels"] else "false")
         .replace("__FONT__", "'" + font + "'")
         .replace("__LINE_H__", str(line_h))
+        .replace("__SETTLE_FRAMES__", str(int(cfg["settle_frames"])))
+        .replace("__SETTLE_STABLE_READS__", str(int(cfg["settle_stable_reads"])))
     )
 
 

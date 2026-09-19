@@ -24,6 +24,12 @@ show_all_items = true
 labels = true
 # label font: "small" is outline_8, "big" is outline_10_bold   (one of: big, small)
 font = "small"
+# frames to keep re-reading the map after a location change; ends early once the marker set
+# is stable
+settle_frames = 30
+# identical reads of the new map required before its markers are drawn; the game has
+# already-collected objects spawned for the first frames
+settle_stable_reads = 3
 
 [zoom]
 # Consecutive still frames after a location change before the zoom comes
