@@ -35,6 +35,7 @@ The code:
                           and the harness that composes them into one chunk
     ingame/potential.py   the battle Potential readout
     ingame/items.py       the markers over the map's collectable objects
+    ingame/squad.py       the squad's Potential, under each level on the squad screen
     ingame/zoom.py        the overworld zoom keys
     ingame/__init__.py    the feature list, and the interface each feature implements
 

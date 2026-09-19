@@ -38,6 +38,18 @@ settle_frames = 30
 # already-collected objects spawned for the first frames
 settle_stable_reads = 3
 
+[squad]
+# draw each squad Coromon's Potential under its level
+enabled = true
+# label font: "level" matches the level numbers, "small" is outline_8   (one of: level, small)
+font = "level"
+# extra pixels between the level number and the Potential under it
+offset_y = 0
+# line up with the level number: "left" starts under its L, "centre" balances on it   (one of: left, centre)
+align = "left"
+# colour the Potential by tier: white standard, green potent, gold perfect
+tier_colours = true
+
 [zoom]
 # Consecutive still frames after a location change before the zoom comes
 # back. The new map is not positioned in one frame, so the zoom is held off
