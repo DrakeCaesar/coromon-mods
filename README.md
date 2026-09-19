@@ -166,6 +166,7 @@ and the overworld zoom, all driven from one settings file.
 | `ingame/zoom.py` | the overworld zoom keys |
 | `coromon_starter.py` | the useful one — read the 3 starter potentials and draw them on screen |
 | `scroll_fix.py` | make the overworld scroll a constant number of pixels per frame |
+| `fps_patch.py` | set the frame rate in the game's own files, and put it back (60/120, or any value with one more patch) |
 | `pad_drive.py` | hold a direction in the game window from outside (test instrument) |
 | `coromon_lua.py` | generic Lua injection bridge (`--eval`, `--file`, or REPL) |
 | `car_extract.py` | Solar2D `resource.car` reader/extractor (`--list`, `--extract`) |
@@ -493,6 +494,52 @@ game-internal "rect mutator" object (it indexes `fillColor` / `anchorX`), not a 
 
 Note the world node must be **re-resolved**, never cached: a cached `tiledWorld` goes
 stale (`.x` becomes nil) when the game rebuilds the map.
+
+### Frame rate (`fps_patch.py`)
+
+Solar2D picks the frame rate **once, at startup**, from the game's `config.lua`:
+`application.content.fps`. It is used for the whole session — `Runtime::BeginRunLoop()` is
+`fTimer->SetInterval(1000 / fFPS)`. Two things follow. It cannot be changed while the game
+runs, and `display.fps` is a **dead knob**: setting it to 120/165/240 from Lua changes
+nothing at all (measured — 60.0 fps, 16.67 ms per frame, every time).
+
+The engine this build ships accepts **exactly two values**. Disassembled at RVA
+`0x183595` of `CoronaLabs.Corona.Native.dll`, right before the `exitOnError` read in
+`Runtime::ReadConfig`:
+
+```asm
+cmp  eax, 0x3c                       ; fps == 60 ?
+je   store
+cmp  eax, 0x78                       ; fps == 120 ?
+jne  skip
+store: mov byte ptr [esi+0x64], al   ; fFPS = fps
+```
+
+Anything else is ignored and `fFPS` keeps its default of **30** — so writing 165 into
+config.lua without patching that check makes the game run at *half* speed. Hence:
+
+```bash
+python tools/fps_patch.py                              # what the files say now
+python tools/fps_patch.py --set 120                    # the one supported step up
+python tools/fps_patch.py --unlock-engine --set 165    # any 1-255, e.g. a 165 Hz panel
+python tools/fps_patch.py --restore                    # back to the shipped 60 / locked
+```
+
+It writes the double next to the `fps` key in the compiled `config.lua` inside
+`resource.car`, and the two bytes of that `jne` in the DLL (`75 03` → `90 90`). Both are
+found by pattern rather than by stored offset, so a game update makes it refuse to write
+instead of writing somewhere wrong; `--restore` always puts back what the game ships. The
+DLL needs the game closed — Windows will not let anything write to a loaded module.
+
+What it does not change: presentation is **vsync-locked**, so the ceiling stays the
+monitor's refresh rate — which is where the odd numbers come from (60 fps at 120 Hz, and
+55 fps at 165 Hz, a 16.67 ms frame landing on the 3rd 6.06 ms vsync). And game **speed** is
+unaffected: durations are absolute milliseconds (a tile crossing is 280 ms at normal speed,
+the same at any frame rate), so extra frames are interpolation, not a faster game. The one
+thing counted in frames is `tiledAnimationProxyBuilder`, which steps animated tiles by
+`display.msPerFrame`; pin it with `display.msPerFrame = 16.6667` if those look too fast.
+The Win32 timer behind all this polls with a 10 ms `SetTimer`, so what you ask for is not
+necessarily what you get — measure it with `perf_probe.py`.
 
 ### Poking around yourself
 
