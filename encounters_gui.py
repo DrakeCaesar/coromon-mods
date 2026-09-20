@@ -29,6 +29,13 @@ The three things worth knowing about the numbers, all of them also in encounters
     not by XP per battle.
 
 Run it with `--selftest` to build the model and print the top ranking without opening a window.
+
+The window has two tabs. "Where to grind" is everything described above. "Skills" is a
+second view over the game's own `skills.json` - all 258 of them, in the columns the wiki's
+skill table uses, with the full description of whichever one is selected underneath. It
+shares nothing with the ranking except the window: it needs no save, no game and no areas
+ticked, so it is there whether or not the left-hand list is set up. The data and the wording
+of every column and description live in `skills.py`, which is also runnable on its own.
 """
 
 import argparse
@@ -47,6 +54,7 @@ except ImportError:                     # the button then explains itself instea
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import encounters  # noqa: E402
+import skills  # noqa: E402
 
 STATE_PATH = os.path.join(
     os.environ.get("APPDATA") or os.path.expanduser("~"), "coromon-grind.json"
@@ -96,6 +104,11 @@ def apply_dark(root):
     style.configure("Vertical.TScrollbar", background=FIELD, troughcolor=BG,
                     bordercolor=BG, arrowcolor=FG)
     style.map("Vertical.TScrollbar", background=[("active", DIM)])
+    style.configure("TNotebook", background=BG, bordercolor=DIM, tabmargins=(2, 4, 2, 0))
+    style.configure("TNotebook.Tab", background=BG, foreground=NOTE, padding=(10, 5),
+                    bordercolor=DIM)
+    style.map("TNotebook.Tab", background=[("selected", FIELD), ("active", DIM)],
+              foreground=[("selected", FG)])
     return style
 
 
@@ -202,10 +215,33 @@ def rank(zones, level, min_share=0.0, only_xp=True):
     return picked
 
 
+def sort_tree_rows(tree, col, desc):
+    """Sort a Treeview by one column, numbers numerically and blanks always at the bottom.
+
+    Both tables here have columns that are numbers for some rows and "-" for others (a status
+    skill has no power, a zone has no "most common" species when the share filter hid them).
+    Sorting those mixed rows as text puts "-" above "95" ascending and above it descending too,
+    so numbers and non-numbers are ranked in two groups and the non-numbers are appended last
+    whichever way round the sort is.
+    """
+    numbers, others = [], []
+    for iid in tree.get_children():
+        value = tree.set(iid, col)
+        try:
+            numbers.append((float(value), iid))
+        except ValueError:
+            others.append((value.lower(), iid))
+    numbers.sort(reverse=desc)
+    others.sort(reverse=desc)
+    for index, (_, iid) in enumerate(numbers + others):
+        tree.move(iid, "", index)
+
+
 class GrindApp:
-    def __init__(self, root, zones, species):
+    def __init__(self, root, zones, species, skill_list):
         self.root = root
         self.species = species
+        self.skills = skill_list
         self.by_map = {}
         for z in zones:
             self.by_map.setdefault(z.map_file, []).append(z)
@@ -221,10 +257,11 @@ class GrindApp:
         self.search = tk.StringVar(value="")
         self.checks = {}
         self.zone_pick = {}
+        self.skill_pick = {}
         self._geom_job = None
         self.geometry = None
 
-        root.title("Coromon - where to grind")
+        root.title("Coromon - grind & skills")
         self.geometry = sanitize_geometry(self.state.get("geometry"), root)
         root.geometry(self.geometry or "1060x640")
         root.minsize(820, 480)
@@ -236,10 +273,21 @@ class GrindApp:
         self.build()
         self.rebuild_list()
         self.refresh()
+        self.refresh_skills()
+        saved_tab = self.state.get("tab")
+        if isinstance(saved_tab, int) and 0 <= saved_tab < len(self.notebook.tabs()):
+            self.notebook.select(saved_tab)
 
     # ---------------------------------------------------------------- widgets
     def build(self):
-        outer = ttk.Frame(self.root, padding=8)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=8, pady=(8, 6))
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
+
+        grind_tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(grind_tab, text="  Where to grind  ")
+
+        outer = ttk.Frame(grind_tab)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=0)
         outer.columnconfigure(1, weight=1)
@@ -333,6 +381,61 @@ class GrindApp:
         )).grid(row=4, column=0, sticky="w", pady=(6, 0))
 
         self.sort_col, self.sort_desc = "explvl", True
+
+        skills_tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(skills_tab, text="  Skills  ")
+        self.build_skills(skills_tab)
+
+    def build_skills(self, tab):
+        """The second tab: every skill in the wiki's columns, with a full description.
+
+        Nothing here reads the save or the tick list - it is the whole skill list all the
+        time, filtered only by what is typed below.
+        """
+        self.skill_search = tk.StringVar(value=str(self.state.get("skill_search", "")))
+        self.skill_type = tk.StringVar(value=str(self.state.get("skill_type", "all")))
+        self.skill_sort = str(self.state.get("skill_sort", "name"))
+        self.skill_desc = bool(self.state.get("skill_desc", False))
+
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        tab.rowconfigure(2, weight=1)
+
+        bar = ttk.Frame(tab)
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Label(bar, text="find").pack(side="left")
+        ttk.Entry(bar, textvariable=self.skill_search, width=26).pack(side="left", padx=(4, 14))
+        self.skill_search.trace_add("write", lambda *_: self.refresh_skills())
+        ttk.Label(bar, text="type").pack(side="left")
+        type_box = ttk.Combobox(
+            bar, textvariable=self.skill_type, width=12, state="readonly",
+            values=["all"] + [skills.type_name(t) for t in skills.types(self.skills)])
+        type_box.pack(side="left", padx=4)
+        type_box.bind("<<ComboboxSelected>>", lambda e: self.refresh_skills())
+        self.skill_count = ttk.Label(bar, text="")
+        self.skill_count.pack(side="right")
+
+        cols = tuple(key for key, _, _, _ in skills.COLUMNS)
+        self.skill_tree = ttk.Treeview(tab, columns=cols, show="headings", height=13)
+        for key, heading, width, anchor in skills.COLUMNS:
+            self.skill_tree.heading(key, text=heading, command=lambda c=key: self.sort_skills(c))
+            self.skill_tree.column(key, width=width, anchor=anchor, stretch=False)
+        self.skill_tree.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        scroll = ttk.Scrollbar(tab, orient="vertical", command=self.skill_tree.yview)
+        self.skill_tree.configure(yscrollcommand=scroll.set)
+        scroll.grid(row=1, column=1, sticky="ns", pady=(6, 0))
+        self.skill_tree.bind("<<TreeviewSelect>>", lambda e: self.show_skill())
+
+        detail = ttk.LabelFrame(tab, text="the selected skill", padding=6)
+        detail.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        self.skill_detail = tk.Text(detail, height=9, wrap="word", font=("Consolas", 9),
+                                    bd=0, highlightthickness=0, background=FIELD, foreground=FG,
+                                    insertbackground=FG, selectbackground=ACCENT)
+        self.skill_detail.pack(fill="both", expand=True)
+        self.skill_detail.configure(state="disabled")
+
+    def on_tab_changed(self, event=None):
+        self.persist()
 
     def on_configure(self, event=None):
         if self._geom_job is not None:
@@ -496,18 +599,7 @@ class GrindApp:
         self.sort_tree()
 
     def sort_tree(self):
-        rows = [(self.tree.set(i, self.sort_col), i) for i in self.tree.get_children()]
-
-        def key(item):
-            text = item[0]
-            try:
-                return (0, float(text))
-            except ValueError:
-                return (1, text.lower())
-
-        rows.sort(key=key, reverse=self.sort_desc)
-        for index, (_, iid) in enumerate(rows):
-            self.tree.move(iid, "", index)
+        sort_tree_rows(self.tree, self.sort_col, self.sort_desc)
 
     def show_detail(self):
         sel = self.tree.selection()
@@ -524,6 +616,43 @@ class GrindApp:
                     r["name"], r["min"], r["max"], r["share"], tag))
         self.detail.configure(state="disabled")
 
+    # ---------------------------------------------------------------- skills tab
+    def refresh_skills(self):
+        picked = skills.shown(self.skills, self.skill_type.get(), self.skill_search.get())
+        self.skill_pick = {}
+        self.skill_tree.delete(*self.skill_tree.get_children())
+        for skill in picked:
+            cells = skills.row(skill)
+            iid = self.skill_tree.insert(
+                "", "end", values=tuple(cells[key] for key, _, _, _ in skills.COLUMNS))
+            self.skill_pick[iid] = skill
+        sort_tree_rows(self.skill_tree, self.skill_sort, self.skill_desc)
+        self.skill_count.configure(text="%d of %d skills" % (len(picked), len(self.skills)))
+        children = self.skill_tree.get_children()
+        if children:
+            self.skill_tree.selection_set(children[0])
+        else:
+            self.show_skill()
+        self.persist()
+
+    def sort_skills(self, col):
+        if col == self.skill_sort:
+            self.skill_desc = not self.skill_desc
+        else:
+            # highest first for the three numeric columns, A-Z for the rest
+            self.skill_sort, self.skill_desc = col, col in ("sp", "power", "acc")
+        sort_tree_rows(self.skill_tree, self.skill_sort, self.skill_desc)
+        self.persist()
+
+    def show_skill(self):
+        sel = self.skill_tree.selection()
+        skill = self.skill_pick.get(sel[0]) if sel else None
+        self.skill_detail.configure(state="normal")
+        self.skill_detail.delete("1.0", "end")
+        if skill is not None:
+            self.skill_detail.insert("end", skills.describe(skill))
+        self.skill_detail.configure(state="disabled")
+
     def persist(self):
         # a half-typed spinbox must not be able to raise out of a UI callback
         try:
@@ -534,6 +663,11 @@ class GrindApp:
                 "only_xp": self.only_xp.get(),
                 "on_top": self.on_top.get(),
                 "geometry": self.geometry,
+                "tab": self.notebook.index("current"),
+                "skill_search": self.skill_search.get(),
+                "skill_type": self.skill_type.get(),
+                "skill_sort": self.skill_sort,
+                "skill_desc": self.skill_desc,
             }
             if not self.geometry:
                 # persist() also runs during start-up, before the window has a position;
@@ -548,6 +682,11 @@ def selftest():
     zones, species = encounters.load()
     zs = encounters.all_zones(zones, species)
     print("zones:", len(zs), "species:", len(species))
+    skill_list = skills.load()
+    print("skills:", len(skill_list), "in", len(skills.types(skill_list)), "types")
+    for skill in skills.shown(skill_list, "poison")[:2]:
+        print("  ", "  ".join("%s=%s" % (k, v) for k, v in skills.row(skill).items()))
+        print("    ", skills.resolve(skill.get("description"), skill))
     print("state file:", STATE_PATH, "(exists)" if os.path.exists(STATE_PATH) else "(not yet)")
     for z in rank(zs, 64, only_xp=True)[:6]:
         rows = zone_rows(z)
@@ -568,7 +707,7 @@ def main(argv=None):
     zones, species = encounters.load()
     root = tk.Tk()
     apply_dark(root)
-    GrindApp(root, encounters.all_zones(zones, species), species)
+    GrindApp(root, encounters.all_zones(zones, species), species, skills.load())
     root.mainloop()
     return 0
 
