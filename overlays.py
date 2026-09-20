@@ -39,6 +39,7 @@ The code:
     ingame/steptimer.py   the Potentiflator / Traitformator step countdown
     ingame/zoom.py        the overworld zoom keys
     ingame/sprint.py      the run button as a toggle, not something to hold
+    ingame/cooldowns.py   the m:ss countdown under each temporary effect's bar
     ingame/__init__.py    the feature list, and the interface each feature implements
 
 `core` knows nothing about what the features are - it asks each module for its settings, its

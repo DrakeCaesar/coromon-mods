@@ -129,3 +129,16 @@ keep_right_edge = true
 # holding it no longer runs through lines - a press still finishes the line being typed, and the
 # next press moves on
 enabled = true
+
+[cooldowns]
+# show a m:ss countdown under each running temporary effect's icon in the quick-item row
+enabled = true
+# label font: outline_8 is the game's small font, outline_10_bold the larger one   (one of:
+# outline_8, outline_10_bold)
+font = "outline_8"
+# where to put the countdown against the icon's bottom edge, in content units. 0 sits it flush
+# under the icon and a negative number lifts it up into the icon
+offset_y = -2
+# how far down the screen, in content units, the markers are looked for. The quick-item row is
+# in the top strip; narrow this if a marker somewhere it should not be is picked up
+strip = 60
