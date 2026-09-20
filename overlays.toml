@@ -101,3 +101,23 @@ enabled = true
 key = ["buttonB"]
 # start in mode 2 (run by default) rather than the game's own mode 1
 start_running = false
+
+[gold]
+# show the real gold total instead of the game's 9,999,999 cap, in the top bar, the dialogs and
+# the Rogue readout
+enabled = true
+# also correct the two top-bar labels, which clamp a second time where they draw and so ignore the
+# uncapped getter. Turn this off to leave the game's counter untouched and only fix the dialogs
+# and the Rogue readout
+fix_counter = true
+# thousands separator for the counter. "space" (the default, 17 597 722) won on sight over
+# "apostrophe" (17'597'722). Also: "period", "comma", "none". Anything else is used literally -
+# but it must be a character the font actually has: U+00A0 renders as an error glyph and makes the
+# counter blink, because the text object stores something other than what was written. The
+# grouping has to be drawn by us - the game formats its counter as %07d
+separator = "space"
+# hold the counter's gap after it at the size the game's layout intended, by moving the number AND
+# the coin icon beside it left by however much the grouping widened the number. Moving only the
+# number would clip into the coin, so both move and neither gap changes size. Off leaves both
+# where the game put them and lets the gap after the number shrink
+keep_right_edge = true
