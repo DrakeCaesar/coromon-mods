@@ -2,18 +2,21 @@
 
 Stuff that did not work, kept because restarting it would be expensive.
 
-## `quick_reload.py` — abandoned 2026-09-20
+## `quick_reload.py` — the teardown works, the load is abandoned (2026-09-20)
 
 Put a save back the way it was, without relaunching the game, so the Potentiflator could be
 re-rolled quickly: hand a Coromon over, read the potential, and if it is not 21 press a button and
 be back in front of the NPC again.
 
-Run it from anywhere; it imports `scroll_fix` from the folder above.
+**STATUS: `--teardown` (back to the main menu) is VERIFIED WORKING. `--reload` is abandoned.** The
+load is the half that crashed the game twice; the teardown is now the game's own quit sequence and
+it lands cleanly.
 
 ```
 python abandoned/quick_reload.py --state      read-only, safe
-python abandoned/quick_reload.py --teardown   destroys the current game world, safe-ish
+python abandoned/quick_reload.py --teardown   run the game's own quit sequence: back to the main menu
 python abandoned/quick_reload.py --reload     teardown + load, HAS CRASHED THE GAME TWICE
+python abandoned/quick_reload.py --arm        capture a real load's arguments (for the load half)
 ```
 
 ### Why it was abandoned
@@ -97,22 +100,71 @@ two poll timers, two `loadGame`. Fixed with a run-id guard so a resend returns t
 instead of acting again, plus a `stopped` flag so a `timer:cancel()` that does not take cannot let
 the poll loop continue past the load.
 
-### The one thing left unverified
+### The question that exposed a bug: "could we just run the correct methods to get to the main menu?"
 
-**Whether the teardown works when it runs once.** The last run's diagnostics were polluted by the
-double-execution, so it is genuinely unknown. Everything else has been measured.
+**There is no such method.** Checked across every shipped module: the only quit-named method anywhere
+is `playerStateHelper.quitCurrentGame`, and it does **not** go to the menu — it destroys the player
+modules and clears the selected slot. The rest of the sequence exists only inline inside two UI
+button handlers (the top-bar Quit button, the battle-lost overlay), so it has to be transcribed.
+What *is* callable is its last step: `titleScreen:new()` (`titleScreen.lu`, child 2 of 3, lines
+21-544, no arguments).
+
+And asking the question found the bug. An earlier version of the teardown **left `titleScreen:new()`
+and `Achievement:resetPercentageOfMaxProgressCache()` out**, on the reasoning that they only put a
+screen on the display that a load is about to replace. That was wrong: they are what returns the game
+to the **main menu**, and the main menu is the state a load is done from. Stopping before them left
+the game with no world *and* no screen — one call short of what the game actually does. That is a
+strong candidate for the reported symptom, "it did not teardown the save, and after a few seconds
+the game froze".
+
+### The teardown: VERIFIED
 
 ```
-1. start the game, load your save          (so you are in game)
-2. python abandoned/quick_reload.py --state      expect isCreated() = true
-3. python abandoned/quick_reload.py --teardown   watch the screen
-4. python abandoned/quick_reload.py --state      expect isCreated() = false
+before   isCreated() = true    getSelectedSaveslotIndex() = 2
+--teardown   -> "teardown finished, step = at the main menu"
+after    isCreated() = false   getSelectedSaveslotIndex() = nil
 ```
 
-If step 4 says `false`, the teardown is sound and `--arm` + one menu load + `--reload` is worth one
-careful try. If it says `true`, `destroyInstance` never ran and building a world on top will keep
-producing the two-worlds freeze — in that case stop hand-rolling the teardown and drive the game's
-own pause-menu quit, then load from the title screen, which is the order the game itself uses.
+The slot index going `2 -> nil` is exactly what `quitCurrentGame` does, and the screen returns to a
+working main menu. One command replaces quit-to-title plus the slot navigation, even with no
+automated load — so the tedious half of the Potentiflator loop is already gone.
+
+Also found by running it repeatedly: it is **not** idempotent by nature, because every run calls
+`titleScreen:new()`, so three runs from the menu stack three title screens. `--teardown` now checks
+`isCreated()` first and reports "nothing to tear down: the world is already gone" if so.
+
+### The handle an automated load needs
+
+`titleScreen:new()` takes `(self, ...)` and returns a value (`RETURN A=3` at L543) — almost certainly
+the group the screen is built into, which is the `parentGroup` the title screen's own load routine
+later does `display.remove(parentGroup)` on. That was previously written off here as an unreachable
+closure upvalue; it is not, we can just keep what `new` returns. The teardown now stores it in
+`_G.__qrTitleGroup`, and `--state` reports its type, `numChildren`, `removeSelf`, `isVisible` and
+`localToContent` so it can be confirmed as a real display object before anything is built on it.
+
+### What an automated load would still need
+
+Reproduce the title screen's own load routine (`titleScreen.lu` lines 386-436) after the teardown:
+`timer.cancel('titleScreen')`, `display.remove(<the kept group>)`, `pauseMenu:forceDestroyIfCreated()`,
+`inputHelper:decreaseInputLevel()`, `inputHelper:setKeyEventShouldDetectUnknownGamepads(false)`, then
+`loadGame(data, cluster, manualVersionId, autoVersionId, transition, callback)` with the captured
+arguments — and preferably the captured `_onWorldLoaded` rather than `nil`.
+
+`_onWorldLoaded` is reachable the same way the group is, in principle: the title screen's load
+routine is our caller, and `debug.getupvalue(debug.getinfo(2, 'f').func, i)` enumerates
+`parentGroup, _saveslotData, _saveslotIndex, _saveslotCluster, _onWorldLoaded` on it. That is the
+clean way to capture the whole set from one real menu load.
+
+Only worth attempting now that the teardown lands on a real main menu, and it is still the call that
+crashed twice.
+
+### The next unknown for an automated load
+
+Tearing the **title screen** back down. Its own load routine does `timer.cancel('titleScreen')`,
+`display.remove(parentGroup)`, `pauseMenu:forceDestroyIfCreated()`,
+`inputHelper:decreaseInputLevel()` and `inputHelper:setKeyEventShouldDetectUnknownGamepads(false)`
+before calling `loadGame` — and `parentGroup` is an upvalue of that closure, which we have no handle
+on. Worth solving only after the main-menu milestone works.
 
 ### Also worth knowing before resuming
 

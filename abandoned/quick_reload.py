@@ -17,8 +17,8 @@ BEFORE the handover, and that is what `--save` takes and `--restore` puts back.
     python quick_reload.py --restore    to go back to that moment
     python quick_reload.py --arm        put a pass-through hook on the game's own load
     python quick_reload.py --state      read-only look at what the reload sees
-    python quick_reload.py --teardown   the teardown half, on its own
-    python quick_reload.py --reload     tear the game down, then load the captured save
+    python quick_reload.py --teardown   run the game's own quit sequence: back to the main menu
+    python quick_reload.py --reload     the teardown, then load the captured save
     python quick_reload.py --disarm     take the hook back off
     python quick_reload.py --block      hold off saving, if the handover is writing to the slot
 
@@ -103,10 +103,22 @@ load is called as the game's debug helper calls it (debug_load_saveslot, line 51
 `'instant'` and no completion callback. The title screen passes `function() _onWorldLoaded() end`,
 a closure into a screen that no longer exists by then, and the debug helper proves it is optional.
 
-Not reproduced, deliberately: `titleScreen:new()` and `Achievement:resetPercentageOfMaxProgress-
-Cache()`, both of which exist to put a title screen on the display that the load is about to
-replace, and `gameSettings:saveSettings()` from the title screen's load routine, which writes to
-disk and has no part in loading.
+`titleScreen:new()` and `Achievement:resetPercentageOfMaxProgressCache()` WERE left out of the
+teardown at first, on the reasoning that they only put a screen on the display that a load is about
+to replace. That reasoning was wrong, and it is the most likely reason the teardown appeared to do
+nothing: they are what returns the game to the MAIN MENU, and the main menu is the state a load is
+actually done from. Stopping before them left the game with no world and no screen.
+
+THERE IS NO REUSABLE "GO TO THE MAIN MENU" METHOD, which is worth knowing before looking for one.
+Checked across every shipped module: the only quit-named method anywhere is
+`playerStateHelper.quitCurrentGame`, and it does not go to the menu - it destroys the player modules
+and clears the selected slot. The rest of the sequence exists only inline inside two UI button
+handlers (the top-bar Quit button and the battle-lost overlay), so it has to be transcribed. What IS
+callable is its last step: `titleScreen:new()` (titleScreen.lu, child 2 of 3, lines 21-544, no
+arguments).
+
+`gameSettings:saveSettings()` from the title screen's own load routine is the one thing still not
+reproduced - it writes to disk and has no part in loading.
 
 THE TEARDOWN IS ASYNCHRONOUS, which is what the first attempt at this got wrong. `worldHelper`'s
 `destroy` (worldHelper.lua lines 223-253) does its visible work and then ends with
@@ -398,7 +410,25 @@ else
 end
 _G.__qrStep = 'playerStateHelper:quitCurrentGame'
 ps:quitCurrentGame()
-_G.__qrStep = 'torn down'
+
+-- The two calls an earlier version of this script left out, on the grounds that they only put a
+-- screen on the display that a load is about to replace. That was wrong: they are what returns the
+-- game to the MAIN MENU, and the main menu is the state a load is done from. Stopping before them
+-- left the game with no world AND no screen, one call short of the thing the game actually does.
+if type(_G.Achievement) == 'table' and
+   _G.Achievement.resetPercentageOfMaxProgressCache ~= nil then
+  _G.__qrStep = 'Achievement:resetPercentageOfMaxProgressCache'
+  _G.Achievement:resetPercentageOfMaxProgressCache()
+end
+if type(_G.titleScreen) ~= 'table' or _G.titleScreen.new == nil then
+  return _G.__qrStep .. '; but titleScreen:new is not there, so the game was left with no screen'
+end
+_G.__qrStep = 'titleScreen:new'
+-- keep what it returns. It is very likely the group this screen is built into, and that group is
+-- the `parentGroup` the title screen's own load routine later does `display.remove(...)` on - the
+-- handle an automated load needs and which is otherwise an unreachable closure upvalue.
+_G.__qrTitleGroup = _G.titleScreen:new()
+_G.__qrStep = 'at the main menu'
 '''
 
 
@@ -425,13 +455,29 @@ def run_guard(run_id):
     )
 
 
-def do_teardown():
-    """Only the first half, so it can be watched on its own.
+# Only for --teardown. Running it from the main menu is not harmless: every run calls
+# `titleScreen:new()`, so three runs stack three title screens. If the world is already gone there is
+# nothing to tear down, so say so instead.
+TEARDOWN_GUARD = r'''
+if type(_G.worldHelper) == 'table' and type(_G.worldHelper.isCreated) == 'function' then
+  local okw, created = pcall(function() return _G.worldHelper:isCreated() end)
+  if okw and created == false then
+    _G.__qrStep = 'nothing to tear down: the world is already gone'
+    _G.__qrReport = _G.__qrStep
+    return _G.__qrReport
+  end
+end
+'''
 
-    Worth having separately: the teardown is the part that has never been seen to work, and if the
-    game objects to it there is no reason to be firing a load into the middle of it as well.
+
+def do_teardown():
+    """The game's own quit sequence, stopping at the main menu.
+
+    Worth having on its own: "press a button and be back at the main menu" is a result in itself,
+    it is the sequence the game runs when the Quit button is pressed, and it is the state a load
+    is done from - so it is the right thing to get working before any load is attempted.
     """
-    code = run_guard("teardown-%s" % time.time()) + TEARDOWN + r'''
+    code = run_guard("teardown-%s" % time.time()) + TEARDOWN_GUARD + TEARDOWN + r'''
 _G.__qrReport = 'teardown finished, step = ' .. tostring(_G.__qrStep)
 return _G.__qrReport
 '''
@@ -590,6 +636,17 @@ if type(ps) == 'table' then
 end
 
 add('args captured', type(_G.__qrArgs) == 'table')
+local tg = _G.__qrTitleGroup
+if tg ~= nil then
+  -- is the thing titleScreen:new() returns actually usable as the screen's group?
+  add('title group from new()', type(tg))
+  if type(tg) == 'table' then
+    add('  numChildren', tg.numChildren)
+    add('  removeSelf', type(tg.removeSelf))
+    add('  isVisible', tg.isVisible)
+    add('  localToContent', type(tg.localToContent))
+  end
+end
 add('last run id', _G.__qrRan)
 add('last step', _G.__qrStep)
 add('last result', _G.__qrDone)
@@ -664,7 +721,7 @@ def main():
                       help="tear the current game down the way the Quit button does, then load "
                            "the save captured while armed")
     what.add_argument("--teardown", action="store_true",
-                      help="only the teardown half of --reload, so it can be watched on its own")
+                      help="run the game's own quit sequence and stop at the main menu")
     what.add_argument("--state", action="store_true",
                       help="read-only: what the reload sees right now, changing nothing")
     what.add_argument("--disarm", action="store_true",
