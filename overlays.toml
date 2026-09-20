@@ -92,13 +92,12 @@ ready_text = "ready"
 show_potential = true
 
 [sprint]
-# add a button that latches running on and off
+# add a button that swaps the two running modes
 enabled = true
-# what latches running. `buttonB` is the controller's B; `buttonA` and `button9` and friends are
-# the others, and a keyboard key is named by the character it produces (`a`, `space`, `up`). Add
-# more entries to have more than one; names are matched case-insensitively. Deliberately NOT the
-# run button - that one is also interact, and latching a button you are meant to hold fights the
-# game
+# what swaps them. `buttonB` is the controller's B; `buttonA`, `button9` and friends are the
+# others, and a keyboard key is named by the character it produces (`a`, `space`, `up`). Add more
+# entries to have more than one; names are matched case-insensitively. Deliberately NOT the run
+# button - that one is also interact, and it is meant to be held
 key = ["buttonB"]
-# start out latched on (running) rather than handing control to the game
-start_sprinting = false
+# start in mode 2 (run by default) rather than the game's own mode 1
+start_running = false
