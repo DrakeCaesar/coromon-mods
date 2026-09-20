@@ -44,6 +44,23 @@ game's two fonts only outline_10_bold reproduces that exactly (outline_8 gives 1
 same font is used here: the number reads as part of the row rather than as something bolted
 on. `offset_y` is the gap below the level number.
 
+The STATUS-EFFECT icon is moved out of the label's way. The game builds a 12x12 container for
+it and magnets it to the bottom-left of the coloured-monster-types container, which on this
+card is directly under the level number - i.e. exactly where the Potential goes. Measured on a
+live row: the level label sits at x -23..-3, y -69..-61; the Potential label at x -23..-4,
+y -61..-53; the condition container at x -25..-13, y -57..-45, overlapping the Potential label
+over a 10x4 region. Mirroring the container's x about the card's centreline (x = 0 on every
+row - the sprite, the top bar and the name label are all centred there) puts it at x 13..25,
+clear of the label and 1 unit inside the type badge's right edge (26). Its y is left alone, so
+it stays directly under the top row. This has no setting of its own: the icon is only in the way
+because the label is there, so it moves with the same `enabled` toggle that draws the label -
+turning the feature off puts the icon back where the game had it.
+
+The mirrored value is computed ONCE per row, then held every tick. Computing it from the
+container's current x each time would read back the value we just wrote and flip the icon
+between the two sides; holding it also means the game re-running its magnet on a reflow cannot
+undo the move. `kill()` hands the icon back by negating the held value.
+
 Nothing here is specific to a squad *size*: the rows are whatever is on screen. Whether the
 box screen uses the same row class has NOT been checked, so nothing is claimed about it.
 """
@@ -175,6 +192,7 @@ do
 
   local f = makeFeature('squad', 250)
   f.rows = {}      -- row container -> { text = the label drawn in it }
+  f.conds = {}     -- row container -> { x, y } the status-effect icon is held at
   f.count = 0
 
   -- The level label inside one row, in the row's OWN coordinates. Only that row's subtree is
@@ -203,6 +221,32 @@ do
     end
     pcall(scan, row, false)
     return found
+  end
+
+  -- The game's status-effect icon container: a square 12x12 child of the row. Measured, it is
+  -- the only square 12-unit node on the card - the other 12-tall node is the 52x12 top bar.
+  local function conditionIcon(row)
+    for i = 1, (row.numChildren or 0) do
+      local c = row[i]
+      if type(c) == 'table' and c.width == 12 and c.height == 12 then return c end
+    end
+  end
+
+  -- Mirror that icon to the right-hand side, out from under the Potential label. The game
+  -- anchors it to the bottom-left of the type badge - i.e. under the level number - and the
+  -- two boxes overlap: measured, the icon sat at x -25..-13 against the label's x -23..-4.
+  -- The target is computed the FIRST time a row is seen and then held, because reading the
+  -- container's x back on a later tick would return the mirrored value and flip it back.
+  local function condition(row)
+    local icon = conditionIcon(row)
+    if not icon then return end
+    local rec = f.conds[row]
+    if type(rec) ~= 'table' then
+      rec = { x = -(tonumber(icon.x) or 0), y = tonumber(icon.y) or 0 }
+      f.conds[row] = rec
+    end
+    if icon.x ~= rec.x then icon.x = rec.x end
+    if icon.y ~= rec.y then icon.y = rec.y end
   end
 
   local function attach(row)
@@ -240,6 +284,7 @@ do
     local col = COL[cat] or COL.A
     if not TIER then col = COL.A end
     pcall(function() rec.text:setFillColor(col[1], col[2], col[3]) end)
+    condition(row)
   end
 
   -- Rows are caught by the class hook rather than looked for. Wrapping once and looking the
@@ -278,6 +323,7 @@ do
     for row in pairs(f.rows) do
       if type(row) ~= 'table' or row.parent == nil then
         f.rows[row] = nil      -- the screen went: the label was a child of the row, so it went too
+        f.conds[row] = nil
       else
         attach(row)
         n = n + 1
@@ -292,7 +338,14 @@ do
         pcall(function() rec.text:removeSelf() end)
       end
     end
-    f.rows, f.count = {}, 0
+    -- Hand the status-effect icon back to the game: the mirrored value, negated, is its own.
+    for row, rec in pairs(f.conds) do
+      if type(row) == 'table' and row.parent ~= nil then
+        local icon = conditionIcon(row)
+        if icon then pcall(function() icon.x = -rec.x icon.y = rec.y end) end
+      end
+    end
+    f.rows, f.conds, f.count = {}, {}, 0
   end
 
   hookRows()
