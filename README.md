@@ -164,6 +164,7 @@ and the overworld zoom, all driven from one settings file.
 | `ingame/potential.py` | the battle Potential readout |
 | `ingame/items.py` | the markers over the map's collectable objects |
 | `ingame/zoom.py` | the overworld zoom keys |
+| `ingame/fog.py` | switch off the darkness/fog effect on the maps that draw it |
 | `coromon_starter.py` | the useful one — read the 3 starter potentials and draw them on screen |
 | `scroll_fix.py` | make the overworld scroll a constant number of pixels per frame |
 | `fps_patch.py` | set the frame rate in the game's own files, and put it back (60/120, or any value with one more patch) |

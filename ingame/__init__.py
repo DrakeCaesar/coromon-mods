@@ -29,6 +29,7 @@ from . import (
     cooldowns,
     core,
     dialog,
+    fog,
     gold,
     items,
     potential,
@@ -39,13 +40,14 @@ from . import (
 )
 
 # Order is only the order their lines appear in the installer's output.
-FEATURES = [potential, items, squad, steptimer, zoom, sprint, gold, dialog, cooldowns]
+FEATURES = [potential, items, squad, steptimer, zoom, sprint, gold, dialog, cooldowns, fog]
 
 __all__ = [
     "config",
     "cooldowns",
     "core",
     "dialog",
+    "fog",
     "gold",
     "items",
     "potential",
