@@ -30,12 +30,22 @@ effect's remaining/max against the marker's own scale. Both are the game's, and 
 four decimal places when checked (0.2944 against 0.2944), so the pairing cannot drift. An
 effect matching no marker gets no label, because there is nowhere to put it.
 
-WHERE THE LABEL GOES. Centred on the ICON and tucked under it, from the slot's own
-contentBounds - measured on a live row: x 437..459 and y 5..27 for a 22-unit slot, whose centre
-x of 448 is where both its icon children are centred. Not from the marker, whose centre MOVES:
-it shortens from the right with its left edge pinned, so its middle walks left as the effect
-runs, and centring on that is what left the number in the icon's bottom-left corner. A slot does
-not move. `offset_y` shifts the label up or down from the icon's bottom edge.
+WHERE THE LABEL GOES. Centred on the icon and tucked under it. `x` is 0 in the slot's own
+space, because the slot's origin is where its icons are centred. `y` is measured from the
+bottom edge of the largest child that is NOT the marker - the 22-unit frame the user sees -
+and `offset_y` shifts it from there. Measured on a live row: that frame's box is x 437..459 and
+y 5..27, so offset_y -2 puts the label's top at y 25.
+
+IT IS A CHILD OF THE SLOT, not a stage overlay, and that is the point. The game hides the whole
+row by hiding a container, and a stage-level label survives that for one frame - long enough for
+the pause menu to capture the screen, blur it, and bake the countdown into the backdrop.
+Measured: with the row hidden, the live label was already gone from the stage and the blurred
+image still had it, while the icon was missing from both. A child cannot lose that race - it
+stops being drawn the instant its ancestor does.
+
+The slot is the node used because it is the one that takes children. The icon itself is a plain
+image with no `insert`, and asking it to hold a child throws inside the game's own text helper
+(groupHelper.lua:11 - measured, not assumed).
 
 WHAT THE MARKER IS FOR, AND WHAT IT IS NOT. It is how a timed slot is NOTICED, and that is all:
 the slot carries no reference to the item it holds, so nothing else says which icon has an
@@ -206,36 +216,49 @@ local function cdEffects(settings)
   return out
 end
 
--- Where to put the label: centred on the icon, tucked under it, in content units.
+-- What to hang the label from: the slot, if it takes children at all.
 --
--- From the slot's own contentBounds. Two reasons it is not taken from the marker: the marker's
--- centre MOVES - it shortens from the right with its left edge pinned, so its middle walks left
--- as the effect runs, and centring on that is what left the number in the icon's bottom-left
--- corner - and contentBounds is a BOX, which is the one thing here needing no per-class rule.
--- localToContent(0, 0) means something different on each class in this build - measured: the
--- top left of the text box on a text object, the centre on a plain rect, the object's own
--- origin on a group - and none of those is a box.
+-- It has to be a CHILD of the row, not a stage overlay, because the game hides the row by
+-- hiding a container. A stage-level label survives that for one frame, and one frame is all the
+-- pause menu needs: measured, with the row hidden the live label was already gone from the stage
+-- while the menu's blurred backdrop still had it - the screen is captured after the row is
+-- hidden and before the next pass here. A child cannot lose that race.
 --
--- Measured on a live row: the slot's bounds are x 437..459 and y 5..27, and its centre x of 448
--- is where both its icon children - 22x22 and 16x16, each anchored 0.5 at x 0 - are centred.
-local function cdUnder(marker, slot)
-  if type(slot) == 'table' then
-    local ok, cb = pcall(function() return slot.contentBounds end)
-    if ok and type(cb) == 'table' and type(cb.xMin) == 'number'
-       and type(cb.xMax) == 'number' and type(cb.yMax) == 'number' then
-      local cx = (cb.xMin + cb.xMax) / 2
-      -- sanity bound: a wild coordinate is not a layout, so fall through rather than draw
-      -- something somewhere else entirely
-      if cx > -1000 and cx < 1000 then return cx, cb.yMax end
+-- The slot rather than the icon, because the icon is a plain image with no insert - handing it
+-- to the game's text helper throws (groupHelper.lua:11, measured). The slot is a group, and as
+-- the marker's parent it is inside the row's subtree, so it disappears with the rest of it.
+local function cdAttach(slot)
+  if type(slot) ~= 'table' or type(slot.insert) ~= 'function' then return nil end
+  return slot
+end
+
+-- Where in the slot's space: centred, and offset_y from the icon's bottom edge.
+--
+-- The icon box comes from the largest child that is not the marker, and NOT from the slot
+-- itself: our own label now lives inside the slot, and a group's contentBounds includes its
+-- children, so reading the slot's box would feed the label's position back into itself and walk
+-- it down the screen a little every frame. Labels are skipped for the same reason.
+--
+-- Measured on a live row: that frame is 22 units wide with its box at x 437..459, y 5..27, and
+-- the slot's origin (448, 16) is where both its icons are centred - so x 0 in this space is the
+-- icon's centre, and offset_y -2 lands the label's top on y 25.
+local function cdPlace(slot, marker, offset)
+  local oks, _, sy = pcall(function() return slot:localToContent(0, 0) end)
+  if not oks or type(sy) ~= 'number' then return nil end
+  local widest, bottom = -1, nil
+  for i = 1, (slot.numChildren or 0) do
+    local c = slot[i]
+    if type(c) == 'table' and c ~= marker and not c.__hudCdLabel then
+      local okb, cb = pcall(function() return c.contentBounds end)
+      if okb and type(cb) == 'table' and type(cb.xMin) == 'number'
+         and type(cb.xMax) == 'number' and type(cb.yMax) == 'number' then
+        local w = cb.xMax - cb.xMin
+        if w > widest then widest, bottom = w, cb.yMax end
+      end
     end
   end
-  -- no box to read (the row is not built the way it was measured): the marker's own box at
-  -- least keeps the label on the right slot
-  local okm, mb = pcall(function() return marker.contentBounds end)
-  if okm and type(mb) == 'table' and type(mb.xMin) == 'number'
-     and type(mb.xMax) == 'number' and type(mb.yMax) == 'number' then
-    return (mb.xMin + mb.xMax) / 2, mb.yMax
-  end
+  if bottom == nil then return nil end
+  return 0, (bottom + offset) - sy
 end
 
 -- Seconds as m:ss. Rounded up rather than down: this counts time still to run, so the last
@@ -256,8 +279,7 @@ def section(cfg):
         r"""
 do
   local f = makeFeature('cooldowns', 0)   -- every frame, so an enterFrame listener, not a slot
-  f.group = nil
-  f.labels = {}
+  f.labels = {}                           -- slot -> the label hanging inside that slot
   f.entries = {}
 
   local FONT = __FONT__
@@ -275,14 +297,11 @@ do
     return f.settings
   end
 
-  -- Take every label down. Nothing is ever written onto the game's own objects, so there is
-  -- nothing to put back.
+  -- Take every label down. They live inside the game's own slot nodes rather than in a group of
+  -- ours, so each is removed where it is; nothing else was ever written onto those nodes.
   local function clear()
-    if f.group then
-      for _, t in pairs(f.labels or {}) do pcall(function() t:removeSelf() end) end
-    end
-    drop(f.group)
-    f.group, f.labels = nil, {}
+    for _, t in pairs(f.labels or {}) do pcall(function() t:removeSelf() end) end
+    f.labels = {}
     f.entries, f.settings = {}, nil
   end
 
@@ -293,12 +312,6 @@ do
     local entries, seen, used = {}, {}, {}
     f.passes = (f.passes or 0) + 1
     f.markers = #markers
-
-    if not f.group then
-      local g = display.newGroup()
-      pcall(function() g.name = 'cooldowns' end)
-      f.group, f.labels = g, {}
-    end
 
     for i = 1, #markers do
       local marker = markers[i]
@@ -318,25 +331,33 @@ do
           end
         end
         local left = best and best.e.left or nil
-        if left and left > 0.5 then
+        local parent = cdAttach(slot)
+        if left and left > 0.5 and parent then
           used[best.k] = true
           local want = cdFormat(left)
+          local t = f.labels[slot]
+          if t and t.parent ~= parent then
+            -- the row was rebuilt under us and the old label went with the old node
+            pcall(function() t:removeSelf() end)
+            t = nil
+          end
+          if not t then
+            t = text(parent, FONT, want, 0, 0)
+            t.__hudCdLabel = true       -- so the icon search never mistakes it for the icon
+            f.labels[slot] = t
+          end
           seen[slot] = true
           entries[#entries + 1] = { left = left, uid = best.e.uid }
-          local t = f.labels[slot]
-          if not t then
-            t = text(f.group, FONT, want, 0, 0)
-            f.labels[slot] = t
-          elseif t.__hudCd ~= want then
+          if t.__hudCd ~= want then
             -- setting .text rebuilds the glyph sprites, so only when it changed
             pcall(function() t.text = want end)
           end
           t.__hudCd = want
-          local cx, bottom = cdUnder(marker, slot)
-          if cx then
+          local px, py = cdPlace(slot, marker, OFFSET)
+          if px then
             pcall(function()
               t.anchorX, t.anchorY = 0.5, 0
-              t.x, t.y = cx, bottom + OFFSET
+              t.x, t.y = px, py
             end)
           end
           pcall(function() t:setFillColor(WHITE[1], WHITE[2], WHITE[3]) end)
@@ -354,13 +375,6 @@ do
 
     f.entries = entries
     f.effects = #effects
-    if #entries == 0 then
-      -- nothing counting down: take the group down rather than leave it on the stage
-      drop(f.group)
-      f.group = nil
-    else
-      keepOnTop(f.group)
-    end
   end
 
   -- Every frame: the effect is read and the label placed on the frame the game changes it, with
@@ -462,12 +476,12 @@ def report(cfg):
     end
     out[#out + 1] = line
     if type(slot) == 'table' then
-      local okb, cb = pcall(function() return slot.contentBounds end)
-      if okb and type(cb) == 'table' then
-        out[#out + 1] = string.format(
-          '             icon box x [%.1f..%.1f] y [%.1f..%.1f]  -> label at x %.1f, y %.1f',
-          cb.xMin, cb.xMax, cb.yMin, cb.yMax, (cb.xMin + cb.xMax) / 2, cb.yMax + __OFF__)
-      end
+      local px, py = cdPlace(slot, marker, __OFF__)
+      out[#out + 1] = string.format(
+        '             inside the slot=%s, label at slot-local (%s, %s), slot children now %s',
+        tostring(cdAttach(slot) ~= nil),
+        (px and string.format('%.1f', px)) or '?', (py and string.format('%.1f', py)) or '?',
+        tostring(slot.numChildren))
     end
   end
 
