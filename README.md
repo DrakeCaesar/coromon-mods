@@ -496,6 +496,69 @@ game-internal "rect mutator" object (it indexes `fillColor` / `anchorX`), not a 
 Note the world node must be **re-resolved**, never cached: a cached `tiledWorld` goes
 stale (`.x` becomes nil) when the game rebuilds the map.
 
+### Real gold counter (`gold.py`)
+
+The counter stops at **9,999,999** however much you have. `playerCurrency` keeps the balance
+in a module upvalue and offers two getters — `getGold()` (the real figure) and
+`getRestrictedGold()`, the same value through `math.min(9999999, ...)` — and the display reads
+the second. The balance really does keep growing; it just cannot be seen. That is also why a
+purchase can look free: the counter is pinned at the cap and has no room to move down.
+
+There are **two clamps, not one**. Unclamping the getter is not enough, because each top-bar
+label clamps again where it draws:
+
+```lua
+goldText.text = string.format('%07d', math.min(9999999.0, math.round(value)))
+```
+
+Both are replaced. The getter is reached by exactly five modules — the two labels, the dialog
+answer buttons, the Rogue interface and its own definition — and nothing that decides whether
+you can afford something reads it: the shops, the items and `spendGold` all go through
+`getGold()`. It is a display function, so replacing it re-labels the game without touching the
+balance or any purchase check.
+
+The label's text is reachable as the first upvalue of its animation function, and that is what
+makes the **grouping** possible at all — the game's own `%07d` cannot produce separators:
+
+```lua
+debug.getUpvalue(inst.doCurrencyAnimation, 1).text   -- the label's text object
+```
+
+The separator is a plain space, chosen over the apostrophe after both were put on screen and
+seen. It must be a character the font actually has: U+00A0 does not render, and the text object
+then stores something other than what it was given, which turns the per-frame pass into a
+rewrite-every-frame loop and makes the counter blink.
+
+**The gap after the number.** The label is fixed at its left edge and grows rightward, and the
+game's layout was built for a 7-digit counter, so grouping takes 4 units out of the gap that
+follows. The obvious fix fails — shifting the label alone clips it into the coin icon, which
+never moves — so `keep_right_edge` moves **both**, by exactly the width the grouping added
+(measured on the counter: 37 → 41 units, 2 per separator). Neither gap changes size; the pair
+simply sits 4 units further from the middle.
+
+**Where the shift is measured from is not fixed.** The bar re-lays the counter out around the
+same objects rather than rebuilding them, so the counter's x is re-read whenever it moves, with
+the value we last wrote remembered so that our own write cannot be mistaken for the game's.
+
+**And the layout itself is refreshed.** The bar positions the counter with a right-to-left
+*aware* magnet, applied when the bar is built and not again afterwards: on the pause menu the
+counter's container sits at `x=190` on open and `x=188` after any input-device change — those
+2 units were the last of this to be found, and they move the counter and its coin together
+because the container is an ancestor of both. The refresh is stored on that container as
+`refreshMagnetX`, so it is simply called, every frame: the layout is not computable on the frame
+the bar is built, because the input prompts it depends on are not in place yet.
+
+Settings, in the `[gold]` table of `overlays.toml`:
+
+| setting | default | meaning |
+| --- | --- | --- |
+| `enabled` | `true` | the whole feature; off restores the getter, the text and the positions |
+| `fix_counter` | `true` | correct the two top-bar labels as well as the getter |
+| `separator` | `"space"` | `space`, `apostrophe`, `period`, `comma`, `none`, or any literal |
+| `keep_right_edge` | `true` | move the number *and* the coin so neither gap changes size |
+
+Everything is drawing only: nothing raises the balance and nothing is written to the save.
+
 ### Frame rate (`fps_patch.py`)
 
 Solar2D picks the frame rate **once, at startup**, from the game's `config.lua`:

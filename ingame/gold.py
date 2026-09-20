@@ -33,12 +33,13 @@ Two things made that worth working around rather than giving up on:
     given any string - which is also what makes the GROUPING possible, since the game's own
     `%07d` cannot produce separators.
 
-GROUPING. The separator is a plain space (17 597 722). It was picked over the apostrophe
-(17'597'722, the Swiss convention) after both were put on screen and seen - which is the only
-test that settles this. It costs a little width: the font is proportional and a space advances
-about as much as a digit, so the groups sit a full character apart. Measured, the whole string
-is 34 units plain, 38 with a space and 38 with an apostrophe - so the total is not the
-difference anyone notices; it is that a space puts no ink in the gap.
+GROUPING. The separator is a plain space (22 491 622). It was picked over the apostrophe
+(22'491'622, the Swiss convention) after both were put on screen and seen - which is the only
+test that settles this. What it costs is width, measured on the counter itself: "22491622" is
+37 units and the grouped form 41, so two separators are 4 units, 2 each. (An earlier reading of
+34 and 38 came from a 7-digit total and is not comparable.) A separator is therefore NARROWER
+than a digit, and the string is the same width whether the separator is a space or an
+apostrophe - what anyone notices is that a space puts no ink in the gap.
 
 Whatever goes here must be a character the font actually HAS, which is worth stating because
 getting it wrong fails loudly. U+00A0 was tried first and does not render: the text object
@@ -72,6 +73,44 @@ moves nothing, so the position is safe to set at once. Doing them together meant
 while an animation ran - opening the pause menu, which animates the number in - sat unshifted
 until the animation ended. Now the shift lands in the first frame the label exists.
 
+WHERE THE SHIFT IS MEASURED FROM IS NOT FIXED, and that is what made this look like a shift
+that arrived late. The bar re-lays the counter out around the SAME objects rather than
+rebuilding them, so an origin read once and kept for ever goes stale the first time the bar
+changes shape - and the counter and its coin then sit at the old place. The origin is therefore
+read again whenever the object moves, with what we last wrote remembered so that our own write
+cannot be mistaken for the game's.
+
+The reason it moves at all is the last piece, and the one that survived longest. The bar
+positions the counter with a right-to-left AWARE magnet, and that layout is applied when the bar
+is built rather than re-applied afterwards: on the pause menu the counter's container sits at
+x=190 on open and at x=188 after any input-device change - those 2 units are the offset that was
+being chased, and they move the counter and the coin together because the container is an
+ancestor of both. The refresh is stored ON that container as `refreshMagnetX`: the game's own
+routine, no arguments, idempotent, so it is simply called. It is called EVERY frame rather than
+once, because the answer is not computable on the frame the bar is built - what the layout
+depends on, the input prompts, is not in place yet, so an early call reports the stale value and
+a later one the right one (measured: 190 early, 188 a moment later). A one-second timer worked
+but was visibly late; change detection was worse than late, because it asked once too early,
+believed the answer and never asked again. Repeating adds no delay of our own, so the counter
+settles the instant the game's own layout can answer - the same instant an input switch used to
+fix it.
+
+THE SIZE of that shift is measured, not computed, and from the two REAL strings: the grouping
+widens "22491622" (37 units) to "22 491 622" (41), so the pair steps 4 units left and neither
+gap changes size. What is measured matters here - a ten-separator probe was tried and gave 2.6
+units per separator, where the interior truth is 2.0: trailing whitespace does not count the
+same way, and trusting it put the counter six pixels too far left. The direct diff has the
+advantage of being unable to disagree with itself.
+
+It also waited for the game's tween to end, which was visible: the counter and the coin sat in
+the old place for the whole second of the tween and then slid into the new one. How much the
+grouping widens the number is a property of the two STRINGS, not of the text on the screen, so
+it does not need the tween to be over. `measureDelta` now runs during the animation as well. It
+writes the plain and the grouped string in turn to read their widths - a few writes, too fast
+for a frame to render between - and leaves the plain digits behind, which is exactly what the
+animation itself puts there and what its tonumber needs. Measuring is keyed on the wanted
+string, so it happens once per change in digit count and never in between.
+
 The catch is that the game's animation does not only write that text, it reads it back:
 
     transition.number(tonumber(goldText.text), playerCurrency:getRestrictedGold(), ...)
@@ -90,8 +129,12 @@ steady state, and it means a label is corrected in the same frame it appears, an
 grouping is back in the same frame the game's animation ends rather than up to a poll later.
 The poll is only there to refresh the wanted string and the wrappers.
 
-Everything here is drawing only. Nothing raises the balance, nothing is written to the
-save, and enabled = false puts all three layers back exactly as they were.
+Everything here is drawing only. Nothing raises the balance and nothing is written to the save.
+It works in three places - the getter, the label's own clamp, and the label's position - and
+enabled = false undoes all three: the getter and the animation wrapper are restored, the text
+goes back to the game's own %07d padding, and the counter and its coin go back to the x the game
+gave them. The one thing it does not undo is the layout refresh, because that is the game's own
+routine being run and it leaves nothing of ours behind.
 """
 
 NAME = "gold"
@@ -118,8 +161,8 @@ SETTINGS = [
         "separator",
         "space",
         (
-            'thousands separator for the counter. "space" (the default, 17 597 722) won on '
-            'sight over "apostrophe" (17\'597\'722). Also: "period", "comma", "none". '
+            'thousands separator for the counter. "space" (the default, 22 491 622) won on '
+            'sight over "apostrophe" (22\'491\'622). Also: "period", "comma", "none". '
             'Anything else is used literally - but it must be a character the font actually '
             'has: U+00A0 renders as an error glyph and makes the counter blink, because the '
             'text object stores something other than what was written. The grouping has to '
@@ -291,7 +334,7 @@ local function goldLabel(module)
   if not inst then return end
   local anim = inst.__hudGoldAnimOrig or inst.doCurrencyAnimation
   if type(anim) ~= 'function' then return end
-  local ok, name, node = pcall(debug.getupvalue, anim, 1)
+  local ok, _, node = pcall(debug.getupvalue, anim, 1)
   if not ok or type(node) ~= 'table' then return end
   return inst, node
 end
@@ -402,13 +445,69 @@ do
     return 1
   end
 
-  -- Keep an object at the game's own x, less the width the grouping added. The game's x is
-  -- remembered the first time the object is seen, and every label is a fresh object, so a
-  -- layout change that builds a new one is picked up on its own.
+  -- The bar lays the counter out with a right-to-left AWARE magnet, and that layout is applied
+  -- when the bar is BUILT - not again afterwards. Measured on the pause menu: the counter's own
+  -- container sits at x=190 on the frame the menu opens and at x=188 after any input-device
+  -- change, which is the whole of the reported offset - 2 units, and it moves the counter and
+  -- its coin together because it is an ancestor of both.
+  --
+  -- The refresh that reconciles them is stored on the container itself, as `refreshMagnetX` -
+  -- the aware magnet puts it there when the relation is created. It is the game's own routine,
+  -- it takes no arguments, and it is idempotent (measured: four calls in a row left the
+  -- container at 188).
+  --
+  -- Called EVERY frame while a counter is on screen, and that is deliberate: the layout this
+  -- asks for is not computable the moment the bar is built. What it depends on - the input
+  -- prompts - is not in place yet, so an early call answers with the stale value and a later one
+  -- with the right one (measured: 190 on the frame the container moved, 188 a moment later). A
+  -- one-second timer worked but was visibly late, and change detection was worse than late: it
+  -- called once too early, believed the answer and never asked again, so the counter stayed
+  -- wrong. Repeating costs a pcall and a function call per frame and adds no delay of our own.
+  local function refreshLayout(node)
+    local parent = node.parent
+    if type(parent) ~= 'table' or type(parent.refreshMagnetX) ~= 'function' then return end
+    pcall(parent.refreshMagnetX, parent)
+  end
+
+  -- Keep an object at the game's own x, less the width the grouping added.
+  --
+  -- The game's x is remembered the first time the object is seen, and every label is a fresh
+  -- object, so a layout change that BUILDS a new one is picked up on its own.
+  --
+  -- But the bar is also re-laid out around the SAME object. Opening the pause menu, and
+  -- switching the button prompts over to the other input device, both move the counter without
+  -- rebuilding it - so a base read once and kept for ever is stale from the first of those on,
+  -- and the counter and the coin then sit at the old place until something happens to rebuild
+  -- the bar. Reported from play exactly like that: "opening the pause menu with the controller,
+  -- the value and the gold icon are too far to the right, and pressing a controller key fixes
+  -- it" - the keypress being what switches the prompts and so rebuilds the bar.
+  --
+  -- So what we last wrote is remembered as well, and any other value in the object's x is the
+  -- game moving it: that becomes the new base, and the shift is re-applied from there in the
+  -- same frame. Our own write cannot be mistaken for the game's, because it is the value the
+  -- comparison is against.
   local function hold(obj, delta)
     if type(obj.__hudGoldX) ~= 'number' then obj.__hudGoldX = obj.x end
+    -- A base nowhere near the bar can only mean it was remembered while something was dragging
+    -- the object along - which is how the bug below announced itself, with the label stranded at
+    -- -55439. Forget it and keep hands off until the game lays the bar out again: writing
+    -- anything now would only keep the wrong value alive.
+    if math.abs(obj.__hudGoldX) > 1000 then
+      obj.__hudGoldX, obj.__hudGoldSet = nil, nil
+      return 0
+    end
+    -- Our own write has to be told apart from the game moving the object, and that comparison
+    -- needs a tolerance rather than equality: the game's own x is not always a whole number (the
+    -- coin sits at -19.5), so an x that does not read back bit-for-bit would look like "the game
+    -- moved it" on every frame - each frame taking the base down by another shift, which walks
+    -- the counter and its coin off the bar to the left. That is not hypothetical: it is what
+    -- happened the first run after the shift stopped being a whole number.
+    if type(obj.__hudGoldSet) == 'number' and math.abs(obj.x - obj.__hudGoldSet) > 0.25 then
+      obj.__hudGoldX = obj.x
+    end
     local want = obj.__hudGoldX - delta
-    if obj.x ~= want then
+    obj.__hudGoldSet = want
+    if math.abs(obj.x - want) > 0.001 then
       obj.x = want
       return 1
     end
@@ -423,25 +522,43 @@ do
   -- just been built is therefore shifted in its own first frame rather than when the animation
   -- ends, which is what it used to do.
   local function position(node)
-    if not ALIGN or type(f.delta) ~= 'number' then return 0 end
+    local delta = node.__hudGoldDelta
+    if not ALIGN or type(delta) ~= 'number' then return 0 end
     local coin = goldCoin(node)
     if not coin then return 0 end
-    return hold(node, f.delta) + hold(coin, f.delta)
+    return hold(node, delta) + hold(coin, delta)
   end
 
   -- The width the grouping adds, measured by writing both strings in turn: invisible, because no
-  -- frame can render between the statements of one Lua chunk, and the second write leaves the
-  -- wanted text in place anyway. Measured rather than computed because the font is proportional,
-  -- so "1" and "8" are not the same width.
-  local function measureDelta(node, want)
+  -- frame can render between the statements of one Lua chunk. Measured rather than computed
+  -- because the font is proportional, so "1" and "8" are not the same width.
+  --
+  -- A ten-separator probe was tried here first and was WRONG. Measured live: "0" against "0"
+  -- plus ten TRAILING spaces gives 2.6 units per separator, but eleven "1"s against the same
+  -- with ten INTERIOR spaces gives 2.0 - and it is the interior figure that agrees with the real
+  -- strings (37 against 41 for two separators, i.e. 2 each). Trailing whitespace does not count
+  -- the same way, and trusting it put the counter about six pixels too far LEFT. These two
+  -- strings cannot disagree with themselves, so they are what is measured.
+  --
+  -- `animating` restores the plain digits afterwards, which matters because the game's tween
+  -- reads the text back at its start (tonumber of a grouped string is nil - see the wrapper).
+  -- Plain digits are also what the animation itself would write, so the restore is invisible as
+  -- well as safe. That is what lets this run DURING the animation rather than a second later:
+  -- the delta belongs to the two strings, not to what is currently on screen.
+  local function measureDelta(node, want, animating)
     local plain = goldDigits(goldReal())
-    if not plain or plain == want then return 0 end
+    if not plain then return 0 end
+    if plain == want then
+      node.__hudGoldDelta = 0        -- the grouping changed nothing, so there is nothing to shift
+      return 1
+    end
     setText(node, plain)
-    local baseWidth = node.width
+    local baseWidth = tonumber(node.width)
     setText(node, want)
-    local wantWidth = node.width
-    if type(baseWidth) == 'number' and type(wantWidth) == 'number' then
-      f.delta = wantWidth - baseWidth
+    local wantWidth = tonumber(node.width)
+    if animating then setText(node, plain) end
+    if baseWidth and wantWidth then
+      node.__hudGoldDelta = wantWidth - baseWidth
       return 1
     end
     return 0
@@ -461,18 +578,24 @@ do
     local inst, node = goldLabel(module)
     if not inst then return end
     wrapAnim(inst, node)
+    refreshLayout(node)                  -- the bar's own layout, applied when it is built only
     if type(node.text) ~= 'string' then return end
     position(node)                       -- always: a label built this frame moves this frame
 
     local want = f.want
     if not want then return end
-    -- The extra width is measured once up front and again whenever the text really changes,
-    -- because a different number of digits is a different amount of extra width.
-    local unknown = (type(f.delta) ~= 'number')
+    local animating = (system.getTimer() or 0) < (f.animUntil or 0)
+    -- Keyed on the wanted string, so the width is read once per change in digit count and never
+    -- in between - and because the measurement no longer waits for the animation, the counter
+    -- and the coin are in their final place before the tween has finished rather than after it.
+    if node.__hudGoldDeltaText ~= want then
+      if measureDelta(node, want, animating) == 1 then
+        node.__hudGoldDeltaText = want
+        position(node)
+      end
+    end
+    if animating then return end        -- the tween owns the text until it ends
     local wrong = (node.text ~= want) and not (f.rejected and node.text == f.rejected)
-    if (system.getTimer() or 0) < (f.animUntil or 0) then return end   -- let it animate
-    if not unknown and not wrong then return end
-    if measureDelta(node, want) == 1 then position(node) end
     if wrong then
       f.fixes = (f.fixes or 0) + setText(node, want)
       if node.text ~= want then f.rejected = node.text end
@@ -516,7 +639,12 @@ do
         local coin = goldCoin(node)
         if coin and type(coin.__hudGoldX) == 'number' then coin.x = coin.__hudGoldX end
         setText(node, string.format('%07d', goldCapped() or 0))
-        node.__hudGoldX = nil
+        node.__hudGoldX, node.__hudGoldSet = nil, nil
+        node.__hudGoldDelta, node.__hudGoldDeltaText = nil, nil
+        if coin then
+          coin.__hudGoldSet = nil
+          coin.__hudGoldDelta, coin.__hudGoldDeltaText = nil, nil
+        end
       end
     end
     local h = _G.__hud
