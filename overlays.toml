@@ -94,14 +94,16 @@ show_potential = true
 [sprint]
 # add a button that swaps the two running modes
 enabled = true
-# what swaps them. `buttonB` is the controller's B; `buttonA`, `button9` and friends are the
-# others, and a keyboard key is named by the character it produces (`a`, `space`, `up`). Add more
-# entries to have more than one; names are matched case-insensitively. Deliberately NOT the run
-# button - that one is also interact, and it is meant to be held
-key = ["buttonB"]
+# what swaps them. `leftJoystickButton` is pressing the left stick in (L3) - that is the name
+# Solar2D reports, measured rather than guessed: it is not a number like the `button1`..`button10`
+# range, and the game's own button tables do not list it at all. `buttonA`, `buttonB`, `buttonX`,
+# `buttonY`, `buttonZ` and `buttonStart` are the others, and a keyboard key is named by the
+# character it produces (`a`, `space`, `up`). Add more entries to have more than one; names are
+# matched case-insensitively. Deliberately NOT the run button - that one is also interact, and it
+# is meant to be held
+key = ["leftJoystickButton"]
 # start in mode 2 (run by default) rather than the game's own mode 1
 start_running = false
-
 [gold]
 # show the real gold total instead of the game's 9,999,999 cap, in the top bar, the dialogs and
 # the Rogue readout

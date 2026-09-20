@@ -64,12 +64,15 @@ SETTINGS = [
     ("enabled", True, "add a button that swaps the two running modes"),
     (
         "key",
-        ["buttonB"],
-        "what swaps them. `buttonB` is the controller's B; `buttonA`, `button9` and friends "
-        "are the others, and a keyboard key is named by the character it produces (`a`, "
+        ["leftJoystickButton"],
+        "what swaps them. `leftJoystickButton` is pressing the left stick in (L3) - that is "
+        "the name Solar2D reports, measured rather than guessed: it is not a number like the "
+        "`button1`..`button10` range, and the game's own button tables do not list it at "
+        "all. `buttonA`, `buttonB`, `buttonX`, `buttonY`, `buttonZ` and `buttonStart` are "
+        "the others, and a keyboard key is named by the character it produces (`a`, "
         "`space`, `up`). Add more entries to have more than one; names are matched "
-        "case-insensitively. Deliberately NOT the run button - that one is also interact, and "
-        "it is meant to be held",
+        "case-insensitively. Deliberately NOT the run button - that one is also interact, "
+        "and it is meant to be held",
     ),
     (
         "start_running",
