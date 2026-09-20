@@ -411,6 +411,52 @@ def wait_for_state(b, log, every=5.0):
         time.sleep(STATE_POLL)
 
 
+# THE GAME IS NOT SAFE TO INSTALL INTO UNTIL ITS OWN BOOTSTRAP HAS FINISHED.
+#
+# Capturing a lua_State* only means lua.dll has run some Lua, which happens in the first moments of
+# the boot - long before main.lua has finished. Installing then races the game's own startup, and it
+# loses in a way that is easy to mistake for something else: the install REQUIRES modules, and Lua
+# caches them in package.loaded, so a module loaded while the game is still initialising is cached in
+# whatever half-built state it was in, and the game's own require of it later is handed that instead
+# of a fresh one. The visible result is the game starting to a black screen and staying there.
+#
+# It only happens SOMETIMES because whether the install lands before or after the bootstrap finishes
+# is a race - and that is the whole character of the bug as reported.
+#
+# So wait for the globals the features themselves depend on. They are the same ones quick_reload's
+# pre-flight checks, so if they are all there the game is far enough along for anything here to be
+# safe to touch.
+READY = r'''
+if type(_G.require) ~= 'function' or type(_G.package) ~= 'table' then return 'boot' end
+if type(_G.display) ~= 'table' then return 'boot' end
+if type(_G.playerStateHelper) ~= 'table' then return 'boot' end
+if type(_G.SaveslotPreferences) ~= 'table' then return 'boot' end
+if type(_G.inputHelper) ~= 'table' then return 'boot' end
+return 'ready'
+'''
+
+
+def wait_for_ready(b, log=print, every=5.0):
+    """Block until the game's own bootstrap is done. False if the game went away first, which is not
+    an error - the caller goes back to waiting for the next one."""
+    last = time.time()
+    while True:
+        try:
+            out = (eval_(b, READY, timeout=15.0) or "").strip()
+        except GameGone:
+            return False
+        if out == "ready":
+            return True
+        now = time.time()
+        if now - last >= every:
+            last = now
+            log(
+                "  the game is running but still starting up (%s) - not installing into it yet"
+                % (out or "no answer")
+            )
+        time.sleep(STATE_POLL)
+
+
 def wait_for_game(process, log=print):
     """Block until the game is running and its Lua state is reachable, then hand back the
     bridge. Started before the game, this waits for it; started while it runs, it attaches
@@ -771,6 +817,10 @@ def main(features):
             b = wait_for_game(process)
             pad = None
             try:
+                # Before anything is installed: a game that is still booting must not have its
+                # modules required out from under it. See READY.
+                if not wait_for_ready(b):
+                    raise GameGone()
                 apply(b, features, cfg)
                 pad = start_trigger_keys(cfg, features, b)
                 print()

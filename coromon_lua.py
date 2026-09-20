@@ -24,9 +24,11 @@ resolved on a timer inside the script, so attaching during the game's own start-
 """
 
 import argparse
+import ctypes
 import sys
 import threading
 import time
+from ctypes import wintypes
 
 import frida
 
@@ -217,6 +219,103 @@ RETRYABLE_ATTACH_ERRORS = (
 )
 
 
+class NotReadyYet(Exception):
+    """The game is running but not up yet. See window_up(): raised INSTEAD of attaching."""
+
+
+# Not-yet-ready is a reason to WAIT, not to fail: the same handling the Frida attach errors above
+# get, and for the same reason. Named separately from them because it is not a Frida error at all.
+RETRYABLE_ATTACH_ERRORS = RETRYABLE_ATTACH_ERRORS + (NotReadyYet,)
+
+
+# --- is the game up yet? ----------------------------------------------------------------
+#
+# DO NOT ATTACH BEFORE THE GAME HAS A WINDOW THAT ANSWERS.
+#
+# Frida suspends the target's threads to install its hooks, and a process that is still
+# initialising - loader lock held, DLLs part way through coming up - can be wedged by that.
+# Measured: the game starts to a black screen and never runs a single line of Lua, while our side
+# sits at "hooked lua.dll, waiting for the game to run some Lua" forever, because Lua never gets to
+# run. Retrying the attach does not help; not doing it too early does. The window being up and
+# answering is the earliest reliable sign that the process is far enough along.
+#
+# This is deliberately read through Win32 rather than Frida: it has to happen BEFORE the attach,
+# and Frida cannot be asked about a process without attaching to it.
+
+_user32 = ctypes.windll.user32 if sys.platform == "win32" else None
+
+_SMTO_BLOCK = 0x0001
+_SMTO_ABORTIFHUNG = 0x0002
+_WM_NULL = 0x0000
+
+
+def _top_level_windows():
+    """[(hwnd, pid, title, visible)] for this session's top-level windows."""
+    out = []
+    if _user32 is None:
+        return out
+    proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(hwnd, _lparam):
+        pid = wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        n = _user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 1)
+        _user32.GetWindowTextW(hwnd, buf, n + 1)
+        out.append((hwnd, pid.value, buf.value, bool(_user32.IsWindowVisible(hwnd))))
+        return True
+
+    _user32.EnumWindows(proc(cb), 0)
+    return out
+
+
+def _window_responds(hwnd):
+    """True if the window answers WM_NULL within a second. A wedged window does not."""
+    res = wintypes.DWORD()
+    ok = _user32.SendMessageTimeoutW(
+        hwnd, _WM_NULL, 0, 0, _SMTO_ABORTIFHUNG | _SMTO_BLOCK, 1000, ctypes.byref(res)
+    )
+    return bool(ok)
+
+
+def pids_for(name):
+    """Pids whose image name matches, without attaching to anything."""
+    try:
+        return [
+            p.pid
+            for p in frida.get_local_device().enumerate_processes()
+            if (p.name or "").lower() == name.lower()
+        ]
+    except Exception:
+        return []
+
+
+def window_up(target):
+    """(ok, why). True when `target` has a visible, answering top-level window.
+
+    Anything that is not a reason to wait counts as ok: a platform without Win32, or a target that
+    is not an image name at all (a pid, a path), so this can never become a reason a tool refuses to
+    work.
+    """
+    if _user32 is None or not isinstance(target, str):
+        return True, "no window check to make"
+    pids = pids_for(target)
+    if not pids:
+        return False, "%s is not running" % target
+    windows = [w for w in _top_level_windows() if w[1] in pids]
+    if not windows:
+        return False, "%s is running, but it has no window yet" % target
+    visible = [w for w in windows if w[3]]
+    if not visible:
+        return False, "%s is running, but its window is not shown yet" % target
+    if any(_window_responds(w[0]) for w in visible):
+        return True, "window is up and answering"
+    return False, (
+        "%s is running, and its window is not answering - still starting, or already hung"
+        % target
+    )
+
+
 def build_js(hooks=None):
     """BRIDGE JS with the hook list substituted in."""
     import json as _json
@@ -234,6 +333,9 @@ class GameGone(Exception):
 
 class Bridge:
     def __init__(self, target="coromon.exe", hooks=None):
+        up, why = window_up(target)
+        if not up:
+            raise NotReadyYet(why)
         self.target = target
         self._results = {}
         self._events = []

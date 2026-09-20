@@ -173,6 +173,7 @@ and the overworld zoom, all driven from one settings file.
 | `car_extract.py` | Solar2D `resource.car` reader/extractor (`--list`, `--extract`) |
 | `luadis.py` | Lua 5.1 bytecode reader/disassembler/string dumper for `.lu` chunks |
 | `slot_move.py` | move or copy a save between slots (`--list`, `--move 2 1`, `--copy 2 1`, `--restore <backup>`) |
+| `reload_r3.py` | press the right stick in game to run the quick reload (`--key`, `--watch`, `--unbind`) |
 | `engine_source.py` | clone the Solar2D engine source at the tag this game was built from (`--clone`, `--update`) |
 
 ### Everything at once (`overlays.py`)

@@ -1100,7 +1100,7 @@ return 'ok ' .. tostring(slot)
 '''
 
 
-def do_reload(slot=None):
+def do_reload(slot=None, bridge=None):
     """Tear the current game down and load a slot back, using only the game's own code.
 
     pre-flight  read-only: is there a world, are the globals there, which slot are we in
@@ -1123,7 +1123,7 @@ sprite. And arguments are not replayed from a captured menu load: the game empti
 has changed since, and loadGame then dies on `saveslotDataHelper`'s
 `constructorList.maincharacter.mapPath`.
 """
-    bridge = _bridge()
+    bridge = bridge or _bridge()
     pre = ask(bridge, run_guard("preflight-%s" % time.time())
               + inject(slot, None) + PREFLIGHT)
     if pre is not None and pre.startswith("ok "):

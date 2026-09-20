@@ -2640,7 +2640,21 @@ return table.concat(out, '\n')
 
 
 def _bridge():
-    b = Bridge("coromon.exe", hooks=MINIMAL_HOOKS)
+    # The construction can REFUSE rather than fail: Bridge checks the game has a window that answers
+    # before attaching, because injecting into a process that is still starting can wedge it - seen
+    # as the game launching to a black screen and never running any Lua, with our side waiting for it
+    # forever. So retry until it will have us, and re-raise the last error if it never does, so the
+    # type the caller sees is still the one Frida (or the check) produced.
+    last = None
+    for _ in range(150):
+        try:
+            b = Bridge("coromon.exe", hooks=MINIMAL_HOOKS)
+            break
+        except Exception as exc:
+            last = exc
+            time.sleep(0.2)
+    else:
+        raise last
     for _ in range(150):
         if b.status().get("state"):
             break
