@@ -7,3 +7,9 @@ venv/
 # local scratch / extracted data
 lua/
 *.car.toc
+
+# build output for the single-file exe, and the GUI's remembered window position
+build/
+dist/
+*.spec
+overlays_gui_state.json

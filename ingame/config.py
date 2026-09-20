@@ -17,6 +17,7 @@ default is reported and the default used in its place, so a typo cannot take a f
 """
 
 import sys
+import textwrap
 
 try:
     import tomllib
@@ -65,26 +66,56 @@ def _norm(entry):
     return entry[0], entry[1], entry[2], (entry[3] if len(entry) > 3 else None)
 
 
-def render(path, core_settings, features):
-    """Write the settings file out of the schema, comments and all."""
-    lines = [HEADER.rstrip("\n"), ""]
-    for entry in core_settings:
+def _wrap(comment, width=96):
+    """A comment as `#` lines.
+
+    The schema holds each comment as one string, so the line breaks have to be put in here.
+    Without this a regenerated file is a wall of very long lines - the comments in the file
+    that ships were wrapped by hand, and a write from the GUI should not make it worse.
+    """
+    return ["# " + line for line in textwrap.wrap(comment, width=width) or [""]]
+
+
+def _setting_lines(settings, values):
+    """The comment and the value for each setting, as file lines."""
+    lines = []
+    for entry in settings:
         key, default, comment, choices = _norm(entry)
-        lines.append("# " + comment)
-        lines.append("%s = %s" % (key, _fmt(default)))
+        if choices:
+            comment += "   (one of: %s)" % ", ".join(str(c) for c in choices)
+        lines += _wrap(comment)
+        lines.append("%s = %s" % (key, _fmt(values.get(key, default))))
+    return lines
+
+
+def _write(path, core_settings, features, cfg):
+    """The whole file, from the schema, with `cfg`'s values."""
+    lines = [HEADER.rstrip("\n"), ""]
+    lines += _setting_lines(core_settings, cfg.get("core", {}))
     for f in features:
         lines.append("")
         lines.append("[%s]" % f.NAME)
-        for entry in f.SETTINGS:
-            key, default, comment, choices = _norm(entry)
-            if choices:
-                comment += "   (one of: %s)" % ", ".join(str(c) for c in choices)
-            lines.append("# " + comment)
-            lines.append("%s = %s" % (key, _fmt(default)))
+        lines += _setting_lines(f.SETTINGS, cfg.get(f.NAME, {}))
     text = "\n".join(lines) + "\n"
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
     return text
+
+
+def render(path, core_settings, features):
+    """Write the settings file out of the schema, comments and all, at their defaults."""
+    return _write(path, core_settings, features, {})
+
+
+def save(path, core_settings, features, cfg):
+    """Write the file back out of the schema, but with the given values instead of the
+    defaults - the write side of a GUI edit.
+
+    The comments come from SETTINGS, exactly as in `render`, so a file rewritten this way
+    keeps every explanation. Anything a person added by hand is not preserved, and comment
+    wrapping is normalised: the file is generated, which is why it says so at the top.
+    """
+    return _write(path, core_settings, features, cfg)
 
 
 def _resolve(section, settings, given):

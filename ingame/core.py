@@ -319,7 +319,20 @@ CORE_SETTINGS = [
     ),
 ]
 
-CONFIG_PATH = os.path.join(_TOOLS, config.FILENAME)
+def _data_dir():
+    """Where overlays.toml lives.
+
+    Beside the tools when they are run as scripts, but beside the .exe when frozen: a
+    one-file build unpacks itself into a temp directory that is wiped on exit, so a config
+    written relative to __file__ would vanish - and the whole point of the file is that it
+    persists between runs.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return _TOOLS
+
+
+CONFIG_PATH = os.path.join(_data_dir(), config.FILENAME)
 
 
 def install_code(features, cfg):
