@@ -8,15 +8,17 @@ Put a save back the way it was, without relaunching the game, so the Potentiflat
 re-rolled quickly: hand a Coromon over, read the potential, and if it is not 21 press a button and
 be back in front of the NPC again.
 
-**STATUS: `--teardown` (back to the main menu) is VERIFIED WORKING. `--reload` is abandoned.** The
-load is the half that crashed the game twice; the teardown is now the game's own quit sequence and
-it lands cleanly.
+**STATUS: `--teardown` is VERIFIED WORKING. `--reload` now loads the slot out of the store the way
+the game's own debug loader does, and has NOT been tried in that form.** Four attempts failed first,
+and each is written up below: loading with no teardown at all, then racing the deferred half of the
+teardown, then creating a title screen and immediately removing it, then replaying a captured table
+the game had already emptied. The current form removes all four causes.
 
 ```
 python abandoned/quick_reload.py --state      read-only, safe
 python abandoned/quick_reload.py --teardown   run the game's own quit sequence: back to the main menu
-python abandoned/quick_reload.py --reload     teardown + load, HAS CRASHED THE GAME TWICE
-python abandoned/quick_reload.py --arm        capture a real load's arguments (for the load half)
+python abandoned/quick_reload.py --reload [N] quit sequence, then load slot N out of the store
+python abandoned/quick_reload.py --arm        capture a real load's arguments (diagnostics only now)
 ```
 
 ### Why it was abandoned
@@ -142,21 +144,52 @@ closure upvalue; it is not, we can just keep what `new` returns. The teardown no
 `_G.__qrTitleGroup`, and `--state` reports its type, `numChildren`, `removeSelf`, `isVisible` and
 `localToContent` so it can be confirmed as a real display object before anything is built on it.
 
-### What an automated load would still need
+### What the automated load does
 
-Reproduce the title screen's own load routine (`titleScreen.lu` lines 386-436) after the teardown:
-`timer.cancel('titleScreen')`, `display.remove(<the kept group>)`, `pauseMenu:forceDestroyIfCreated()`,
-`inputHelper:decreaseInputLevel()`, `inputHelper:setKeyEventShouldDetectUnknownGamepads(false)`, then
-`loadGame(data, cluster, manualVersionId, autoVersionId, transition, callback)` with the captured
-arguments — and preferably the captured `_onWorldLoaded` rather than `nil`.
+```
+teardown   close any open conversation, then the Quit button's sequence UP TO the title screen
+wait       until worldHelper:isCreated() is false, so the deferred destroyInstance has run
+load       the game's own debug loader, verbatim (debug_load_saveslot lines 50-51):
+             row  = SaveslotPreferences:get(nil, slot, false)
+             data = saveslotDataHelper:updateDataToNewestVersion(
+                      saveslotDataHelper:decrypt(row.encryptedData), 1)
+             playerStateHelper:loadGame(data, {deviceId = ...}, nil, nil, 'instant', nil)
+```
 
-`_onWorldLoaded` is reachable the same way the group is, in principle: the title screen's load
-routine is our caller, and `debug.getupvalue(debug.getinfo(2, 'f').func, i)` enumerates
-`parentGroup, _saveslotData, _saveslotIndex, _saveslotCluster, _onWorldLoaded` on it. That is the
-clean way to capture the whole set from one real menu load.
+**A dialogue box is not world content.** Destroying the world leaves an open conversation on screen
+with its old text - reported from running the reload from inside a conversation. All four dialogue
+modules (`classes.interface.dialog.dialog`, `.battleDialog`, `.BattleCornerDialog`, `.RogueDialog`)
+export the same pair, `isCreated()` and `destroy()`, so the teardown loops over them and destroys the
+ones that are up, before the world goes away so the dialogue is closed while everything it refers to
+is still alive. `--state` reports what it closed.
 
-Only worth attempting now that the teardown lands on a real main menu, and it is still the call that
-crashed twice.
+The same shape caught us earlier in the overlays: the pause menu's blurred backdrop kept a countdown
+drawn over it. A thing drawn on the stage is not torn down by tearing down the world.
+
+**No title screen is created.** The teardown ends with `titleScreen:new()` when run as `--teardown`,
+because that is what the Quit button does - but a reload wants a world, not a menu. Creating it and
+then taking it away crashed the third attempt: the screen starts an intro `transition.to`, and its
+onComplete (`titleScreen.lu:520` -> `CoromonLogo:playSwurmySequence` -> `setSequenceAndPlay`) fired
+*after* the screen had been removed and called into a destroyed sprite. `timer.cancel('titleScreen')`
+does not stop that, because it is a transition and not a timer, and the game never has to cancel it
+because a human leaves the menu up until the animation finishes.
+
+**The arguments are not replayed from a captured load.** `--arm` stores a *reference* to the table
+the game handed `loadGame`, and the game empties `constructorList` while building the world - so by
+the time it is replayed, `loadGame` dies on `saveslotDataUtility.lua:12`
+(`_saveslotData.constructorList.maincharacter.mapPath`). Reading the slot out of the store at reload
+time is what the game's own debug loader does, and it has the happy side effect of removing the need
+to arm anything at all. `--arm` is kept only for looking at what the game passes.
+
+**Timing.** `worldHelper:destroy()` is only half done when it returns: it ends with
+`nextFrame(function() instance = display.remove(instance); setmetatable(t, nil) end)`. Loading before
+that frame runs is what crashed the second attempt - the deferred `destroyInstance` nils the instance
+`createInstance` has just built. `isCreated()` is `return instance ~= nil` and a plain field of the
+module, so it still answers after the metatable is stripped; the reload waits on it.
+
+**Which slot.** `--reload` asks the game (`playerStateHelper:getSelectedSaveslotIndex()`) unless it
+is given a number. Note the slot index is also *inside* the save payload - which is why `slot_move.py`
+has to re-encrypt when it moves one, and why a plain row rename would half-work.
 
 ### The next unknown for an automated load
 
