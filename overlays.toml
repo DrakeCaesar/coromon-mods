@@ -123,3 +123,9 @@ separator = "space"
 # number would clip into the coin, so both move and neither gap changes size. Off leaves both
 # where the game put them and lets the gap after the number shrink
 keep_right_edge = true
+
+[dialog]
+# while a conversation is open, make the button that advances it work on a fresh press only, so
+# holding it no longer runs through lines - a press still finishes the line being typed, and the
+# next press moves on
+enabled = true
