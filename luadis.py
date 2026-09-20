@@ -150,6 +150,13 @@ def kval(pr, i):
     return "k%d?" % i
 
 
+def rk(pr, x):
+    """Render an operand that may be a register or a constant (RK)."""
+    if x >= 256:
+        return f"k[{x - 256}]={kval(pr, x - 256)}"
+    return f"R{x}"
+
+
 def disasm(pr, protos, show_lines=True):
     print(f"# proto lines {pr.linedefined}-{pr.lastlinedefined} params={pr.numparams} "
           f"vararg={pr.is_vararg} maxstack={pr.maxstack} nups={pr.nups} upvals={pr.upvalue_names}")
@@ -162,27 +169,47 @@ def disasm(pr, protos, show_lines=True):
         sBx = Bx - 131071
         name = OPNAMES[op] if op < len(OPNAMES) else "OP%d" % op
         extra = ""
-        if name in ("LOADK", "GETGLOBAL", "SETGLOBAL", "CLOSURE"):
-            extra = f" Bx={Bx} {kval(pr, Bx) if name != 'CLOSURE' else 'proto %d' % Bx}"
+        if name in ("LOADK", "GETGLOBAL", "SETGLOBAL"):
+            extra = f" Bx={Bx} {kval(pr, Bx)}"
+        elif name == "CLOSURE":
+            # Bx indexes THIS proto's children, not the flattened list.
+            child = pr.protos[Bx] if Bx < len(pr.protos) else None
+            tag = "lines %d-%d" % (child.linedefined, child.lastlinedefined) if child else "?"
+            extra = f" R{A} = child {Bx} of {len(pr.protos)} ({tag})"
         elif name in ("JMP", "FORLOOP", "FORPREP"):
             extra = f" sBx={sBx} -> {pc + 1 + sBx}"
-        elif name in ("EQ", "LT", "LE", "TEST", "TESTSET"):
-            extra = f" B={B}"
-        elif name in ("GETTABLE", "SETTABLE", "SELF"):
-            extra = f" B={B} C={C}" + (f" k={kval(pr, C)}" if C >= 256 else "") + \
-                    (f" k={kval(pr, B)}" if 256 <= B < 512 else "")
-        elif name == "NEWTABLE":
-            extra = f" B={B} C={C}"
-        elif name == "CALL":
-            extra = f" nargs={B - 1} nres={C - 1}"
-        elif name == "RETURN":
-            extra = f" n={B - 1}"
+        elif name in ("EQ", "LT", "LE"):
+            extra = f" if ({rk(pr, B)} {name} {rk(pr, C)}) ~= {A} then pc++"
+        elif name == "TEST":
+            extra = f" if not (R{A} <=> {C}) then pc++"
+        elif name == "TESTSET":
+            extra = f" if (R{B} <=> {C}) then R{A} = R{B} else pc++"
+        elif name == "MOVE":
+            extra = f" R{A} = R{B}"
+        elif name == "LOADNIL":
+            extra = f" R{A}..R{A + B} = nil"
         elif name == "LOADBOOL":
-            extra = f" B={B} skip={C}"
+            extra = f" R{A} = {bool(B)}" + ("  pc++" if C else "")
+        elif name in ("GETTABLE", "SETTABLE", "SELF"):
+            extra = f" {rk(pr, B)}[{rk(pr, C)}]"
+        elif name == "NEWTABLE":
+            extra = f" R{A} = {{}}  array={B} hash={C}"
+        elif name == "CALL":
+            extra = f" R{A}..R{A + C - 2} = R{A}(R{A + 1}..R{A + B - 1})  ({B - 1} args, {C - 1} res)"
+        elif name == "TAILCALL":
+            extra = f" return R{A}(R{A + 1}..R{A + B - 1})  ({B - 1} args)"
+        elif name == "RETURN":
+            extra = f" return R{A}..R{A + B - 2}" + ("  (all)" if B == 0 else "")
         elif name in ("GETUPVAL", "SETUPVAL"):
-            extra = f" B={B} ({pr.upvalue_names[B] if B < len(pr.upvalue_names) else '?'})"
+            extra = f" R{A} <-> upval {B} ({pr.upvalue_names[B] if B < len(pr.upvalue_names) else '?'})"
         elif name == "SETLIST":
-            extra = f" B={B} C={C}"
+            extra = f" R{A}  {B} items from R{A + 1}, starting at {C}"
+        elif name in ("CONCAT",):
+            extra = f" R{A} = R{B}..R{C}"
+        elif name == "VARARG":
+            extra = f" R{A}..R{A + B - 2} = ..."
+        elif name in ARITH:
+            extra = f" R{A} = {rk(pr, B)} <{name}> {rk(pr, C)}"
         line = f"  [{pc:4d}] {name:9s} A={A:<4d}{extra}"
         if show_lines and pc < len(pr.lineinfo):
             line += f"   ; L{pr.lineinfo[pc]}"
