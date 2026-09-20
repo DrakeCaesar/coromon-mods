@@ -30,13 +30,20 @@ game then localises through `global.monsterPotentialCategory.<cat>`:
 
 Each opponent gets ONE line, the way it reads on screen:
 
-    Lunarpup L17 P8 (Dimensional Eye)
+    Lunarpup L17 P8 (Dimensional Eye) [Smart Gem]
 
-Name, level, potential, trait. The trait is shown rather than the tier's word because the
+Name, level, potential, trait and held item. The trait is shown rather than the tier's word because the
 tier is already carried by the line's colour, and which trait an opponent has matters far
 more at the moment you decide whether to spend a spinner. `m.traitUID` is a plain string on
 the Monster; `m:getTrait()` returns only its behaviour classes, no name, so the UID is what
 has to go through localisation.
+
+The held item comes last, in square brackets, and only when there is one - it changes what
+the turn will do as much as the trait does, and like the trait it is invisible until you
+already own the Coromon. `m.holdItemUID` is a plain string on the Monster ('' when it holds
+nothing, not nil), and it goes through the same `items.<UID>.name` key the map markers use,
+so a held item's name reads the same here as it does on the ground. It is part of the change
+signature too: an item can be used up mid-battle, and the line has to notice.
 
 The overlay itself is screen-space, on the display stage, so it does not move with the map
 and is unaffected by the overworld zoom.
@@ -93,12 +100,21 @@ local function potentialFactFor(m)
   if traitUID ~= '' and traitUID ~= 'nil' then
     traitName = loc('traits.' .. traitUID .. '.name', traitUID)
   end
+  -- The held item. Also a plain string UID, and an EMPTY STRING rather than nil when there
+  -- is none - so the test is "not empty", not "not absent". Same items.<UID>.name key the
+  -- map markers localise with, so the two agree.
+  local holdUID = tostring(m.holdItemUID or '')
+  local holdName = nil
+  if holdUID ~= '' and holdUID ~= 'nil' then
+    holdName = loc('items.' .. holdUID .. '.name', holdUID)
+  end
   return {
     uid = uid,
     name = loc('monsters.' .. uid .. '.name', uid),
     level = lvl, pot = pot, cat = cat,
     catName = loc('global.monsterPotentialCategory.' .. cat, cat),
     traitUID = traitUID, traitName = traitName,
+    holdUID = holdUID, holdName = holdName,
   }
 end
 
@@ -111,7 +127,7 @@ local function potentialFacts()
     if f then
       out[#out + 1] = f
       sig[#sig + 1] = f.uid .. '|' .. tostring(f.pot) .. '|' .. tostring(f.level)
-        .. '|' .. tostring(f.traitUID)
+        .. '|' .. tostring(f.traitUID) .. '|' .. tostring(f.holdUID)
     end
   end
   return out, table.concat(sig, ';')
@@ -151,6 +167,7 @@ do
     if fact.level then s = s .. ' L' .. tostring(fact.level) end
     s = s .. ' P' .. tostring(fact.pot)
     if fact.traitName then s = s .. ' (' .. tostring(fact.traitName) .. ')' end
+    if fact.holdName then s = s .. ' [' .. tostring(fact.holdName) .. ']' end
     return { { text = s, col = COL[fact.cat] or WHITE } }
   end
 
@@ -248,9 +265,10 @@ def report(cfg):
     out[#out + 1] = 'battle - ' .. #facts .. ' opponent(s) on the field:'
     for i = 1, #facts do
       local f = facts[i]
-      out[#out + 1] = string.format('  %s   Lv%s     Potential %d  (%s)' .. '%s',
+      out[#out + 1] = string.format('  %s   Lv%s     Potential %d  (%s)' .. '%s%s',
         f.name, tostring(f.level), f.pot, f.catName,
-        f.traitName and ('     trait: ' .. tostring(f.traitName)) or '')
+        f.traitName and ('     trait: ' .. tostring(f.traitName)) or '',
+        f.holdName and ('     holding: ' .. tostring(f.holdName)) or '')
     end
   else
     out[#out + 1] = 'battle - no opponent on the field'
