@@ -16,6 +16,8 @@ A setting is `(key, default, comment)`. A value in the file whose type does not 
 default is reported and the default used in its place, so a typo cannot take a feature down.
 """
 
+import json
+import os
 import sys
 import textwrap
 
@@ -37,6 +39,12 @@ HEADER = """\
 # There are no command line options; everything comes from here. A run makes the game match
 # this file - it tears down whatever was installed last time and installs what is enabled
 # below - so setting `enabled` to false and running again is how you remove a feature.
+#
+# WHILE overlays.py IS RUNNING, SAVING THIS FILE IS ENOUGH. The features already installed are
+# torn down - their listeners, the functions they wrapped, their timers and the objects they
+# drew - and rebuilt to match what is written here, with no restart and no re-attach. So
+# flipping one `enabled` at a time is how to find out what each feature actually costs.
+# A file that will not parse is reported and the running install is left alone.
 #
 # overlays.py waits for the game if it is not running yet, and re-attaches by itself when
 # the game is closed and started again - it re-reads this file for each new session, so an
@@ -212,3 +220,66 @@ def load(path, core_settings, features):
         )
 
     return cfg, warnings, created
+
+
+# ===========================================================================
+# The runtime layer.
+#
+# `overlays.toml` is the BASELINE: what the tool installs from. This is the live layer on top of
+# it, and it exists because "switch this off to see what it costs" is not the same as "I want
+# this off". Editing the baseline for a measurement means editing it back afterwards, and a
+# forgotten edit is indistinguishable from a decision.
+#
+# Only `enabled` can be overridden, deliberately. Everything else needs a real re-install anyway,
+# and letting every setting be overridden from a second file would make "what is actually
+# installed right now?" a question with two answers.
+# ===========================================================================
+RUNTIME_FILENAME = "overlays_runtime.json"
+
+
+def runtime_path(config_path):
+    """The runtime override file that belongs beside a given overlays.toml."""
+    return os.path.join(os.path.dirname(config_path), RUNTIME_FILENAME)
+
+
+def load_runtime(path):
+    """The overrides, as {'enabled': {name: bool}}, or {} when there is no file.
+
+    Raises ConfigError only if the file is there and unreadable - a missing one is the normal
+    state and means "no overrides at all".
+    """
+    if not os.path.exists(path):
+        return {}
+    with open(path, "rb") as fh:
+        try:
+            data = json.load(fh)
+        except ValueError as exc:
+            raise ConfigError("%s is not valid JSON: %s" % (path, exc)) from None
+    if not isinstance(data, dict):
+        raise ConfigError("%s should hold an object" % path)
+    return data
+
+
+def apply_runtime(cfg, runtime):
+    """cfg with the runtime `enabled` overrides laid over it. The baseline is not touched."""
+    out = {name: dict(section) for name, section in cfg.items()}
+    flags = runtime.get("enabled") or {}
+    if isinstance(flags, dict):
+        for name, value in flags.items():
+            if name in out and isinstance(value, bool):
+                out[name]["enabled"] = value
+    return out
+
+
+def save_runtime(path, enabled_flags):
+    """Write the runtime layer, atomically.
+
+    AT ATOMICALLY: the running overlay watches this file's mtime and reads it the moment it
+    changes, so a half-written file would be read and could be taken for a real edit. Written to
+    a temporary and renamed, it is never observed part-written.
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"enabled": dict(enabled_flags)}, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)

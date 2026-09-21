@@ -851,13 +851,86 @@ def start_trigger_keys(cfg, features, b):
     return pad
 
 
+def _mtime(path):
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def effective_config(features, baseline, note=print):
+    """The baseline with the runtime overrides laid over it.
+
+    The override file is only ever read here, and a broken one is reported and skipped, because
+    the tool must not become impossible to install just because a runtime file was left
+    half-written by whatever was toggling it.
+    """
+    path = config.runtime_path(CONFIG_PATH)
+    try:
+        runtime = config.load_runtime(path)
+    except config.ConfigError as exc:
+        note("runtime: %s" % exc)
+        return baseline
+    if not runtime:
+        return baseline
+    return config.apply_runtime(baseline, runtime)
+
+
+def watch_for_config(b, features, cfg, note=print):
+    """Stay attached until the game goes away, re-applying whenever overlays.toml changes.
+
+    THIS IS THE RUNTIME ON/OFF SWITCH, and it is built out of machinery that already exists.
+    `apply()` re-runs the install chunk, and the install chunk's first act is to call `kill()` on
+    every feature installed last time and drop the host. So switching a feature off tears down its
+    enterFrame and key listeners, the functions it wrapped, its timers and the objects it drew;
+    switching it back on rebuilds it from the same generated chunk. Nothing new has to unwind
+    anything, and no feature needs to know how - the teardown that already runs on every launch
+    runs again here.
+
+    The only thing that was missing was the re-read: the file was consulted once per game session,
+    so an edit needed the game restarted before it took effect. That is what made "which feature is
+    costing me frame rate?" a restart-per-answer question.
+
+    A file that will not parse is reported and the settings already installed are kept, because
+    losing every overlay to a typo in a comment is worse than ignoring the edit. Returns the
+    config that was in force when the game went away.
+    """
+    watched = (CONFIG_PATH, config.runtime_path(CONFIG_PATH))
+    last = tuple(_mtime(p) for p in watched)
+    while True:
+        if b.wait(0.5):
+            return cfg
+        now = tuple(_mtime(p) for p in watched)
+        if now == last:
+            continue
+        last = now
+        baseline = read_config(features, warn=note)
+        if baseline is None:
+            note("config: not readable - keeping what is already installed")
+            continue
+        fresh = effective_config(features, baseline, note=note)
+        if fresh == cfg:
+            note("changed, but nothing installed differs")
+            continue
+        note("--- %s changed - re-applying in the running game ---" % config.FILENAME)
+        cfg = fresh
+        try:
+            if not wait_for_ready(b):
+                return cfg
+            apply(b, features, cfg)
+        except GameGone:
+            return cfg
+        note("--- re-applied - the game matches the baseline plus the runtime overrides ---")
+
+
 def main(features):
     """Watch the game: wait for it, install what overlays.toml asks for, stay out of the
     way while it runs, and do it all again when it is closed and started again. No
     arguments, by design: the file is the only place settings live."""
-    cfg = read_config(features)
-    if cfg is None:
+    baseline = read_config(features)
+    if baseline is None:
         return 2
+    cfg = effective_config(features, baseline)
     process = cfg["core"]["process"]
 
     try:
@@ -877,6 +950,11 @@ def main(features):
                     % process
                 )
                 print("by itself when it is started again. Ctrl+C to stop.")
+                print(
+                    "edits to %s are picked up while this runs: save the file and the features "
+                    "are torn down and re-installed to match it, with no restart. Flipping one "
+                    "`enabled` at a time is how to see what a feature costs." % config.FILENAME
+                )
                 if pad is not None:
                     if pad.failed:
                         print("gamepad: not reading the triggers - %s" % pad.failed)
@@ -885,7 +963,7 @@ def main(features):
                             "gamepad: %s zooms out, %s zooms in (hold to keep zooming)"
                             % (pad.keys["left"], pad.keys["right"])
                         )
-                b.wait()
+                watch_for_config(b, features, cfg)
             except GameGone:
                 pass
             finally:
@@ -898,7 +976,8 @@ def main(features):
             # by the next launch. A file that will not parse keeps the last good settings.
             fresh = read_config(features)
             if fresh is not None:
-                cfg = fresh
+                baseline = fresh
+                cfg = effective_config(features, baseline)
                 process = cfg["core"]["process"]
     except KeyboardInterrupt:
         print("\nstopped.")

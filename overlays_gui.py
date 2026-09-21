@@ -87,12 +87,27 @@ def save_state(state):
         pass
 
 
+def _load_runtime():
+    """The runtime overrides, or {} - see ingame/config.py.
+
+    Never fatal: this file is rewritten every time a live checkbox moves, so an unreadable one
+    must not stop the window opening. It is reported and treated as "no overrides".
+    """
+    try:
+        return config.load_runtime(config.runtime_path(core.CONFIG_PATH))
+    except config.ConfigError as exc:
+        print("runtime overrides: %s" % exc, file=sys.stderr)
+        return {}
+
+
 class App:
     def __init__(self, root):
         self.root = root
         self.state = load_state()
         self.vars = {}          # (section, key) -> tk variable
         self.defaults = {}      # (section, key) -> default, to convert back by type
+        self.runtime_vars = {}  # feature -> the LIVE switch's tk variable
+        self.runtime = _load_runtime()
         self.proc = None
         self.log_path = None
         self.out = queue.Queue()
@@ -133,8 +148,8 @@ class App:
         ttk.Label(head, text="Coromon overlays",
                   font=("Segoe UI", 12, "bold")).pack(side="left")
         ttk.Label(head, foreground=theme.NOTE, text=(
-            "   tick what you want on, then Save & Apply - it restarts the overlay so the "
-            "change takes effect now").rstrip()).pack(side="left")
+            "   `enabled` is the baseline the tool installs from; `runtime` is what is installed "
+            "right now and applies to the running overlay immediately").rstrip()).pack(side="left")
 
         body = ttk.Frame(outer)
         body.pack(fill="both", expand=True)
@@ -153,6 +168,8 @@ class App:
         ttk.Button(bar, text="Save & Apply", command=self.save_and_apply).pack(
             side="left", padx=6)
         ttk.Button(bar, text="Reload from file", command=self.reload).pack(side="left")
+        ttk.Button(bar, text="Clear runtime", command=self.clear_runtime).pack(
+            side="left", padx=6)
         self.status = ttk.Label(bar, text="overlay stopped", foreground=theme.BAD)
         self.status.pack(side="left", padx=14)
         ttk.Button(bar, text="Stop", command=self.stop_controller).pack(side="right")
@@ -198,8 +215,78 @@ class App:
         for entry in ordered:
             key, default, comment, choices = _norm(entry)
             self.defaults[(name, key)] = default
+            if key == "enabled" and name != "core":
+                self._enabled_row(box, name, comment, values.get(key, default))
+                continue
             self._row(box, name, key, default, comment, choices,
                       values.get(key, default))
+
+    def _enabled_row(self, parent, name, comment, value):
+        """The baseline switch and the live one, side by side.
+
+        They answer different questions, which is why there are two of them. `enabled` is what
+        the file says - the baseline the tool installs from. `runtime` is what is installed RIGHT
+        NOW: moving it writes the runtime override file, which a running overlay picks up within
+        half a second, and the baseline file is not touched.
+
+        That is the whole point of having both. Switching a feature off to see what it costs
+        becomes one checkbox, not an edit to the file and then a second edit to put it back -
+        and a forgotten second edit is indistinguishable from a decision.
+        """
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=1)
+
+        base = tk.BooleanVar(master=self.root, value=bool(value))
+        ttk.Checkbutton(row, text="enabled", variable=base).pack(side="left")
+        self.vars[(name, "enabled")] = base
+
+        # absent from the override file means "follow the baseline", so that is the value the
+        # live box starts at - and a feature nobody has touched shows the baseline in both
+        override = (self.runtime.get("enabled") or {}).get(name)
+        live = tk.BooleanVar(master=self.root,
+                             value=bool(value) if override is None else bool(override))
+        ttk.Checkbutton(row, text="runtime", variable=live,
+                        command=self.write_runtime).pack(side="left", padx=(10, 0))
+        self.runtime_vars[name] = live
+
+        ttk.Label(row, foreground=theme.NOTE, text="  " + comment, wraplength=500,
+                  justify="left").pack(side="left")
+
+    def write_runtime(self):
+        """Write the runtime layer, recording only what DIFFERS from the baseline.
+
+        A feature that matches its baseline gets no entry at all, so following the file stays
+        the default and deleting the override file is a complete reset - there is no way to
+        leave a feature permanently pinned by a stale entry.
+        """
+        flags = {}
+        for f in FEATURES:
+            live = self.runtime_vars.get(f.NAME)
+            base = self.vars.get((f.NAME, "enabled"))
+            if live is None or base is None:
+                continue
+            if bool(live.get()) != bool(base.get()):
+                flags[f.NAME] = bool(live.get())
+        self.runtime = {"enabled": flags}
+        try:
+            config.save_runtime(config.runtime_path(core.CONFIG_PATH), flags)
+        except OSError as exc:
+            self.status.configure(text="runtime: %s" % exc, foreground=theme.BAD)
+            return
+        off = sorted(n for n, v in flags.items() if not v)
+        on = sorted(n for n, v in flags.items() if v)
+        self.status.configure(
+            text="runtime - off: %s   on: %s" % (", ".join(off) or "none",
+                                                ", ".join(on) or "none"),
+            foreground=theme.NOTE)
+
+    def clear_runtime(self):
+        """Drop every override, putting each live box back on its baseline."""
+        for name, live in self.runtime_vars.items():
+            base = self.vars.get((name, "enabled"))
+            if base is not None:
+                live.set(bool(base.get()))
+        self.write_runtime()
 
     def _row(self, parent, section, key, default, comment, choices, value):
         row = ttk.Frame(parent)

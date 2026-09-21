@@ -13,3 +13,9 @@ build/
 dist/
 *.spec
 overlays_gui_state.json
+
+overlays_runtime.json
+overlays_runtime.json.tmp
+
+
+# reload-probe.txt

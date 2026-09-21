@@ -310,7 +310,13 @@ do
   f.texts = {}
   f.group = nil
   f.save = nil
+  f.lastScan = nil
   f.ticks = 0
+
+  -- While NOTHING has been found, look again this often. It is short because a save load is the
+  -- moment the table appears, and 12.5 s of no countdown afterwards would read as the feature
+  -- being broken; it is not 1 because a table that never appears must not cost a walk per tick.
+  local RETRY_TICKS = 4
 
   local FONT = 'outline_10_bold'
   local WHITE = { 1, 1, 1 }
@@ -322,8 +328,38 @@ do
 
   -- The live save table, re-found periodically: a save reload replaces the table this reads
   -- from, and the old one goes stale without ever looking wrong.
+  --
+  -- THE THROTTLE USED TO BE DEFEATED, and it was this feature - not cooldowns - that cost the
+  -- most. The condition was
+  --
+  --     if f.save == nil or (f.ticks % __RESCAN__) == 0 then
+  --
+  -- and a failed scan is not cached: while the table had never been found, `f.save` was nil on
+  -- every tick, so the whole package.loaded walk ran EVERY TICK instead of every __RESCAN__. At
+  -- this feature's 250 ms poll that is four full walks a second, which is what the runtime
+  -- toggles showed up - and on the title screen, where the table does not exist at all, it was
+  -- pure waste.
+  --
+  -- So: the interval is measured from the LAST ATTEMPT (a failure counts like a success), and
+  -- the walk is gated on a save existing. `playerStats.getSteps()` is the game's own step counter
+  -- and it is the cheapest thing that answers "is a save loaded?" - far cheaper than the walk -
+  -- so the title screen now does no walking at all, and the first attempt after a save loads is
+  -- the one that finds the table.
+  local function saveLoaded()
+    local ok, n = pcall(function() return playerStats.getSteps() end)
+    return ok and tonumber(n) ~= nil
+  end
+
   local function save()
-    if f.save == nil or (f.ticks % __RESCAN__) == 0 then
+    if not saveLoaded() then
+      -- no save, so there is nothing to read and nothing to remember - and clearing these means
+      -- the next save is looked for on its own first tick rather than after an inherited wait
+      f.save, f.lastScan = nil, nil
+      return nil
+    end
+    local every = f.save and __RESCAN__ or RETRY_TICKS
+    if f.lastScan == nil or (f.ticks - f.lastScan) >= every then
+      f.lastScan = f.ticks
       local s = saveSettings()
       if s then f.save = s end
     end
