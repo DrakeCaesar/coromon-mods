@@ -2,9 +2,11 @@
 """
 quick_reload.py - put a save back the way it was, without relaunching the game.
 
-ABANDONED 2026-09-20. Kept rather than deleted because it is close to working and because the
-reading of the game's load flow below is expensive to redo. See abandoned/README.md for what was
-proven, the two crashes, and the single thing still unverified. Nothing loads this file.
+LIVE, NOT ABANDONED, despite the directory it sits in. `ingame/reload.py` puts this directory on
+`sys.path` and does `import quick_reload`, then sends these chunks into the game verbatim through
+`loadstring`. So every chunk in this file IS the reload that runs. The directory name is a leftover
+from an earlier design that drove this from outside the game, and it has already misled one reader
+into editing the wrong file - do not delete this module.
 
 WHY IT EXISTS. The Potentiflator decides its answer the moment a Coromon is handed over, not
 when the steps are walked, so the fast way to a good roll is to hand one over, read the answer
@@ -586,8 +588,15 @@ _G.__qrClosedDialogues = (#closed > 0) and table.concat(closed, ', ') or nil
 -- releases its level. Measured 2026-09-21: with the pause menu open, correcting the level while this
 -- call was still to come took it one step too far down - level 0, "no navigations registered", input
 -- dead - because the correction assumed the pause menu had already handed its level back.
-_G.__qrStep = 'pauseMenu:forceDestroyIfCreated'
-_G.pauseMenu:forceDestroyIfCreated()
+--
+-- AND THE MENU, WITH EVERYTHING AFTER IT, IS NOW A FUNCTION. The invariant that note is about is
+-- "the menu has released its level BEFORE the correction below runs". forceDestroyIfCreated met it
+-- synchronously; the game's own `close` (see MENU_CLOSE_VIA_GAME) meets it in its own callback, ~200 ms
+-- later. So the rest of this chunk - the level correction, the world destroy, quitCurrentGame and the
+-- final settle - is wrapped up and run at the point the menu is actually gone, whichever route got us
+-- there. Everything before this point (the overlay sweep, the dialogues) stays where it is: it releases
+-- levels too, and it must still happen before the correction.
+local function afterMenuReleased()
 
 -- INPUT LEVEL AND FOCUS. Measured 2026-09-21, and it corrected a wrong assumption of mine:
 --
@@ -669,13 +678,29 @@ if type(_G.inputHelper) == 'table' and type(debug) == 'table'
   end
   _G.__qrTargetLevel = target
   _G.__qrFinalTarget = target
-  -- NOT RUN when the reload goes through the main menu (MENU_ROUND_TRIP). On that path the level is
-  -- raised and lowered by the game's OWN paired calls - titleScreen:new() -> increaseInputLevel, then
-  -- the title screen's own exit preamble -> decreaseInputLevel - so a second, hand-derived correction
-  -- on top of them would only make the measurement ambiguous. The reading is taken either way.
-  if _G.__qrMenuRoundTrip then
-    _G.__qrStepsDown = 'skipped - the game owns the level on this path'
-  elseif type(level) == 'number' and type(target) == 'number' and level > target
+  -- THIS RUNS ON THE MENU ROUND TRIP TOO, and gating it out was a measured mistake.
+  --
+  -- The reasoning for the gate was that the game's own paired calls - `titleScreen:new()` ->
+  -- `increaseInputLevel`, then the title screen's exit -> `decreaseInputLevel` - own the level, so a
+  -- hand-derived correction on top would only blur the measurement. What the probe then showed is that
+  -- the pair is faithful to whatever level it STARTS from, and that level is not always the world's:
+  --
+  --   reload starting - ... level=2 navs=2:{1,2} overlays=0 hoverables=4    <- leaked during play
+  --     leaving the menu: lvl=3 navs={1,2,3} paused={1,2}                   <- new() raised 2->3
+  --     left the menu:    lvl=2 navs={1,2} paused={1}                       <- pair returned to 2, not 1
+  --     load done (ok) ... level=2 navs=2:{1,2}                             <- new world registers at 2
+  --
+  -- The world's own navigation is at level 1, so level 1 ends up paused and unfocused while the game
+  -- routes input at level 2. Nothing is visibly wrong until something lowers the level again - closing
+  -- a menu, opening a dialogue - and then input lands on a stale level-1 nav and the controls freeze.
+  -- That is the reported lock-up, and it is the same fault this block was written for in the first
+  -- place: "level left at 2 with nav[2] still focused while the world's own nav[1] sat unfocused".
+  --
+  -- The block runs in TEARDOWN_BASE, i.e. BEFORE `titleScreen:new()`, so it does not fight the round
+  -- trip - it hands it a clean, focused level 1, which is the level the game itself is always at when a
+  -- player opens the menu (the Quit button lives in the world's top bar). The round trip then raises
+  -- 1->2 and lowers back to 1, which is the game's own sequence exactly.
+  if type(level) == 'number' and type(target) == 'number' and level > target
      and overlaysLeft == 0 then
     local steps = 0
     while level > target and steps < 16 do
@@ -691,16 +716,23 @@ if type(_G.inputHelper) == 'table' and type(debug) == 'table'
   _G.__qrInputLevelAfter = level
 
   -- And focus, which is what actually routes input: the nav serving the CURRENT level has to be
-  -- focused. Skipped on the menu round trip for the same reason as the step-down above - the game's
-  -- own decreaseInputLevel is what hands focus back (inputHelper L169-171), and it clears
-  -- pausedInputNavigations on the way, which a hand-rolled handleObtainFocus cannot do.
-  if not _G.__qrMenuRoundTrip and perLevel ~= nil and level ~= nil then
+  -- focused. This must run BEFORE the menu round trip, because `increaseInputLevel` marks the level it
+  -- leaves as `pausedInputNavigations[old] = true` if that level's nav is not focused - and
+  -- `decreaseInputLevel` then refuses to hand focus back to a paused level (inputHelper L169-171), so a
+  -- level left unfocused going INTO the menu can never be re-focused coming out of it.
+  if perLevel ~= nil and level ~= nil then
     local nav = perLevel[level]
     _G.__qrNavAtLevel = (nav == nil) and 'nothing registered' or 'present'
     if type(nav) == 'table' and type(nav.isFocused) == 'function' then
       local okf, focused = pcall(function() return nav:isFocused() end)
       if okf then _G.__qrNavAtLevelFocused = focused end
-      if okf and focused == false and type(nav.handleObtainFocus) == 'function' then
+      -- `not focused`, NOT `focused == false`. isFocused() is `return <flag>` (focusBuilder L32-34), so
+      -- an unfocused navigation can answer nil, and `nil == false` is false - the repair silently never
+      -- ran. That is why `paused` was still `{1}` in the probe after this block: level 1 had not
+      -- actually been re-focused, so the menu's increaseInputLevel marked it paused and the way out
+      -- could not clear it. The game's own idiom is the truthiness test (combinedNavigationBuilder
+      -- L22-23).
+      if okf and not focused and type(nav.handleObtainFocus) == 'function' then
         _G.__qrStep = 'handing focus back to the nav at level ' .. tostring(level)
         if type(paused) == 'table' then paused[level] = nil end
         pcall(function() nav:handleObtainFocus() end)
@@ -731,17 +763,7 @@ ps:quitCurrentGame()
 -- existed, because the lowest-registered-level reading it came from is not available any more once the
 -- world is gone.
 _G.__qrStep = 'settling the input level'
-if _G.__qrMenuRoundTrip then
-  -- Nothing to settle: on this path the level is raised by titleScreen:new() and lowered by the title
-  -- screen's own exit preamble, in the game's own order and with the game's own calls, and both of
-  -- those call inputHelper:releaseInput() - which is what drops a press still held in its bookkeeping.
-  -- A settle here would be a second opinion about the same number, and the two would disagree in a way
-  -- that is impossible to read.
-  _G.__qrFinalUp, _G.__qrFinalDown = 'skipped', 'skipped'
-  _G.__qrFinalNav = 'not read - the game owns the level on this path'
-  local okv0, v0 = pcall(function() return _G.inputHelper:getInputLevel() end)
-  _G.__qrFinalLevel = okv0 and v0 or nil
-elseif type(_G.__qrFinalTarget) == 'number' and type(_G.inputHelper) == 'table'
+if type(_G.__qrFinalTarget) == 'number' and type(_G.inputHelper) == 'table'
    and type(_G.inputHelper.getInputLevel) == 'function' then
   local ih = _G.inputHelper
   local up, down = 0, 0
@@ -792,7 +814,9 @@ elseif type(_G.__qrFinalTarget) == 'number' and type(_G.inputHelper) == 'table'
      and type(nav.handleObtainFocus) == 'function' then
     local okq, q = pcall(function() return nav:isFocused() end)
     _G.__qrFinalNavFocused = okq and q or nil
-    if okq and q == false then
+    -- `not q`, not `q == false` - same reason as the repair above: isFocused() answers nil when it is
+    -- unfocused, so `q == false` was never true and this repair never ran either.
+    if okq and not q then
       if type(paused) == 'table' then paused[v] = nil end
       pcall(function() nav:handleObtainFocus() end)
       local okz, z = pcall(function() return nav:isFocused() end)
@@ -801,6 +825,50 @@ elseif type(_G.__qrFinalTarget) == 'number' and type(_G.inputHelper) == 'table'
   end
 end
 _G.__qrStep = 'torn down'
+end
+
+-- CLOSE THE MENU. Both routes end in afterMenuReleased(); only the timing and the depth of the
+-- teardown differ (see MENU_CLOSE_VIA_GAME). `closeIfCreated` is safe with nothing open - its `elseif
+-- opt then opt()` branch calls the callback immediately (pauseMenu.lu proto (0,4) L31-37) - so this
+-- is the same route whether or not the player had the menu up.
+--
+-- AND IT NEEDS A WATCHDOG. The game's close finishes in a transition's onComplete, and
+-- `completeTransition` SKIPS the onComplete when the transition carries shouldBeCancelled
+-- (transition.lu L26-31). So anything that cancels that 200 ms fade - a stray cancelAll, a
+-- cancelRecursive reaching the menu's subtree - makes the callback never come, and then the REST OF
+-- THIS TEARDOWN NEVER RUNS: the world stays up and the load would go into it. releaseOnce is the
+-- guard, so a late callback cannot run the tail a second time.
+local released = false
+local function releaseOnce(why)
+  if released then return end
+  released = true
+  _G.__qrMenuRelease = why
+  afterMenuReleased()
+end
+
+_G.__qrStep = 'pauseMenu:closeIfCreated'
+if _G.__qrMenuCloseViaGame and type(_G.pauseMenu.closeIfCreated) == 'function' then
+  local okh, errh = pcall(function()
+    _G.pauseMenu:closeIfCreated(function() releaseOnce('the close callback') end)
+  end)
+  if okh then
+    _G.__qrMenuClosedVia = 'closeIfCreated'
+    -- three times the fadeOut, so it only fires when the callback genuinely never came
+    _G.timer.performWithDelay(600, function()
+      releaseOnce('WATCHDOG - the close callback never came')
+    end, 1)
+  else
+    -- A close that threw must not leave the rest of the teardown unrun: the world would stay up and
+    -- the load would go into it.
+    _G.__qrMenuClosedVia = 'closeIfCreated FAILED: ' .. tostring(errh)
+    _G.pauseMenu:forceDestroyIfCreated()
+    releaseOnce('closeIfCreated threw')
+  end
+else
+  _G.pauseMenu:forceDestroyIfCreated()
+  releaseOnce('forceDestroyIfCreated')
+  _G.__qrMenuClosedVia = 'forceDestroyIfCreated'
+end
 '''
 
 # The last two calls of the Quit button's sequence. They are what puts the game back on the main menu,
@@ -860,31 +928,41 @@ else
   -- accepts - a reload reported "title group removed = true" - and it is the handle the title
   -- screen's OWN exit from the menu uses for its display.remove(parentGroup) (L389).
   _G.__qrTitleGroup = _G.titleScreen:new()
-  -- THE ENTRANCE IS LEFT ALONE, AND IT HAS TO BE. `new()` ends by calling
-  -- `inputHelper:blockInput()` (L479, pc 825-827) and then starting the entrance
+  -- WHAT JUST HAPPENED, because it decides how fast this can be. `new()` ends by calling
+  -- `inputHelper:blockInput()` (L479, pc 825-827) and then starting its own entrance
   --     transition.fadeIn(parentGroup, 350, outQuad, <closure at L519-540>)        -- L512-517
-  -- and that closure's FIRST ACTION is `inputHelper:unblockInput()` (L522). So the block and the
-  -- unblock are a pair, and the entrance's completion is the only thing that clears it. Cancelling
-  -- the entrance - which is what this file did, with `transition.cancelAll()` right here - leaves
-  -- input BLOCKED for the rest of the session: every touch, mouse and mapped-button dispatch is
-  -- suppressed, while movement keeps working because it is polled from the axes and never goes through
-  -- that gate. That is exactly the report "movement works, but no other keys do", and it appeared the
-  -- moment the cancelAll was added.
+  -- and the ENTRANCE'S FIRST ACTION is `inputHelper:unblockInput()` (L522). So the block and the
+  -- unblock are a pair and the entrance's completion is the only thing that clears it. That is also
+  -- why cancelling the entrance without putting the unblock back leaves input BLOCKED for the rest of
+  -- the session - every touch, mouse and mapped-button dispatch suppressed, while movement keeps
+  -- working because it is polled from the axes and never goes through that gate. That is exactly the
+  -- "movement works, but no other keys do" report, and it appeared the moment the cancel was added.
   --
-  -- So instead of cancelling it, leaveMenuThenLoad() WAITS for it. `inputHelper:isInputBlocked()` is
-  -- the game's own "the entrance has finished" signal, and it is the exact partner of the block above -
-  -- nothing else in this path blocks input. Waiting also removes the original crash without cancelling
-  -- anything: by the time the group is removed, the entrance's transitions have completed and their
-  -- onCompletes have already run against a LIVE screen, so there is nothing left to fire into a removed
-  -- one. That crash was `CoromonLogo:playSwurmySequence` -> `setSequenceAndPlay` being nil, called from
-  -- the onComplete at t~1000 ms while the group had been removed at t~354 ms.
-  --
-  -- The cost is honest and visible: the menu is up for ~1 s before the load, and its entrance plays.
-  -- That IS the game's own timeline (350 + 150 + 500 ms), and the player's route through the menu is
-  -- no faster. It also means the entrance's other work happens normally - the game-settings migration
-  -- popups, playRandomSwurmySequences and the `hasShownSaveslotClustersScreen` bookkeeping - none of
-  -- which this file would otherwise replicate.
-  _G.__qrMenuEntrance = 'left to run; the leave step waits for input to be unblocked'
+  -- Both halves of the pair have to be honoured, and CANCEL_MENU_ENTRANCE picks which way:
+  --   cancel (default) - cancel the entrance HERE, the instant it is scheduled, and call
+  --                      `inputHelper:unblockInput()` at the end of the leave step. This is what makes
+  --                      the reload fast: the entrance's timeline is 350 + 150 + 500 = ~1000 ms and
+  --                      skipping it skips all of it. Cancelling also removes the crash that started
+  --                      this work - `CoromonLogo:playSwurmySequence` -> `setSequenceAndPlay` nil, from
+  --                      the entrance's completion firing at ~1000 ms into a group removed at
+  --                      ~354 ms - because a cancelled transition never runs its onComplete
+  --                      (transition.lu L27). What else it defers is written down in
+  --                      CANCEL_MENU_ENTRANCE's note: the settings-migration popups and
+  --                      `optionallyShowKeyboardControls`, both of which belong to a menu this reload
+  --                      deletes a moment later, so neither could have been shown anyway.
+  --   wait            - leave the entrance alone and let leaveMenuThenLoad() poll
+  --                      `inputHelper:isInputBlocked()`. The game's own route, ~1000 ms slower.
+  if _G.__qrCancelEntrance then
+    if type(_G.transition) == 'table' and type(_G.transition.cancelAll) == 'function' then
+      local okc, errc = pcall(function() _G.transition.cancelAll() end)
+      _G.__qrMenuEntrance = okc and 'entrance cancelled at the source; the leave step unblocks input'
+                              or ('transition.cancelAll FAILED: ' .. tostring(errc))
+    else
+      _G.__qrMenuEntrance = 'no transition.cancelAll, so the entrance is still scheduled'
+    end
+  else
+    _G.__qrMenuEntrance = 'left to run; the leave step waits for input to be unblocked'
+  end
   _G.__qrStep = 'at the main menu'
 end
 '''
@@ -911,6 +989,68 @@ TEARDOWN = TEARDOWN_BASE + TEARDOWN_MENU
 # `leaving the menu` / `left the menu` pair in the probe log: `lvl` has to come back down by exactly
 # one. If it does not, this is the switch to flip back.
 MENU_ROUND_TRIP = True
+
+# WHAT HAPPENS TO THE TITLE SCREEN'S ENTRANCE, and it is the whole difference between a ~1.4 s reload
+# and a ~0.25 s one. `titleScreen:new()` blocks input (L479) and then starts a ~1000 ms entrance
+# (350 + 150 + 500, L512-517) whose completion is what unblocks it (L522).
+#
+#   True  - cancel the entrance the instant it is scheduled, and call `inputHelper:unblockInput()` at
+#           the end of the leave step instead (leaveMenuThenLoad). Fast, and it cannot crash: a
+#           cancelled transition never runs its onComplete, so the completion that used to fire into a
+#           removed screen at ~1000 ms simply does not happen.
+#   False - let the entrance run and wait on `inputHelper:isInputBlocked()`. The game's own route.
+#
+# What cancelling defers, stated so it is not a surprise later: the entrance's completion also drives
+# the game-settings migration popups and `gameSettings:optionallyShowKeyboardControls`. Both are things
+# the TITLE SCREEN shows, and this reload deletes the title screen a moment later, so neither could
+# have been displayed anyway; they will appear on the next ordinary visit to the menu. Nothing else in
+# the completion matters to a load - the rest is `playRandomSwurmySequences` (cosmetic, on a screen
+# that is going away) and the title screen's own navigation taking focus, which we do not want.
+CANCEL_MENU_ENTRANCE = True
+
+# CLOSE THE PAUSE MENU THE GAME'S OWN WAY, instead of force-destroying it.
+#
+# `pauseMenu:closeIfCreated(cb)` is `if instance then instance:close(opt) elseif opt then opt() end`
+# (proto (0,4) L31-37, read out of the bytecode, not assumed), and `close` (proto (0,6,15) L246-268) is a
+# complete teardown that `forceDestroy` is not:
+#
+#   close(cb)  blockInput -> playSound('menuBack') -> menuBuilder.close(self, inner)
+#                inner: beforeClose()                       [runs onBeforeCloseFunctions]
+#                       topBar:hide(); bottomBar:hide()
+#                       transition.fadeOut(getBottomGroup(), 200, outQuad, removeSelf, done)
+#                         done:  unblockInput(); afterClose(); if cb then cb() end
+#     afterClose (proto (0,6,20) L299-317):
+#                       decreaseInputLevelIfNotAlreadyDone()   <- guarded by didDecreaseInputLevel
+#                       fadeMusicVolumeModifier(200, 1.0)
+#                       destroyInstance()
+#                       onAfterCloseFunctions()
+#                       topBar:onDestroy(); bottomBar:onDestroy()
+#                       eventManager:dispatch('pauseMenuClosed')
+#
+# and menuBuilder.close -> unloadCurrentScreen(true, cb) runs the mounted SCREEN's outTransition and
+# clears it. The pause menu is a screen stack - menuBuilder keeps `history`, `currentScreenObject`,
+# `currentScreenName`, and the items/squad/settings pages are screens - so `forceDestroy`, which is only
+# `cancelRecursive(self) + onUnloadScreen() + afterClose()`, leaves the current page mounted with its own
+# subscriptions alive. That is the measured fault: the items page visible on top of the pause menu, and
+# a stale nav bar still listening to the navigation-method event, which is what magnet.lua:41 dies on
+# when alt-tab changes the input method.
+#
+# It also REPLACES OUR OWN BOOKKEEPING. Because afterClose does the guarded
+# decreaseInputLevelIfNotAlreadyDone, a separate `decreaseInputLevel()` of ours is a SECOND decrement on
+# the same level, and that call has no lower bound (inputHelper L162-173). The leave step's own level
+# surgery is therefore skipped when this is on.
+#
+# It implies the round trip: `close` supplies the input bookkeeping the title screen was being used to
+# borrow, so creating the screen and taking it away again is not needed. USE_ROUND_TRIP below enforces
+# that, and the ~350 ms entrance wait goes with it.
+#
+# True  - close the menu with the game's own close and run the rest of the teardown in its callback.
+# False - force-destroy it and run the rest immediately, which is the previous behaviour exactly.
+MENU_CLOSE_VIA_GAME = True
+
+# The route actually taken. With the game's close there is nothing for the round trip to borrow, and the
+# title screen's entrance is not started (so there is nothing to cancel either).
+USE_ROUND_TRIP = MENU_ROUND_TRIP and not MENU_CLOSE_VIA_GAME
 
 # BODY itself is composed below RELOAD_BODY, which it needs.
 
@@ -1357,6 +1497,18 @@ local function finish()
     _G.__qrDone = 'threw: ' .. tostring(err)
     restoreMenu('loadGame threw')
   end
+  -- HOW LONG THE RELOAD TOOK, from the press to the load being issued. `system.getTimer()` is ms since
+  -- the app started, monotonic, and `__qrT0` is set in the feature's fire(). This is the number that
+  -- says whether a speed-up was real, and it includes every wait in the chain (the pre-body frame, the
+  -- world-teardown poll, the entrance) so no single one can quietly grow back.
+  if type(_G.system) == 'table' and type(_G.system.getTimer) == 'function'
+     and type(_G.__qrT0) == 'number' then
+    local okt, now = pcall(function() return _G.system.getTimer() end)
+    if okt and type(now) == 'number' then
+      _G.__qrLoadMs = now - _G.__qrT0
+      say(string.format('    load issued: %d ms after the press', _G.__qrLoadMs))
+    end
+  end
   _G.__qrStep = 'finished'
 end
 
@@ -1376,6 +1528,10 @@ local function leaveMenuThenLoad()
   if not _G.__qrMenuRoundTrip or _G.__qrTitleGroup == nil then
     _G.__qrLeaveSteps = _G.__qrMenuRoundTrip and 'no title group to leave'
                         or 'skipped - not going through the menu'
+    -- WHICH ROUTE CLOSED THE MENU, because that is the one line that says whether the game own close
+    -- ran or whether we fell back to force-destroying it.
+    say('  menu closed by:  ' .. tostring(_G.__qrMenuClosedVia or 'not closed here') ..
+        '  (' .. _G.__qrLeaveSteps .. ')')
     finish()
     return
   end
@@ -1405,7 +1561,9 @@ local function leaveMenuThenLoad()
   end
   local function attempt()
     local blocked = entranceDone()
-    if blocked == true and waited < 3000 then
+    -- In cancel mode there is no entrance left to wait for - it never runs - but the flag is still
+    -- read once, because it is the evidence that the unblock at the end of this step was needed.
+    if not _G.__qrCancelEntrance and blocked == true and waited < 3000 then
       waited = waited + 50
       _G.timer.performWithDelay(50, attempt, 1)
       return
@@ -1457,6 +1615,13 @@ local function leaveMenuThenLoad()
     -- So the flag is left exactly as `titleScreen:new()` set it, which is also the state the game is
     -- in for the entire time the menu is up. The keys line below records what it actually is, so this
     -- can be checked rather than trusted.
+    if _G.__qrCancelEntrance then
+      -- the entrance was already cancelled in TEARDOWN_MENU; calling unblockInput here, at the very end
+      -- of the leave step, is putting back the one thing that entrance would have done that matters.
+      -- Without it input stays blocked and every button and mapped key is dead while the stick still
+      -- moves - the failure that cost a session.
+      step('unblockInput', function() _G.inputHelper:unblockInput() end)
+    end
     _G.__qrLeaveSteps = table.concat(steps, ' ')
     local after = levelSnapshot()
     _G.__qrLevelAfterLeave = levelLine(after)
@@ -1500,15 +1665,20 @@ local function poll()
   if #_G.__qrLog > 40 then table.remove(_G.__qrLog, 1) end
 
   local settled = (not noGate) and (created == false)
-  -- and do not rush it: let the frame in which the world went away finish before building a new one
-  if (settled and waited >= 300) or waited >= 5000 or (noGate and waited >= 250) then
+  -- `isCreated()` going false IS the deferred half of `worldHelper:destroy()` having run - that is what
+  -- nils the instance - so the signal alone is enough and the floor is only "let one more frame pass"
+  -- (16 ms is one frame; 64 is four, which costs nothing next to the ~1000 ms the entrance used to).
+  -- It was 300 ms, which was pure padding: the log shows isCreated=false from 16 ms on every run, so
+  -- 284 ms of every reload was spent waiting for nothing. The 5 s cap and the no-signal fallback are
+  -- unchanged.
+  if (settled and waited >= 64) or waited >= 5000 or (noGate and waited >= 250) then
     stopped = true
     if pollTimer then pcall(function() pollTimer:cancel() end) end
     _G.__qrWhy = settled and ('isCreated() went false after ' .. tostring(waited) .. ' ms')
                  or (noGate and 'no isCreated() to wait on, so a fixed wait'
                      or 'timed out after 5 s with isCreated() still true')
     _G.__qrStep = 'waiting stopped after ' .. tostring(waited) .. ' ms'
-    if (settled and waited >= 300) or (noGate and waited >= 250) then
+    if (settled and waited >= 64) or (noGate and waited >= 250) then
       leaveMenuThenLoad()
     else
       restoreMenu('worldHelper:isCreated() never went false')
@@ -1528,9 +1698,12 @@ return _G.__qrReport
 # what the reload runs: the Quit button's sequence, then the title screen's own exit from the menu,
 # then the load. The flag goes at the top of the chunk because TEARDOWN_BASE reads it to decide
 # whether to do its own level surgery.
-BODY = (('_G.__qrMenuRoundTrip = true\n' if MENU_ROUND_TRIP else '')
+BODY = (('_G.__qrMenuCloseViaGame = true\n' if MENU_CLOSE_VIA_GAME else '')
+        + (('_G.__qrMenuRoundTrip = true\n'
+            + ('_G.__qrCancelEntrance = true\n' if CANCEL_MENU_ENTRANCE else ''))
+           if USE_ROUND_TRIP else '')
         + TEARDOWN_BASE
-        + (TEARDOWN_MENU if MENU_ROUND_TRIP else '')
+        + (TEARDOWN_MENU if USE_ROUND_TRIP else '')
         + RELOAD_BODY)
 
 

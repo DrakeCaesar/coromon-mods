@@ -203,10 +203,13 @@ local function qrWiProbeSummary()
   -- interface the declined press came from (#n is the current one, so #n-1 is the one just replaced);
   -- a serial far behind the current one would mean old interfaces are being kept, not just the last.
   return string.format(
-    'created=%s button=%s level=%s navs=%s overlays=%s hoverables=%d dead=%d stale=%d lastStale=#%s of #%s',
+    'created=%s button=%s level=%s navs=%s overlays=%s hoverables=%d dead=%d stale=%d staleBack=%d lastStale=#%s of #%s open=%s close=%s touch=%s',
     tostring(p.created), button, tostring(p.level), tostring(p.navLevels),
     tostring(p.overlays), p.hover or 0, p.hoverDead or 0,
-    _G.__qrStalePress or 0, tostring(_G.__qrStaleSerial or '-'), tostring(_G.__qrSerial or '-'))
+    _G.__qrStalePress or 0, _G.__qrStaleBack or 0,
+    tostring(_G.__qrStaleSerial or '-'), tostring(_G.__qrSerial or '-'),
+    tostring(_G.__qrMenuOpens or 0), tostring(_G.__qrMenuCloses or 0),
+    tostring((_G.__qrRegN or {}).touch or 0))
 end
 
 -- A DISPOSED DISPLAY OBJECT IS STILL CALLABLE THROUGH THE FIELDS THE GAME ASSIGNED TO IT.
@@ -259,6 +262,72 @@ local function qrGuardButton()
   return string.format('guarded %d method(s) on button #%d', wrapped, btn.__qrSerial)
 end
 
+-- A BACK PRESS WITH NO PAUSE MENU IS MEANINGLESS, AND IT KILLS THE GAME.
+--
+-- `pauseMenu.lua:201-203` is the Back button's ENTIRE handler:
+--
+--     local function _onPress()
+--       instance:back()          -- L202
+--     end
+--
+-- `instance` is a module-level local, and the module's own `destroy` (L19-22) is
+-- `instance = display.remove(instance)` - so once the menu has been destroyed, `instance` is nil and
+-- any later Back press indexes nil:
+--
+--     pauseMenu.lua:202: attempt to index upvalue 'instance' (a nil value)
+--       in function '_onPress'
+--         <- outerTopBarBackButtonBuilder.lua:27  _onButtonPressed
+--         <- UIButton.lua:83 _onComplete  <- UIButtonTransition.lua:90 onComplete
+--         <- transition.lua:29 completeTransition
+--
+-- Note the route: the press arrives through a UIButtonTransition COMPLETING, i.e. the press animation
+-- finishes after the press was handled. So this is the second delivery of a press that already closed
+-- the menu, or a Back button left registered by an earlier reload - the same stale-delivery family as
+-- the interact prompt, one menu over. It needs a reload or two to build up, which is exactly how it was
+-- reported.
+--
+-- The seam: `outerTopBarBackButtonBuilder.new(self, _onBeforePress, _onPress)` takes the callbacks as
+-- ARGUMENTS (proto params=3; the onPress closure closes over the third). And a full-game scan says
+-- **pauseMenu is the ONLY module that requires this builder** - so every Back button in the game belongs
+-- to the pause menu. That is what makes `pauseMenu:isCreated()` the right test, and it is also why this
+-- is not a behaviour being suppressed: a Back press with no pause menu has nothing to act on. The call
+-- is not intercepted before it is made, it is simply not made, on an object that is gone - the same
+-- shape as the interact-button guard above.
+local function qrGuardBackButton()
+  local pm = _G.pauseMenu
+  local builder = package.loaded[
+    'classes.interface.navBarObjects.topBarObjects.outerTopBarBackButtonBuilder']
+  if type(pm) ~= 'table' or type(pm.isCreated) ~= 'function' then return 'no pauseMenu' end
+  if type(builder) ~= 'table' or type(builder.new) ~= 'function' then
+    return 'back button builder is not loaded yet'
+  end
+  -- the tag goes on the module TABLE, not on `new` itself: in Lua a function value cannot be indexed,
+  -- so `builder.new.__qrGuarded` is "attempt to index field 'new' (a function value)" and it aborted
+  -- the whole install. (The interact-button guard above tags a display object, which is fine.)
+  if builder.__qrBackGuarded then return 'already guarded' end
+  local orig = builder.new
+  local wrapped = function(self, onBeforePress, onPress)
+    local guarded = function(...)
+      -- `isCreated()` is `return instance`, so it answers the INSTANCE or NIL - never `false`. The first
+      -- version of this compared `created == false`, which is never true, so the guard sat in the call
+      -- chain doing nothing at all: the probe shows `staleBack=0` right through the session that
+      -- crashed, and the traceback shows our closure calling straight through to the game's handler.
+      -- Truthiness is the test, and the game uses it itself - combinedNavigationBuilder L22-23 is
+      -- `if not self:isFocused() then self:handleObtainFocus()`.
+      local ok, created = pcall(function() return pm:isCreated() end)
+      if not ok or not created then
+        _G.__qrStaleBack = (_G.__qrStaleBack or 0) + 1
+        return
+      end
+      return onPress and onPress(...)
+    end
+    return orig(self, onBeforePress, guarded)
+  end
+  builder.__qrBackGuarded = true
+  builder.new = wrapped
+  return 'the Back button on the pause menu'
+end
+
 -- THE DIAGNOSIS WRITES ITSELF OUT, so it does not depend on anyone copying it out of a terminal. One
 -- line per state change: the interface identity, whether the button is alive, and how many of the
 -- input registrations point at objects that no longer exist.
@@ -285,6 +354,225 @@ local function qrLog(text)
       end
     end)
   end
+end
+
+-- Made reachable by name, because the watcher below runs from ARBITRARY game code, long after this
+-- chunk has finished. A watcher that records into a table and hopes a later tick flushes it loses up to
+-- one host tick of entries - which is exactly the window a crash lands in. qrLog opens, appends and
+-- closes on every call, so this is already crash-safe.
+_G.__qrLogLine = qrLog
+
+-- ============================ THE MENU WATCHER ============================
+-- READ-ONLY. It wraps a handful of functions to COUNT calls and to record where they came from, calls
+-- straight through with the original arguments, and returns the original results. Nothing is declined,
+-- nothing is mutated, and it can be installed at any time.
+--
+-- WHY. The reported fault is the ITEMS menu drawing on top of the NORMAL pause menu after a few
+-- reloads, with a Back press then crashing in `pauseMenu.lua:202`. There are two candidate mechanisms
+-- and the existing log cannot tell them apart:
+--   (a) ONE press opening TWO menus. The escape button is one touchable carrying two handlers -
+--       `onBeforePress` and `onPress` - short press opens the menu, long press opens the items page.
+--       Normally only one runs. If both run we get exactly the layering described.
+--   (b) a STALE registration from an earlier reload. Destroying a menu does not unregister its buttons
+--       (a documented Solar2D/inputHelper fact in this project), so a press can reach a button whose
+--       menu is gone - the same family as the interact prompt.
+-- What separates them is the traceback of each menu OPEN (which handler called it) and whether the
+-- registration count grows across reloads. So this records both.
+
+local function qrTrace(skip)
+  if type(debug) ~= 'table' or type(debug.traceback) ~= 'function' then return '?' end
+  local ok, tb = pcall(debug.traceback, '', skip or 3)
+  if not ok or type(tb) ~= 'string' then return '?' end
+  local keep = {}
+  for line in tb:gmatch('[^\n]+') do
+    -- only frames that name a Lua file: the engine's C frames and the chunk header add nothing
+    if line:find('%.lua') then
+      keep[#keep + 1] = (line:gsub('^%s+', ''))
+      if #keep >= 5 then break end
+    end
+  end
+  if #keep == 0 then return '?' end
+  return table.concat(keep, '  <-  ')
+end
+
+-- The registration census. There is no way to ASK inputHelper how many touchables it holds - the module
+-- exports add/remove/isTouchable and getObjectsListeningToMouseHover, and nothing that enumerates the
+-- touchables - so the count is maintained here by wrapping the add and remove calls. Weak keys, so this
+-- cannot be the reason an object is kept alive.
+local qrReg = {
+  touch   = setmetatable({}, { __mode = 'k' }),
+  hover   = setmetatable({}, { __mode = 'k' }),
+  overlay = setmetatable({}, { __mode = 'k' }),
+}
+_G.__qrRegN = { touch = 0, hover = 0, overlay = 0 }
+
+local function qrCensus()
+  local n = _G.__qrRegN
+  return string.format('touchables=%d hoverables=%d overlays=%d', n.touch, n.hover, n.overlay)
+end
+
+local function qrWatchRegister(prefix, key)
+  local ih = _G.inputHelper
+  if type(ih) ~= 'table' then return end
+  local addName, remName = prefix .. 'addTouchable', prefix .. 'removeTouchable'
+  local add, rem = ih[addName], ih[remName]
+  if type(add) == 'function' and not ih['__qrWatchAdd' .. key] then
+    ih[addName] = function(self, obj, ...)
+      if obj ~= nil and qrReg[key][obj] == nil then
+        qrReg[key][obj] = true
+        _G.__qrRegN[key] = _G.__qrRegN[key] + 1
+      elseif obj ~= nil then
+        -- A SECOND registration of an object that is already in the list. This is the concrete thing
+        -- both suspects produce, and it is worth a line of its own with the caller.
+        _G.__qrLogLine(string.format('  DUP %s: an object already in the list was added again\n    from %s',
+                                     addName, qrTrace(3)))
+      end
+      return add(self, obj, ...)
+    end
+    ih['__qrWatchAdd' .. key] = true
+  end
+  if type(rem) == 'function' and not ih['__qrWatchRem' .. key] then
+    ih[remName] = function(self, obj, ...)
+      if obj ~= nil and qrReg[key][obj] ~= nil then
+        qrReg[key][obj] = nil
+        _G.__qrRegN[key] = _G.__qrRegN[key] - 1
+      end
+      return rem(self, obj, ...)
+    end
+    ih['__qrWatchRem' .. key] = true
+  end
+end
+
+local function qrLevelNow()
+  local ok, v = pcall(function() return _G.inputHelper:getInputLevel() end)
+  return (ok and type(v) == 'number') and tostring(v) or '?'
+end
+
+local function qrWatchMenu()
+  local pm = _G.pauseMenu
+  if type(pm) ~= 'table' then return 'no pauseMenu' end
+  _G.__qrMenuOpens, _G.__qrMenuCloses = _G.__qrMenuOpens or 0, _G.__qrMenuCloses or 0
+  local function alive()
+    local ok, a = pcall(function() return pm:isCreated() end)
+    return ok and a ~= nil
+  end
+  for _, name in ipairs({ 'createInstance', 'createInstanceAndPauseWorld' }) do
+    local orig = pm[name]
+    if type(orig) == 'function' and not pm['__qrWatch' .. name] then
+      pm[name] = function(self, ...)
+        _G.__qrMenuOpens = _G.__qrMenuOpens + 1
+        local open = alive()
+        -- alreadyOpen is the whole point: a menu opened while one is still up is the layer.
+        _G.__qrLogLine(string.format('  menu OPEN  #%d lvl=%s %s alreadyOpen=%s via %s\n    from %s',
+          _G.__qrMenuOpens, qrLevelNow(), qrCensus(), tostring(open), name, qrTrace(3)))
+        -- AND IT IS REFUSED. This is the layer, and the log named its cause:
+        --
+        --   menu OPEN  #7 lvl=2 ... alreadyOpen=true via createInstanceAndPauseWorld
+        --     from worldInterface.lua:406: in function '_onHold'
+        --       <- inputHelper.lua:329: in function 'listener'
+        --         <- timer.lua:62: in function 'triggerTimer'
+        --
+        -- That is a HOLD TIMER, not a press. inputHelper schedules
+        -- `timer.performWithDelay(_onHoldDuration, <closure at L325-330>)` when a touchable goes down,
+        -- and that closure calls `_onHold(event)` when it expires; the RELEASE handler is what cancels
+        -- it (the closure itself even starts with `timer.cancel(target.holdTimer)`). A reload takes the
+        -- release away, so a hold that began before the reload expires after it and opens a second
+        -- pause menu on top of the one the player had just opened - two menus, level 3, navs {1,2,3},
+        -- and one of them apparently showing the items page over the other.
+        --
+        -- The game never opens a second one: every caller checks `pauseMenu:isCreated()` first and
+        -- closes before opening. So refusing cannot break a legitimate flow - and returning the menu
+        -- that is already up, rather than nil, keeps whole the callers that use the return value.
+        if open and _G.__qrBlockSecondMenu ~= false then
+          _G.__qrBlockedMenus = (_G.__qrBlockedMenus or 0) + 1
+          _G.__qrLogLine(string.format(
+            '  menu OPEN BLOCKED #%d - a pause menu is already up', _G.__qrBlockedMenus))
+          local oki, inst = pcall(function() return pm:isCreated() end)
+          return oki and inst or nil
+        end
+        return orig(self, ...)
+      end
+      pm['__qrWatch' .. name] = true
+    end
+  end
+  for _, name in ipairs({ 'forceDestroyIfCreated', 'closeIfCreated' }) do
+    local orig = pm[name]
+    if type(orig) == 'function' and not pm['__qrWatch' .. name] then
+      pm[name] = function(self, ...)
+        -- Logged BEFORE the call and tail-returned, deliberately: this is Lua 5.1, so there is no
+        -- table.pack/table.unpack to preserve an unknown number of returns through a pcall - and a
+        -- `return orig(self, ...)` cannot be preceded by a log line. If the call throws, it throws
+        -- exactly as it would have unwrapped.
+        if alive() then
+          _G.__qrMenuCloses = _G.__qrMenuCloses + 1
+          _G.__qrLogLine(string.format('  menu CLOSE #%d lvl=%s %s via %s',
+            _G.__qrMenuCloses, qrLevelNow(), qrCensus(), name))
+        end
+        return orig(self, ...)
+      end
+      pm['__qrWatch' .. name] = true
+    end
+  end
+  return 'watching the pause menu'
+end
+
+-- How many of the two top-bar buttons exist. A growing count is a stale registration being carried;
+-- a count that returns to its old value after a menu closes means the menu cleaned up after itself.
+local function qrWatchButtonBuilders()
+  local n = 0
+  for path, label in pairs({
+      ['classes.interface.navBarObjects.topBarObjects.outerTopBarEscapeButtonBuilder'] = 'escape',
+      ['classes.interface.navBarObjects.topBarObjects.outerTopBarBackButtonBuilder']   = 'back',
+    }) do
+    local m = package.loaded[path]
+    if type(m) == 'table' and type(m.new) == 'function' and not m.__qrWatchNew then
+      local orig = m.new
+      m.new = function(...)
+        _G.__qrBuilt = _G.__qrBuilt or {}
+        _G.__qrBuilt[label] = (_G.__qrBuilt[label] or 0) + 1
+        _G.__qrLogLine(string.format('  %s BUTTON #%d built %s\n    from %s',
+          label, _G.__qrBuilt[label], qrCensus(), qrTrace(3)))
+        return orig(...)
+      end
+      m.__qrWatchNew = true
+      n = n + 1
+    end
+  end
+  return string.format('button builders watched: %d', n)
+end
+
+local function qrWatch()
+  qrWatchRegister('', 'touch')
+  qrWatchRegister('', 'hover')
+  -- the overlay variants have their own names
+  local ih = _G.inputHelper
+  if type(ih) == 'table' then
+    if type(ih.addTouchableOverlay) == 'function' and not ih.__qrWatchOverlay then
+      local orig = ih.addTouchableOverlay
+      ih.addTouchableOverlay = function(self, obj, ...)
+        if obj ~= nil and qrReg.overlay[obj] == nil then
+          qrReg.overlay[obj] = true
+          _G.__qrRegN.overlay = _G.__qrRegN.overlay + 1
+        end
+        return orig(self, obj, ...)
+      end
+      ih.__qrWatchOverlay = true
+    end
+    if type(ih.removeTouchableOverlay) == 'function' and not ih.__qrWatchOverlayRem then
+      local orig = ih.removeTouchableOverlay
+      ih.removeTouchableOverlay = function(self, obj, ...)
+        if obj ~= nil and qrReg.overlay[obj] ~= nil then
+          qrReg.overlay[obj] = nil
+          _G.__qrRegN.overlay = _G.__qrRegN.overlay - 1
+        end
+        return orig(self, obj, ...)
+      end
+      ih.__qrWatchOverlayRem = true
+    end
+  end
+  local a = qrWatchMenu()
+  local b = qrWatchButtonBuilders()
+  return a .. ', ' .. b
 end
 
 -- Which of the four dialogue modules currently has a box up. Read-only; `isCreated` and `destroy`
@@ -555,6 +843,61 @@ local function qrOnStage(o)
   return false
 end
 
+-- THE ESCAPE BUTTON, AND WHY IT NEEDS THE BACK BUTTON'S TREATMENT TOO.
+--
+-- The crash this is for, after a session that had layered menus:
+--
+--   pauseMenu.lua:239: attempt to call method 'close' (a nil value)
+--     pauseMenu.lua:239: in function '_onBeforePress'
+--     <outerTopBarEscapeButtonBuilder.lua:32: in function <outerTopBarEscapeButtonBuilder.lua:31>
+--     inputHelper.lua:311 -> navigations.lua -> combinedNavigationBuilder
+--       -> inputHelper.lua:881 handleKeyOrMappedButton
+--
+-- It can happen at all because `pauseMenu.lua` never calls `removeTouchable` ANYWHERE. Every menu that
+-- has ever been opened leaves its two top-bar buttons registered with the input layer for the rest of
+-- the session, so one Esc press is dispatched to all of them - including the buttons of menus that
+-- were destroyed several reloads ago. Those buttons hold the closures pauseMenu built for them
+-- (pauseMenu proto (0,6) pc 357-363: `outerTopBarEscapeButtonBuilder:new(true, <child 13>,
+-- <child 14>)`, child 13 = `not self:canClose()` L238-240, child 14 = `instance:close()` L240-242),
+-- and both of those act on the menu that was current when the button was built - a dead one.
+--
+-- The Back guard declines on `pauseMenu:isCreated()`, which was right there because a Back press means
+-- nothing when no menu is up. That test CANNOT be reused here: this same builder is what opens the
+-- pause menu from nothing, so declining on "no menu" would disable the escape button. The test that is
+-- true for both cases is whether the BUTTON ITSELF is still on the stage - a press on a button that is
+-- no longer displayed means nothing - which is exactly what qrOnStage already asks. It is applied to
+-- BOTH callbacks, so it does not matter which of the two the nil `close` was in.
+local function qrGuardEscapeButton()
+  local builder = package.loaded[
+    'classes.interface.navBarObjects.topBarObjects.outerTopBarEscapeButtonBuilder']
+  if type(builder) ~= 'table' or type(builder.new) ~= 'function' then
+    return 'escape button builder is not loaded yet'
+  end
+  if builder.__qrEscapeGuarded then return 'already guarded' end
+  local orig = builder.new
+  local wrapped = function(self, a, onBeforePress, onPress)
+    -- the button is the builder's RETURN VALUE, so it cannot be captured before the call; the closures
+    -- read it through this upvalue, and it is set by the time any press can reach them.
+    local button = nil
+    local function guard(fn)
+      if type(fn) ~= 'function' then return fn end
+      return function(...)
+        if button ~= nil and not qrOnStage(button) then
+          _G.__qrStaleEscape = (_G.__qrStaleEscape or 0) + 1
+          return false
+        end
+        return fn(...)
+      end
+    end
+    local out = orig(self, a, guard(onBeforePress), guard(onPress))
+    button = out
+    return out
+  end
+  builder.__qrEscapeGuarded = true
+  builder.new = wrapped
+  return 'the Escape button on the pause menu'
+end
+
 local function qrPruneOffstageInput()
   local ih = _G.inputHelper
   if type(ih) ~= 'table' or type(ih.getObjectsListeningToMouseHover) ~= 'function' then
@@ -698,6 +1041,16 @@ do
   -- Installed once, not per reload: a stale dialogue is closed whenever the game feels like it, not
   -- only around a reload.
   qrLog('install - ' .. qrGuardTransition())
+  -- pcall'd on purpose. A mistake in the guard itself took the WHOLE install down once - every other
+  -- feature in the chunk went with it and the only symptom was reload=off in --status - so this one
+  -- reports its own failure instead of taking the chunk with it.
+  local okBack, saidBack = pcall(qrGuardBackButton)
+  qrLog('install - back button: ' .. (okBack and tostring(saidBack)
+                                        or ('FAILED: ' .. tostring(saidBack))))
+  -- the menu watcher: read-only, and installed the same defensive way
+  local okWatch, saidWatch = pcall(qrWatch)
+  qrLog('install - watcher: ' .. (okWatch and tostring(saidWatch)
+                                    or ('FAILED: ' .. tostring(saidWatch))))
 
   -- The proven chunks, run verbatim. See the module docstring for what each one does.
   local PREFLIGHT = __PREFLIGHT__
@@ -713,39 +1066,40 @@ do
   local function fire()
     if f.busy then return end
     f.busy = true
-    f.step = 'closing the pause menu'
+    f.step = 'pre-flight'
+    -- Start the clock here, at the press, so the body's final line can say how long the whole thing
+    -- took. Monotonic and in ms; the body reads it back.
+    _G.__qrT0, _G.__qrLoadMs = nil, nil
+    if type(_G.system) == 'table' and type(_G.system.getTimer) == 'function' then
+      local okt, t0 = pcall(function() return _G.system.getTimer() end)
+      if okt and type(t0) == 'number' then _G.__qrT0 = t0 end
+    end
 
-    -- CLOSE THE PAUSE MENU THE GAME'S OWN WAY, FIRST, BEFORE ANYTHING IS TORN DOWN.
+    -- THE CLOSE MOVED INTO THE TEARDOWN, AND THAT IS THE FIX.
     --
-    -- This is the answer to why the teardown was so hard. The teardown calls
-    -- `pauseMenu:forceDestroyIfCreated()` because forceDestroy releases the input level synchronously -
-    -- but forceDestroy is a HARD destroy, the one the game uses when everything is going away for good.
-    -- It bypasses the menu's normal close path, and the state it leaves behind is one the game never
-    -- leaves the module in while play continues: a DESTROYED instance that the module's own callbacks
-    -- still read (`_onPress` L202, `_onBeforePress` L240-242) and menus whose buttons are still
-    -- registered with the input layer. A later Back or Escape press then runs a callback belonging to a
-    -- menu that no longer exists.
+    -- It used to be started here, with NO callback, and then the teardown called
+    -- `pauseMenu:forceDestroyIfCreated()` about 60 ms later. forceDestroy is
+    -- `transition.cancelRecursive(self)` first, and cancelRecursive cancels by target over the menu's
+    -- whole display subtree - the close's own 200 ms `fadeOut(instance:getBottomGroup(), ...)` is one
+    -- of those targets, so the close was CANCELLED ~140 ms before it would have finished.
     --
-    -- `closeIfCreated` is the path a player's own Escape press takes. It leaves the module exactly as
-    -- the game leaves it after any normal close - a state the game MUST support, because the player can
-    -- reopen the menu afterwards. The teardown's forceDestroyIfCreated then finds nothing to destroy, so
-    -- there is no corpse and nothing unusual for the next press to walk into.
+    -- Everything the close does, it does in that fadeOut's completion, and `completeTransition` skips
+    -- an onComplete whose transition carries shouldBeCancelled (transition.lu L26-31). So none of it
+    -- ever ran: `unblockInput()`, then `afterClose()` -> `decreaseInputLevelIfNotAlreadyDone`,
+    -- `destroyInstance()`, `topBar:onDestroy()`, `bottomBar:onDestroy()` and
+    -- `eventManager:dispatch('pauseMenuClosed')`. The close was started and killed before it finished,
+    -- and the state it would have left behind was faked by hand afterwards by the level correction and
+    -- the focus repairs in the teardown.
     --
-    -- Done here, at the very start, so the close has the pre-flight, the transition cancel and the 50 ms
-    -- frame wait to settle before the teardown runs.
+    -- It now runs inside TEARDOWN_BASE through `closeIfCreated(cb)`, with the REST OF THE TEARDOWN in
+    -- its callback - so the close is given the time it needs and nothing cancels it, and the menu is
+    -- released before the world is taken down, which is the game's own order (the Quit button does
+    -- `pauseMenu:close(cb)` first and destroys the world from inside `cb`). Only the menu state is read
+    -- here: it is the "before" half of the pair and it costs nothing.
     pcall(function()
-      local pm = _G.pauseMenu
-      if type(pm) ~= 'table' or type(pm.closeIfCreated) ~= 'function' then
-        qrLog('  pauseMenu: closeIfCreated is not available')
-        return
-      end
       local before = pauseMenuState()
-      local okc, errc = pcall(function() pm:closeIfCreated() end)
-      local after = pauseMenuState()
-      qrLog(string.format('  pauseMenu closed first: %s (created %s -> %s, instanceClose %s -> %s)',
-        okc and 'ok' or ('FAILED: ' .. tostring(errc)),
-        tostring(before and before.created), tostring(after and after.created),
-        tostring(before and before.instClose), tostring(after and after.instClose)))
+      qrLog(string.format('  pauseMenu at the press: created %s, instanceClose %s',
+        tostring(before and before.created), tostring(before and before.instClose)))
     end)
 
     -- What the driver used to inject. The slot is left nil so the pre-flight reads the one the game
@@ -864,6 +1218,8 @@ do
       qrLog(string.format('load done (%s) - interface before=%s after=%s same=%s',
         tostring(_G.__qrDone), tostring(before), tostring(after),
         tostring(before ~= nil and before == after)))
+      qrLog(string.format('  press to load: %s ms',
+        _G.__qrLoadMs ~= nil and tostring(_G.__qrLoadMs) or 'not timed'))
       qrLog('  ' .. qrWiProbeSummary())
       -- And take away anything from the interface that was just replaced but did not go with it. Only
       -- when there is a duplicate to remove, and never the interface the game is driving now.
