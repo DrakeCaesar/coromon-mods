@@ -27,6 +27,8 @@ that grow are the answer. Ctrl+C to stop.
 The absolute values are not the point - only which column climbs.
 """
 
+import ctypes
+import ctypes.wintypes
 import os
 import sys
 import time
@@ -35,10 +37,52 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 
 from coromon_lua import MINIMAL_HOOKS, Bridge  # noqa: E402
+import pad_drive  # noqa: E402  (its Win32 helpers, not its CLI)
 
 PROCESS = "coromon.exe"
 SAMPLE_S = 3.0
 COUNT = 0          # 0 means until interrupted
+
+
+# MEMORY, READ WITHOUT ATTACHING. A leak of C-side objects - textures, audio, display objects - is
+# invisible to every Lua number in the chunk below, and it is exactly the shape of "it gets laggy
+# after many reloads": the Lua heap can sit still while the process grows. psutil is not installed
+# here, so this is the Win32 call directly; PagefileUsage is the commit charge, which is the private
+# footprint (the same number WMI reports as PageFileUsage).
+class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.wintypes.DWORD),
+        ("PageFaultCount", ctypes.wintypes.DWORD),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+    ]
+
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def memory_mb(pid):
+    """(working set, private commit) in MB, or None if the process cannot be opened."""
+    if pid is None:
+        return None
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        pmc = PROCESS_MEMORY_COUNTERS()
+        pmc.cb = ctypes.sizeof(pmc)
+        if not ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
+            return None
+        return pmc.WorkingSetSize / 1048576.0, pmc.PagefileUsage / 1048576.0
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 # Kept as one chunk so every sample is a single round trip, and short enough to read against the
@@ -172,7 +216,46 @@ else
   add('regs', 'nil')
 end
 
--- 6. WHAT OUR OWN LOOP IS DOING, so a column that moves can be read next to it.
+-- 6. TEXTURE MEMORY, WHICH NO LUA NUMBER CAN SEE. Display objects and their textures are C-side:
+-- the Lua wrapper for one is tiny, so a leak of display objects can climb into hundreds of MB of
+-- process footprint while `lua_kb` above sits perfectly still. This is the counter that would
+-- explain a footprint like that, and Solar2D reports it itself.
+local tex
+pcall(function()
+  local ok, v = pcall(function() return system.getInfo('textureMemoryUsed') end)
+  if ok and type(v) == 'number' then tex = v end
+end)
+add('tex_kb', tex and string.format('%.0f', tex) or 'n/a')
+
+-- 7. WHICH LUA TABLE IS KEEPING THINGS. The heap grows ~0.13 MB per reload while the world is
+-- destroyed each time, so something OUTSIDE the world is holding what the world made - and a leak of
+-- Lua objects is a table somewhere, not a mystery. This walks package.loaded one level deep and
+-- reports the biggest tables by entry count: whichever one climbs across reloads is the answer.
+-- Bounded, because one of these caches can hold a hundred thousand entries on its own.
+local rows, walked = {}, 0
+for name, mod in pairs(package.loaded) do
+  if type(mod) == 'table' and walked < 400 then
+    walked = walked + 1
+    for key, v in pairs(mod) do
+      if type(v) == 'table' then
+        local n = 0
+        for _ in pairs(v) do
+          n = n + 1
+          if n > 200000 then break end
+        end
+        if n >= 50 then rows[#rows + 1] = { n = n, name = tostring(name) .. '.' .. tostring(key) } end
+      end
+    end
+  end
+end
+table.sort(rows, function(a, b) return a.n > b.n end)
+local total = 0
+for _, r in ipairs(rows) do total = total + r.n end
+local parts = {}
+for i = 1, math.min(#rows, 4) do parts[i] = rows[i].name .. '[' .. rows[i].n .. ']' end
+add('tables', total .. ':' .. table.concat(parts, ' '))
+
+-- 8. WHAT OUR OWN LOOP IS DOING, so a column that moves can be read next to it.
 local a = _G.__hud and _G.__hud.feats and _G.__hud.feats.autoroll
 if type(a) == 'table' then
   add('autoroll', string.format('%s/left=%s/walk=%s', tostring(a.state), tostring(a.left),
@@ -220,9 +303,10 @@ def main():
             return 2
 
         print("reading only: no listeners, no timers, no writes. Ctrl+C to stop.")
-        print("%-8s %-8s %-7s %-9s %-9s %-8s %-9s %s" % (
-            "t", "lua_kb", "d_kb", "objs", "effects", "buttons", "fps", "rest"))
-        first, t0, i = None, time.monotonic(), 0
+        pid = pad_drive.process_pid()
+        print("%-7s %-9s %-8s %-8s %-7s %-9s %-9s %-7s %s" % (
+            "t", "priv_MB", "d_MB", "lua_kb", "objs", "tx_kb", "rl_done", "fps", "rest"))
+        first, t0, i, first_reloads = None, time.monotonic(), 0, None
         while True:
             st = sample(b)
             i += 1
@@ -231,6 +315,8 @@ def main():
                 return 2
             if first is None:
                 first = st
+            mem = memory_mb(pid)
+            priv = "%.0f" % mem[1] if mem else "?"
 
             def delta(key):
                 try:
@@ -238,12 +324,31 @@ def main():
                 except (KeyError, ValueError):
                     return "-"
 
+            def dmem():
+                if not mem or not first.get("_priv"):
+                    return "-"
+                return "%+.0f" % (mem[1] - first["_priv"])
+
+            if mem and first is not None:
+                first.setdefault("_priv", mem[1])
+            # A RELOAD RATE, NOT JUST A TOTAL. `rl_done` counts the feature's own reloads, so the
+            # memory per reload is the number that says whether reloading is what costs memory -
+            # and it can be read off the same row as the raw footprint it is climbing from.
+            done = st.get("rl_done")
+            if done not in (None, "nil") and first_reloads is None:
+                first_reloads = (int(float(done)), first.get("_priv"))
+            per = ""
+            if done not in (None, "nil") and first_reloads and first.get("_priv"):
+                n = int(float(done)) - first_reloads[0]
+                if n > 0 and mem:
+                    per = "|%.2f MB/reload" % ((mem[1] - first_reloads[1]) / n)
+
             rest = " ".join("%s=%s" % (k, st[k]) for k in
-                            ("with_mon", "with_steps", "rl_done", "rl_busy", "qrlog", "regs",
-                             "autoroll") if k in st)
-            print("%-8.1f %-8s %-7s %-9s %-9s %-8s %-9s %s" % (
-                time.monotonic() - t0, st.get("lua_kb", "?"), delta("lua_kb"), st.get("objs", "?"),
-                st.get("effects", "?"), st.get("buttons", "?"), st.get("fps", "?"), rest))
+                            ("tables", "effects", "with_mon", "with_steps", "rl_busy", "qrlog",
+                             "groups", "regs", "autoroll") if k in st)
+            print("%-7.1f %-9s %-8s %-8s %-7s %-9s %-9s %-7s %s %s" % (
+                time.monotonic() - t0, priv, dmem(), st.get("lua_kb", "?"), st.get("objs", "?"),
+                st.get("tex_kb", "?"), st.get("rl_done", "?"), st.get("fps", "?"), rest, per))
             if count and i >= count:
                 return 0
             time.sleep(every)

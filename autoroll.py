@@ -30,9 +30,10 @@ It also means one eval of a few lines per poll instead of a 12 KB chunk recompil
 it works whether or not this script is the one that turned the feature on.
 
 WHAT IT NEEDS. overlays.py attached, with `[reload] enabled` and `[autoroll] enabled`. The game
-window has to stay in the foreground: `keybd_event` is delivered to whatever owns the foreground,
-so pressing with the game in the background would type a space into something else. That check
-runs before every press and it pauses rather than doing it.
+window has to be in the foreground: `keybd_event` is delivered to whatever owns the foreground, so
+pressing with the game in the background would type a space into something else. This script never
+takes the focus to arrange that - it waits for the game to have it, printing when it is waiting, so
+nothing is pressed and no direction is held until the game owns it.
 
 A SECOND SESSION. This attaches its own Bridge, exactly as perf_probe.py does, so while it runs
 there are two Interceptors on `lua_gettop` and the frame cost roughly doubles. It only evals.
@@ -167,7 +168,9 @@ def game_foreground(hwnd):
 
     Checked before every press rather than calling focus(): keybd_event is delivered to whatever
     is in the foreground, so pressing while the game is in the background would type a space into
-    something else - and focus() would drag the game back over whatever the user was doing.
+    something else. This script therefore WAITS for the game to own it rather than taking it - 
+    moving the game in front of whatever the user is looking at is not something an unattended run
+    should do, and the wait costs one click.
     """
     return pad_drive.user32.GetForegroundWindow() == hwnd
 
@@ -267,14 +270,14 @@ def pump(b, hwnd):
         now = time.monotonic()
         pressing = want is None and state == "waiting" and now >= next_press
         if (want != held or pressing) and not game_foreground(hwnd):
+            # WAIT FOR IT, DO NOT TAKE IT. `focus()` used to be called here and at startup, which
+            # yanks the game in front of whatever the user was looking at - and leaving the machine
+            # alone while it rolls is the whole point of automating this. keybd_event is delivered
+            # to whatever owns the foreground, so the only safe thing to do is wait for the game to
+            # have it: nothing is pressed, and no direction is asked for, until it does.
             if now - paused_at >= PAUSE_REPORT:
                 paused_at = now
-                print("the game lost the foreground - taking it back.")
-            # keybd_event is delivered to whatever owns the foreground, so a press OR a held
-            # direction needs the game to own it. focus() only un-minimises when the window is
-            # actually minimised: SW_RESTORE also shrinks a MAXIMISED window, and Coromon's
-            # fullscreen is exactly that, so this cannot drop the game out of fullscreen.
-            pad_drive.focus(hwnd)
+                print("waiting for the game to take the foreground back - click it.")
             time.sleep(POLL_INTERVAL)
             continue
 
@@ -302,22 +305,30 @@ def main():
             print("attached, but no lua_State captured yet - is the game past its loading screen?")
             return 2
 
-        # A FRESH START, BEFORE ANYTHING ELSE, and before the focus grab for no better reason than
-        # that this is the order the messages read in. The loop may be sitting in a terminal state
-        # left over from the last Coromon - see rearm() for why that strands a restarted run.
+        # A FRESH START BEFORE ANYTHING ELSE, and before waiting for the foreground for no better
+        # reason than that this is the order the messages read in. The loop may be sitting in a
+        # terminal state left over from the last Coromon - see rearm() for why that strands a
+        # restarted run.
         was = rearm(b)
         if was.startswith("!"):
             print(was.strip("!"))
             return 2
         print("loop re-armed (was %s)" % was)
 
-        # Take the foreground before anything is pressed. Later presses only need the game to still
-        # own it, so the forced grab happens here, once, and the loop only takes it back if it is
-        # lost. Nothing is pressed until the loop has looked at least once (it starts in
-        # 'starting'), so this happens before the first Space rather than after it.
-        took = pad_drive.focus(hwnd)
-        print("window 0x%X: focus %s" % (
-            hwnd, "taken" if took else "REFUSED - presses will wait until the game is clicked"))
+        # WAIT FOR THE FOREGROUND, DO NOT TAKE IT. Nothing may be pressed while the game is behind
+        # something else, because keybd_event goes to whatever owns the foreground - and grabbing it
+        # here would pull the game in front of whatever the user is doing, which is exactly what an
+        # unattended run must not do. Giving the game the foreground is one click, so this waits for
+        # it and says so once.
+        if not game_foreground(hwnd):
+            print("window 0x%X does not have the foreground - click the game and this starts. "
+                  "Nothing is pressed until then." % hwnd)
+            while not game_foreground(hwnd):
+                if b.gone:
+                    print("the game closed.")
+                    return 2
+                time.sleep(0.5)
+        print("window 0x%X has the foreground." % hwnd)
         print("pressing Space every %gs - Ctrl+C to stop. The roll loop itself runs in the game, "
               "as the autoroll feature; this only reports it." % PRESS_INTERVAL)
         return pump(b, hwnd)
