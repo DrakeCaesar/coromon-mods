@@ -80,6 +80,9 @@ var hooked = false;
 var counted = 0;
 var countLimit = 20000;
 var fastMode = false;
+/* Set by the first eval: the one re-capture the session gets, so a caller cannot restart the count
+   on every request and stop it ever finishing. See the eval export below. */
+var verifiedOnFirstUse = false;
 
 /* Only `lua_gettop` is strictly needed to capture the state and run code; the
    rest are extra chances to catch the Lua thread, but they are extremely hot
@@ -210,14 +213,28 @@ function pump() {
 rpc.exports = {
     eval: function (id, code) {
         pending.push({id: id, code: code});
-        /* RECAPTURE ON DEMAND. Fast mode stops updating mainL, so it gets re-verified here - at the
-           one moment it is about to be used - instead of being trusted from startup for the whole
-           session. mainL is deliberately NOT cleared: pump() can run on the very next hit, and the
-           counting can only move it to a state that has been measurably busier. A few milliseconds
-           of counting per request, and nothing between requests. */
-        fastMode = false;
-        counted = 0;
-        /* give the game a nudge: if it is idle the hook may not fire for a while */
+        /* ONE RE-CAPTURE, ON FIRST USE, AND NEVER AGAIN.
+           A capture costs countLimit hits of the slow path above, and this is what those hits cost
+           in wall-clock time: measured 2026-09-21, this game calls a hooked entry point ~774 times a
+           second while idle at 165 fps, so 20000 hits is about 26 SECONDS of paying it. A caller that
+           evals regularly therefore cannot simply restart the count on every request - it has to
+           leave it alone and let it finish.
+           That is exactly what the previous version did not do: it reset `counted` on EVERY request,
+           so anything polling faster than a capture takes (the autoroll driver polls every 5 ms)
+           restarted the count forever and pinned the hook in the slow path - the path measured at
+           ~2.6 ms per frame in a Lua-heavy scene. Resetting on every request was meant to re-verify
+           mainL "at the one moment it is about to be used"; re-verifying that often cannot finish, so
+           it verified nothing and cost everything.
+           The reason a single re-capture is worth having, and enough: the capture that ran at BOOT
+           may have seen the game while it was still loading, and a request is the first moment the
+           answer is about to be used. Once it has been answered against a running game, mainL only
+           moves to a state that has been measurably busier, and that is a migration worth noticing
+           but not worth paying for on every request. */
+        if (!verifiedOnFirstUse) {
+            verifiedOnFirstUse = true;
+            fastMode = false;
+            counted = 0;
+        }
         return true;
     },
     status: function () {
