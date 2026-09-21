@@ -79,6 +79,12 @@ def _key_label(cfg):
     return ", ".join(_keys(cfg))
 
 
+def _probe_path():
+    """Where the reload feature writes its read-only observations. Next to the tool, so they can be
+    read back without anyone having to copy them out of a terminal."""
+    return os.path.join(BASE, "reload-probe.txt")
+
+
 def lua(cfg):
     """The queries. Always part of the chunk, so --status and --report can describe it whether or not
     the feature is installed."""
@@ -95,7 +101,162 @@ local function reloadLine()
   return string.format('reload on __KEY__: %d done, last = %s',
     f.done or 0, tostring(f.last or 'not yet'))
 end
-""".replace("__KEY__", _key_label(cfg))
+
+-- WHAT THE WORLD INTERFACE LOOKS LIKE FROM INSIDE, and whether it is still the one the game drives.
+-- Read-only and fully pcall'd, so it can be evaluated at any moment without side effects.
+--
+-- WHY IT EXISTS. After a reload, pressing the interact button has crashed three different ways:
+-- `insert` missing, `.containers` missing, `.height` nil. Each is what a DISPOSED Solar2D display
+-- object looks like from Lua - the metatable-provided members go, the plain fields the game assigned
+-- stay. And a live one cannot look like that: `refreshInteractButton` rebuilds the button from
+-- scratch (`groupHelper:clear(parentGroup)`, then a fresh `UIContainerBuilder.new` at L57), so if the
+-- height reads nil the reference is stale. `worldInterface.onPress` (L289-291) reaches
+-- `interactButton:setPressed(true)` through a CLOSURE UPVALUE of the interface instance, so a stale
+-- button means the press is reaching the PRE-reload interface - one that `worldInterface:destroy()`
+-- has already emptied and which the input layer is still routing to. This is what tells us whether
+-- that is happening, and whether a replacement interface took over.
+local function qrWiProbe()
+  local p = {}
+  local wi = _G.worldInterface
+  if type(wi) ~= 'table' then
+    p.note = 'worldInterface: module not present'
+    return p
+  end
+  local ok, inst = pcall(function() return wi:isCreated() end)
+  p.instance = ok and inst or nil
+  p.created = (ok and inst ~= nil) or false
+
+  local btn
+  pcall(function() btn = wi:getInteractButton() end)
+  p.button = btn
+  if btn ~= nil then
+    local bg
+    pcall(function() bg = btn:getBackground() end)
+    p.background = bg
+    if bg ~= nil then
+      local ok2, h = pcall(function() return bg.height end)
+      p.height = ok2 and h or nil
+      p.alive = ok2 and (type(h) == 'number') or false
+      local ok3, t = pcall(function() return inputHelper:isTouchable(bg) end)
+      p.touchable = ok3 and t or nil
+    end
+  end
+
+  -- The registrations are the suspect: `refreshInteractButton` registers the built button with
+  -- `inputHelper:addMouseHoverable` (L66), and nothing in the teardown removes it. A dead object in
+  -- this list is a stale registration, which is exactly the thing that would drive a dead button.
+  local hover, dead = 0, 0
+  pcall(function()
+    for _, o in pairs(inputHelper:getObjectsListeningToMouseHover() or {}) do
+      hover = hover + 1
+      local okh, h = pcall(function() return o.height end)
+      if not okh or type(h) ~= 'number' then dead = dead + 1 end
+    end
+  end)
+  p.hover, p.hoverDead = hover, dead
+  pcall(function() p.level = inputHelper:getInputLevel() end)
+  return p
+end
+
+local function qrWiProbeSummary()
+  local p = qrWiProbe()
+  if p.note then return p.note end
+  local button = 'n/a'
+  if p.background ~= nil then button = p.alive and 'alive' or 'DEAD' end
+  return string.format('world interface: created=%s button=%s hoverables=%d dead=%d stalePress=%d',
+    tostring(p.created), button, p.hover or 0, p.hoverDead or 0, _G.__qrStalePress or 0)
+end
+
+-- A DISPOSED DISPLAY OBJECT IS STILL CALLABLE THROUGH THE FIELDS THE GAME ASSIGNED TO IT.
+-- `interactButton.setPressed` is a plain field (WorldInterfaceInteractButton L57), so it survives
+-- disposal, while everything the ENGINE provides - `insert`, `height`, `width`, `toChildIndex` -
+-- reads nil. That is why the crash is inside the method rather than on the call: `setPressed` (L101)
+-- reaches `refreshInteractButtonBackgroundStyle`, which does arithmetic on `interactButtonBackground
+-- .height` (L40) and gets nil.
+local function qrLive(x)
+  if x == nil then return false end
+  local ok, ins = pcall(function() return x.insert end)
+  return ok and type(ins) == 'function'
+end
+
+-- A press on a destroyed button means nothing: the button is gone, so its pressed state cannot
+-- matter to anything. Skipping it is not a substitute for anything and it fabricates nothing - it is
+-- the same call, declined, on an object that no longer exists. Wrapped on the LIVE button before the
+-- teardown, because afterwards there is no way to reach it again.
+local function qrGuardButton()
+  local wi = _G.worldInterface
+  if type(wi) ~= 'table' then return 'no worldInterface' end
+  local btn
+  local ok = pcall(function() btn = wi:getInteractButton() end)
+  if not ok or type(btn) ~= 'table' then return 'no interact button' end
+  if btn.__qrGuarded then return 'already guarded' end
+  local wrapped = 0
+  for _, name in ipairs({ 'setPressed', 'setHovered' }) do
+    local orig = btn[name]
+    if type(orig) == 'function' then
+      btn[name] = function(self, ...)
+        if not qrLive(self) then
+          _G.__qrStalePress = (_G.__qrStalePress or 0) + 1
+          return
+        end
+        return orig(self, ...)
+      end
+      wrapped = wrapped + 1
+    end
+  end
+  btn.__qrGuarded = true
+  _G.__qrGuarded = wrapped
+  return string.format('guarded %d method(s)', wrapped)
+end
+
+-- THE DIAGNOSIS WRITES ITSELF OUT, so it does not depend on anyone copying it out of a terminal. One
+-- line per state change: the interface identity, whether the button is alive, and how many of the
+-- input registrations point at objects that no longer exist.
+local function qrLog(text)
+  local line = os.date('%H:%M:%S') .. '  ' .. text .. '\n'
+  local wrote = pcall(function()
+    local fh = io.open(__PROBEFILE__, 'a')
+    if fh then
+      fh:write(line)
+      fh:close()
+      return true
+    end
+    return false
+  end)
+  -- If the app will not take an absolute path, leave it somewhere it certainly can write. Nothing
+  -- depends on which of the two it lands in; the point is that it goes somewhere readable.
+  if wrote ~= true then
+    pcall(function()
+      local p = system.pathForFile('reload-probe.txt', system.DocumentsDirectory)
+      local fh = io.open(p, 'a')
+      if fh then
+        fh:write(line)
+        fh:close()
+      end
+    end)
+  end
+end
+
+local function qrWiProbeText()
+  local p = qrWiProbe()
+  if p.note then return p.note end
+  local out = {}
+  out[#out + 1] = string.format('  world interface created = %s', tostring(p.created))
+  if p.button ~= nil then
+    out[#out + 1] = string.format('  interact button alive = %s (height=%s)',
+      tostring(p.alive), tostring(p.height))
+    out[#out + 1] = string.format('  still a registered touchable = %s', tostring(p.touchable))
+  else
+    out[#out + 1] = '  interact button = not reachable'
+  end
+  out[#out + 1] = string.format('  mouse-hover objects = %d, of which dead = %d',
+    p.hover or 0, p.hoverDead or 0)
+  if p.level ~= nil then
+    out[#out + 1] = string.format('  input level = %s', tostring(p.level))
+  end
+  return table.concat(out, '\n')
+end
+""".replace("__KEY__", _key_label(cfg)).replace("__PROBEFILE__", _lua_str(_probe_path()))
 
 
 def section(cfg):
@@ -162,6 +323,17 @@ do
     f.step = 'cancelling transitions'
     run(CANCEL, 'qr_cancel')
 
+    -- Read-only, and taken while everything is still alive: the identity of the interface the game is
+    -- currently driving, plus the guard on its interact button. What the probe reads after the load is
+    -- compared against this, and the two answers have different meanings - a NEW object means the
+    -- reload rebuilt the interface (so a crash afterwards is something else), the SAME object with a
+    -- dead button means the reload is reaching a destroyed interface through the input layer.
+    _G.__qrWiBefore = qrWiProbe()
+    _G.__qrStalePress = _G.__qrStalePress or 0
+    qrLog('reload starting - ' .. qrWiProbeSummary())
+    local guardSaid = qrGuardButton()
+    qrLog('  ' .. guardSaid .. ' on the button that is about to be destroyed')
+
     -- A SHORT WAIT, not one frame and not the 250 ms the outside driver used.
     --
     -- `transition.cancelAll()` only sets a flag, and the transition module's enterFrame listener acts
@@ -206,6 +378,26 @@ do
       f.last = tostring(_G.__qrDone)
       f.why = _G.__qrWhy
       f.note = _G.__qrNote
+      -- Read-only, right after the load finished: is the interface a new one, and is anything from
+      -- the old one still registered with the input layer?
+      _G.__qrWiAfter = qrWiProbe()
+      local before = _G.__qrWiBefore and _G.__qrWiBefore.instance
+      local after = _G.__qrWiAfter and _G.__qrWiAfter.instance
+      qrLog(string.format('load done (%s) - interface before=%s after=%s same=%s',
+        tostring(_G.__qrDone), tostring(before), tostring(after),
+        tostring(before ~= nil and before == after)))
+      qrLog('  ' .. qrWiProbeSummary())
+      f.probeLast = nil
+      return
+    end
+    -- While play continues, log only when something actually changes, so the file stays short and
+    -- its last line is the state a later crash happened from.
+    if not f.busy and f.on then
+      local s = qrWiProbeSummary()
+      if s ~= f.probeLast then
+        f.probeLast = s
+        qrLog('  ' .. s)
+      end
     end
   end
 
@@ -235,7 +427,7 @@ def status(cfg):
         r"""(function()
   local f = _G.__hud and _G.__hud.feats.reload
   if not f or not f.on then return nil end
-  return reloadLine()
+  return reloadLine() .. '\\n  ' .. qrWiProbeSummary()
 end)()"""
     )
 
@@ -261,9 +453,29 @@ def report(cfg):
     out[#out + 1] = '  poll: ' .. table.concat(_G.__qrLog, ' | ')
   end
   out[#out + 1] = ''
+  out[#out + 1] = '  --- the world interface, read-only ---'
+  out[#out + 1] = qrWiProbeText()
+  out[#out + 1] = string.format('  presses skipped on a destroyed button = %d',
+    _G.__qrStalePress or 0)
+  if _G.__qrGuarded then
+    out[#out + 1] = string.format('  button methods guarded after the last reload = %s',
+      tostring(_G.__qrGuarded))
+  end
+  out[#out + 1] = '  observations are appended to: ' .. __PROBEFILE__
+  if _G.__qrWiBefore or _G.__qrWiAfter then
+    local before = _G.__qrWiBefore and _G.__qrWiBefore.instance
+    local after = _G.__qrWiAfter and _G.__qrWiAfter.instance
+    out[#out + 1] = '  the interface the game was driving:'
+    out[#out + 1] = '    before the reload = ' .. tostring(before)
+    out[#out + 1] = '    after  the reload = ' .. tostring(after)
+    out[#out + 1] = '    same object = ' .. tostring(before ~= nil and before == after)
+    out[#out + 1] = '    (a NEW object means the reload rebuilt the interface; the SAME object with'
+    out[#out + 1] = '     a dead button means the press is reaching a destroyed one)'
+  end
+  out[#out + 1] = ''
   out[#out + 1] = '  it runs the proven chunks: a read-only pre-flight that refuses unless there'
   out[#out + 1] = '  is a world to tear down, then the transition cancel, then one frame later'
   out[#out + 1] = '  the teardown and the load. Nothing is written to disk.'
   return table.concat(out, '\n')
 end)()"""
-    ).replace("__KEY__", _key_label(cfg))
+    ).replace("__KEY__", _key_label(cfg)).replace("__PROBEFILE__", _lua_str(_probe_path()))

@@ -42,16 +42,30 @@ repaired (`re-applied` in --report counts it). That is a fix, not a net.
 
 THREE LAYERS, because each covers a different way the last one can be skipped:
   1. the style being set is the one already on the object -> skip the call (the L44/L46 case above).
-  2. the container is unusable (no `insert`) -> substitute one, rather than refuse. `setStyle` goes on
-     to hand this same container to `onAfterUIContainerUpdatedOrCreated`, so a bare refusal just moves
-     the crash one frame later - into `UIContainerStyle`, on the title screen, which cost a crash to
-     learn. The substitute is a container built the way the game builds them (`rectHelper`) when that
-     is possible, because a plain display group keeps the pipeline alive but the element does lose
-     its styling.
-  3. the wrapper itself is bypassed -> the call is made through `pcall` and retried with a known-good
-     container. This is why a crash cannot get past it even if 1 and 2 both miss: the crash is an
-     ordinary Lua error, and the caller reads `parentGroup.container.width` on its very next line, so
-     leaving a usable container behind matters.
+     Skipping is safe here precisely because the container left behind is a real one.
+  2. the container is unusable (no `insert`) -> ask the STYLE for another one (`_object:getStyle():
+     createContainer(w, h)`), which is the only object that satisfies the pipeline; see below.
+  3. the wrapper itself is bypassed -> the call is made through `pcall`, and the recovery puts a real
+     container back. This is why a crash cannot get past even if 1 and 2 both miss: the crash is an
+     ordinary Lua error.
+
+NEVER FABRICATE A STAND-IN. That is the lesson this file paid for twice, and it has one shape: the
+consumer of the value reads a CONTRACT, not just a non-nil reference.
+
+  * attempt 1, refusing. `_container` looked bad, so the guard returned early - leaving the builder's
+    container nil. `setStyle` then handed that nil on, and the game crashed at
+    `UIContainerStyle.lua:305` on the title screen.
+  * attempt 2, substituting. The guard put a `rectHelper` container (then a plain `display.newGroup()`)
+    in its place. That inserts fine but has no `.containers`, and L305 reads exactly
+    `_UIContainerContainer.containers[i]`, so the crash moved into the style instead:
+    "attempt to index field 'containers' (a nil value)" - after a few quick reloads, on pressing the
+    interact button.
+
+`.containers` and `setFillColor` / `setWidth` / `setHeight` / `setSize` are attached by
+`UIContainerStyleCombinedValueObject.createContainer` itself (L274-299), so they exist ONLY on an
+object that came from a style. Hence layer 2 asks the style, and if the style cannot produce one and
+the container already on the object is real, the call is skipped and that one kept - never replaced
+with something merely insertable.
 
 WHY THE FIRST VERSION WAS SILENT, AND WHY THAT MATTERED. It armed itself once, at install time, and
 the crash happened anyway - after a quick reload, on pressing the interact button. Two ways it could
@@ -68,12 +82,13 @@ be silent, and both were built in:
 
 So it is a WATCHDOG: every 200 ms it checks that the global still holds our function and re-arms
 (re-saving the original) if it does not, counting how often. `--report` distinguishes armed / not
-armed / re-arms / calls seen / re-applied / swapped / errors caught, so a silent guard cannot happen
-again - and the next occurrence says which of the three layers caught it.
+armed / re-arms / calls seen / re-applied / bad containers seen / replaced / kept as-is /
+unrecoverable / errors caught, so a silent guard cannot happen again - and the next occurrence says
+which layer caught it and what the container was.
 
-Still a safety net in the end: the cause is in the game, and layers 2 and 3 cost the element its
-styling when they fire. It is worth having on while playing, because the alternative is a crash dialog
-and a lost session.
+Still a safety net in the end: the cause is in the game, and layer 2 costs the element nothing while
+layer 3 leaves it unstyled. It is worth having on while playing, because the alternative is a crash
+dialog and a lost session.
 """
 
 NAME = "guard"
@@ -103,8 +118,13 @@ local function guardLine()
   if (rec.arms or 0) == 0 then
     return 'container guard: NOT ARMED (' .. tostring(rec.why or '?') .. ')'
   end
-  local s = string.format('container guard: armed %d, %d calls, %d swapped, %d re-applied',
-    rec.arms, rec.calls or 0, rec.n or 0, rec.same or 0)
+  local s = string.format('container guard: armed %d, %d calls, %d re-applied, %d bad container',
+    rec.arms, rec.calls or 0, rec.same or 0, rec.bad or 0)
+  if (rec.fresh or 0) > 0 then s = s .. string.format(', %d replaced', rec.fresh) end
+  if (rec.keptOld or 0) > 0 then s = s .. string.format(', %d kept as-is', rec.keptOld) end
+  if (rec.noContainer or 0) > 0 then
+    s = s .. string.format(', %d UNRECOVERABLE', rec.noContainer)
+  end
   if (rec.errors or 0) > 0 then s = s .. string.format(', %d errors caught', rec.errors) end
   return s
 end
@@ -160,6 +180,37 @@ do
     return type(ins) ~= 'function'
   end
 
+  -- THE ONLY SOUND STAND-IN: ask the style for another one. This is the second correction to the same
+  -- mistake, so it is worth spelling out. `setStyle` (UIContainerBuilder) does:
+  --
+  --   28  groupHelper:setObjectContainer(self, currentStyle:createContainer(w, h))
+  --   30  display.applyDisplayObjectMutations(parentGroup.container, _containerMutator)
+  --   32  currentStyle:onAfterUIContainerUpdatedOrCreated(parentGroup.container)   <-- reads it again
+  --
+  -- and a combined style reads a FIELD off it (UIContainerStyle L305):
+  --
+  --   305  _styleConfigs[i].style:onAfterUIContainerUpdatedOrCreated(_UIContainerContainer.containers[i])
+  --
+  -- `.containers` - and `setFillColor` / `setWidth` / `setHeight` / `setSize` - are attached by
+  -- `createContainer` itself, at L274-299, so they exist ONLY on an object that came from the style.
+  -- A fabricated `rectHelper` container or a plain `display.newGroup()` has no `.containers`, and the
+  -- result is a fresh crash at UIContainerStyle.lua:305: "attempt to index field 'containers' (a nil
+  -- value)". Substituting something that merely *inserts* is not enough; it has to satisfy the
+  -- contract the next consumer reads. Refusing was the same error wearing a different hat.
+  local function freshContainer(o)
+    if OUT.inFresh then return nil end
+    OUT.inFresh = true
+    local c
+    pcall(function()
+      local st = o:getStyle()                       -- UIContainerBuilder L17-19, the current style
+      if type(st) ~= 'table' or type(st.createContainer) ~= 'function' then return end
+      c = st:createContainer(o.width, o.height)
+    end)
+    OUT.inFresh = nil
+    if unusable(c) then return nil end
+    return c
+  end
+
   -- Arm on whatever the global holds now. Called every tick, and a no-op when the global still
   -- holds our own wrapper, so a re-require is picked up as soon as it happens.
   local function arm()
@@ -174,6 +225,7 @@ do
     gh.__hudGuardOrig = orig
     gh.__hudGuard = function(self, _object, _container)
       OUT.calls = (OUT.calls or 0) + 1
+      local old = type(_object) == 'table' and _object.container or nil
 
       -- THE CASE THAT FITS THE BYTECODE. L44 disposes the object's container on the way past, and
       -- L46 inserts into a container that L45 has just copied from the argument:
@@ -185,8 +237,10 @@ do
       -- so if the container handed in IS the one already on the object, L44 disposes the very
       -- object L46 is about to insert into, and `insert` is gone by the time it is called. Setting a
       -- style that is already set is a no-op by definition, so skip the call: this one is a real fix,
-      -- nothing loses its styling, and `re-applied` in --report counts how often it happens.
-      if type(_object) == 'table' and _object.container ~= nil and _object.container == _container then
+      -- nothing loses its styling, and `re-applied` in --report counts how often it happens. Skipping
+      -- is safe here precisely because the container left behind is a real one, which is what L32
+      -- goes on to read.
+      if old ~= nil and old == _container then
         OUT.same = (OUT.same or 0) + 1
         OUT.sameWhere = debug and debug.traceback and debug.traceback('', 2) or '?'
         return
@@ -196,46 +250,55 @@ do
       -- builder is styled - `UIContainerBuilder.new` (L40) calls setStyle straight after
       -- `groupHelper:newObject` (L13), which does not set one - so testing it refused EVERY
       -- first-time style set, and the refusal left the builder's container nil, which crashed one
-      -- frame later in `UIContainerStyle.onAfterUIContainerUpdatedOrCreated` ("attempt to index
-      -- local 'UIContainer'") on the title screen, as the splash screen faded. Measured: that crash
-      -- was caused by this guard, not by the game.
+      -- frame later ("attempt to index local 'UIContainer'") on the title screen, as the splash
+      -- screen faded. Measured: that crash was caused by this guard, not by the game.
       if unusable(_container) then
-        OUT.n = (OUT.n or 0) + 1
+        OUT.bad = (OUT.bad or 0) + 1
         OUT.newKind = describe(_container)
-        OUT.oldKind = describe(type(_object) == 'table' and _object.container or nil)
+        OUT.oldKind = describe(old)
         OUT.style = describe(_object)
         OUT.last = string.format('new=%s old=%s', OUT.newKind, OUT.oldKind)
         OUT.where = debug and debug.traceback and debug.traceback('', 2) or '?'
-        -- NOT a bare refusal. setStyle goes on to hand this very container to
-        -- onAfterUIContainerUpdatedOrCreated, so leaving it alone just moves the crash one frame
-        -- later. Prefer a container built the way the game builds them (`rectHelper`, which is what
-        -- UIContainerStyleCombinedValueObject.createContainer uses at L266), and fall back to a plain
-        -- group; either way the pipeline keeps running and the element loses its styling. The caller
-        -- sets .width/.height on it on its very next line, so the 1x1 here does not matter.
-        local sub, kind = nil, 'plain group'
-        if type(_G.rectHelper) == 'table' and type(rectHelper.newContainerObject) == 'function' then
-          local made
-          if pcall(function() made = rectHelper:newContainerObject(nil, { width = 1, height = 1 }) end)
-              and not unusable(made) then
-            sub, kind = made, 'rectHelper container'
-          end
+
+        local fresh = freshContainer(_object)
+        -- `freshSame` is the discriminating detail: if the style hands back the SAME object, the
+        -- style itself is holding a corpse and re-asking cannot help; if it hands back a different
+        -- one, the bad container was a stale leftover and this recovery is the fix.
+        OUT.oldUsable = not unusable(old)
+        if fresh then
+          -- The game handed back a container it had already disposed; ask the style for another.
+          OUT.fresh = (OUT.fresh or 0) + 1
+          if fresh == _container then OUT.freshSame = (OUT.freshSame or 0) + 1 end
+          _container = fresh
+        elseif not unusable(old) then
+          -- Nothing to build one from, but the container already on the object is real, and L32
+          -- reads that one. Keep it and skip: the element keeps the look it has, which beats
+          -- handing the pipeline an object of the wrong kind.
+          OUT.keptOld = (OUT.keptOld or 0) + 1
+          return
+        else
+          -- Nothing usable anywhere. Call through anyway so the traceback is the game's own, and let
+          -- the pcall below contain what it can.
+          OUT.noContainer = (OUT.noContainer or 0) + 1
         end
-        if sub == nil then sub = display.newGroup() end
-        OUT.sub = kind
-        _container = sub
       end
 
-      -- Belt and braces, and the reason a crash cannot get past this a second time. The pre-check
-      -- above only helps while this wrapper is on the call path, and being bypassed is exactly what
-      -- happened before. The crash is an ordinary Lua error, so a pcall contains it; the retry then
-      -- leaves a usable container in place, which matters because the caller reads
-      -- `parentGroup.container.width` on its very next line.
+      -- Belt and braces, and the reason a crash cannot get past this a second time. The checks above
+      -- only help while this wrapper is on the call path, and being bypassed is exactly what happened
+      -- before. The crash is an ordinary Lua error, so a pcall contains it; the recovery then leaves
+      -- a REAL container behind, because the caller reads `parentGroup.container.width` on its next
+      -- line and the style reads `.containers` off it two lines later.
       local ok, err = pcall(orig, self, _object, _container)
       if not ok then
         OUT.errors = (OUT.errors or 0) + 1
         OUT.err = tostring(err)
         OUT.errWhere = debug and debug.traceback and debug.traceback('', 2) or '?'
-        pcall(orig, self, _object, display.newGroup())
+        local fresh = freshContainer(_object)
+        if fresh then
+          pcall(orig, self, _object, fresh)
+        elseif not unusable(old) then
+          pcall(function() _object.container = old end)
+        end
       end
     end
     gh.setObjectContainer = gh.__hudGuard
@@ -302,8 +365,23 @@ def report(cfg):
   out[#out + 1] = '  module table (a re-require) and the wrapper was put back'
   out[#out + 1] = string.format('  calls seen = %d', rec.calls or 0)
   out[#out + 1] = string.format('  re-applied (style already set, call skipped) = %d', rec.same or 0)
+  out[#out + 1] = string.format('  bad containers handed in = %d', rec.bad or 0)
+  out[#out + 1] = string.format('    of those, replaced by asking the style again = %d', rec.fresh or 0)
+  out[#out + 1] = string.format('    kept the container already there = %d', rec.keptOld or 0)
+  out[#out + 1] = string.format('    nothing usable could be found = %d', rec.noContainer or 0)
+  if (rec.fresh or 0) > 0 then
+    out[#out + 1] = string.format('    of the replaced ones, the style returned the same object = %d',
+      rec.freshSame or 0)
+    out[#out + 1] = '    (same object means the style is holding a dead container itself, and re-asking'
+    out[#out + 1] = '     cannot help - a different object means the bad one was a stale leftover)'
+  end
+  out[#out + 1] = '  the container already on the object was usable = ' .. tostring(rec.oldUsable)
+  if (rec.noContainer or 0) > 0 then
+    out[#out + 1] = '  UNRECOVERABLE means the game handed over a dead container and the style could'
+    out[#out + 1] = '  not produce another - expect an unstyled element, or a crash of the game\'s own.'
+  end
   if (rec.same or 0) > 0 and rec.sameWhere then
-    out[#out + 1] = '    last one came from:'
+    out[#out + 1] = '    last re-applied came from:'
     for line in tostring(rec.sameWhere):gmatch('[^\n]+') do
       out[#out + 1] = '    ' .. line
     end
@@ -313,7 +391,6 @@ def report(cfg):
   else
     out[#out + 1] = '  but the global no longer holds our function'
   end
-  out[#out + 1] = string.format('  swapped so far = %d', rec.n or 0)
   if (rec.errors or 0) > 0 then
     out[#out + 1] = string.format('  errors caught in the call itself = %d', rec.errors)
     out[#out + 1] = '    last: ' .. tostring(rec.err)
@@ -323,7 +400,7 @@ def report(cfg):
       end
     end
   end
-  if rec.n and rec.n > 0 then
+  if (rec.bad or 0) > 0 then
     out[#out + 1] = '  last bad container: new = ' .. tostring(rec.newKind)
     out[#out + 1] = '                      old = ' .. tostring(rec.oldKind)
     out[#out + 1] = '                      obj = ' .. tostring(rec.style)
@@ -334,7 +411,9 @@ def report(cfg):
       end
     end
   end
-  out[#out + 1] = '  this is a safety net, not a fix: the element silently loses its styling'
-  out[#out + 1] = '  when this fires. The cause is still in the game.'
+  out[#out + 1] = '  recovering by asking the style for another container keeps the element styled;'
+  out[#out + 1] = '  falling back to the container already there leaves it with the look it had.'
+  out[#out + 1] = '  Either way the cause is still in the game: something disposed a container that was'
+  out[#out + 1] = '  still being handed around.'
   return table.concat(out, '\n')
 end)()"""
