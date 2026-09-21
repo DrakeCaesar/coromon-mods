@@ -73,6 +73,42 @@ local function playerSprite()
   if type(s) == 'table' and type(s.x) == 'number' then return s end
 end
 
+-- THE LIVE SAVE TABLE, and this is now the only copy of the search for it.
+--
+-- It is not reachable from any global, from Game/Save/the player, or from any object on screen:
+-- it exists only as an upvalue of functions inside loaded modules. So it is found by asking every
+-- function in every loaded module for its upvalues and taking the table that carries BOTH
+-- SAVEABLE_BATTLE_EFFECTS and VISITED_MAPS - checked against every loaded module, and no other
+-- one holds both.
+--
+-- steptimer and cooldowns each carried their own identical copy of this loop, which is a
+-- duplicate of the most expensive search in the tool: all of package.loaded, up to 80
+-- debug.getupvalue calls per function. cooldowns' copy is what cost the main menu ~40 ms per
+-- frame (165 fps -> 20) when its throttle was wrong, because at that cost "how often" is the
+-- whole question. One copy means one place to get that right.
+--
+-- CALLERS MUST THROTTLE IT, and each keeps its OWN cache and interval: their staleness budgets
+-- are genuinely different - cooldowns needs the table within about a second of an effect starting,
+-- while steptimer is content to wait 12.5 s - so this deliberately does no caching of its own.
+local function saveSettingsTable()
+  for _, mod in pairs(package.loaded) do
+    if type(mod) == 'table' then
+      for _, fn in pairs(mod) do
+        if type(fn) == 'function' then
+          for i = 1, 80 do
+            local n, v = debug.getupvalue(fn, i)
+            if not n then break end
+            if type(v) == 'table'
+               and v.SAVEABLE_BATTLE_EFFECTS ~= nil and v.VISITED_MAPS ~= nil then
+              return v
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
 -- A localised string, or the fallback. A MISSING key comes back as '???' rather than nil
 -- (checked live), so it has to be tested for explicitly.
 local function loc(key, fallback)
@@ -298,6 +334,18 @@ CORE_SETTINGS = [
         "process",
         "coromon.exe",
         "the process to attach to - it is waited for, so it need not be running",
+    ),
+    (
+        "features_enabled",
+        True,
+        (
+            "master switch for every feature below. Set it false and run to attach the tool "
+            "with NOTHING installed: the session stays, its Frida hooks stay, the features do "
+            "not. That is the only way to tell what the script itself costs from what the "
+            "features cost - and it is the measurement to make when frame rate is short. The "
+            "per-feature `enabled` flags are left alone, so setting this back to true restores "
+            "exactly the run that was there before"
+        ),
     ),
     (
         "gamepad_zoom",

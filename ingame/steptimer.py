@@ -160,29 +160,11 @@ def lua(cfg):
     return r"""
 local STEP_SHOW_POTENTIAL = __SHOW__
 
--- The live save data, found by walking the loaded modules. It is not reachable from any
--- global, from Game/Save/the player, or from any object on screen: it exists only as an
--- upvalue of functions inside loaded modules, so this asks each function for its upvalues
--- and takes the table carrying both SAVEABLE_BATTLE_EFFECTS and VISITED_MAPS (checked
--- against every loaded module - no other one holds both).
-local function saveSettings()
-  for _, mod in pairs(package.loaded) do
-    if type(mod) == 'table' then
-      for _, fn in pairs(mod) do
-        if type(fn) == 'function' then
-          for i = 1, 80 do
-            local n, v = debug.getupvalue(fn, i)
-            if not n then break end
-            if type(v) == 'table'
-              and v.SAVEABLE_BATTLE_EFFECTS ~= nil and v.VISITED_MAPS ~= nil then
-              return v
-            end
-          end
-        end
-      end
-    end
-  end
-end
+-- The live save data. This used to walk package.loaded here; it is now the shared helper in
+-- core's preamble, because cooldowns had written the identical loop out a second time. Named
+-- locally so every call site below reads the same, and so the throttle stays this feature's own
+-- business (RESCAN_TICKS below is what decides when this is allowed to be slow).
+local saveSettings = saveSettingsTable
 
 -- Steps walked so far, straight from the game's own counter.
 local function stepsWalked()

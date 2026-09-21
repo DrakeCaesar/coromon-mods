@@ -95,6 +95,39 @@ def main():
             else:
                 print("SKIP  reload.%-9s (returned %s)" % (name, type(text).__name__))
 
+    # EVERY FEATURE MODULE, not just reload. Each one has SETTINGS (key, default, comment) and a
+    # section(cfg) that returns the Lua it would install, so the default cfg is derivable and the
+    # section is checkable without the game. This is the check that would have caught a syntax slip
+    # in any of the per-frame features, which are the ones a mistake here costs the most.
+    import glob
+    import importlib
+
+    for path in sorted(glob.glob(os.path.join(BASE, "ingame", "*.py"))):
+        mod = os.path.basename(path)[:-3]
+        if mod.startswith("_") or mod in ("core", "config"):
+            continue
+        label = "ingame." + mod
+        try:
+            module = importlib.import_module("ingame." + mod)
+        except Exception as exc:  # noqa: BLE001
+            print("SKIP  %-18s (import: %r)" % (label, exc))
+            continue
+        settings = getattr(module, "SETTINGS", None)
+        section = getattr(module, "section", None)
+        if not settings or not callable(section):
+            continue
+        try:
+            # Entries are (key, default, comment) in most modules and carry a fourth field in
+            # others, so index rather than unpack.
+            text = section({entry[0]: entry[1] for entry in settings})
+        except Exception as exc:  # noqa: BLE001
+            print("SKIP  %-18s (cfg: %r)" % (label, exc))
+            continue
+        if isinstance(text, str) and text:
+            good &= check(label, text)
+        else:
+            print("skip  %-18s (nothing to install)" % label)
+
     print()
     print("all chunks parse" if good else "SOMETHING DID NOT PARSE")
     return 0 if good else 1

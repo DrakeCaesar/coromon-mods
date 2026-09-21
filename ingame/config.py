@@ -198,4 +198,17 @@ def load(path, core_settings, features):
         if name not in names:
             warnings.append("[%s]: not a known feature - ignored" % name)
 
+    # THE MASTER SWITCH, applied last so it wins whatever the sections say. Attaching the tool
+    # costs something on its own - one Interceptor on lua_gettop, which the VM calls for
+    # essentially every Lua operation, and it stays attached for the whole session - while a
+    # feature's cost only exists while that feature is installed. Turning everything off at once
+    # here is what separates the two, and doing it here rather than by editing every section
+    # means the per-feature flags keep their values, so switching back is one line either way.
+    if cfg["core"].get("features_enabled") is False:
+        for f in features:
+            cfg[f.NAME]["enabled"] = False
+        warnings.append(
+            "features_enabled = false in the file: attached with NOTHING installed, on purpose"
+        )
+
     return cfg, warnings, created

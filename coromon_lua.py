@@ -59,6 +59,28 @@ var pending = [];          /* queued requests */
 var busy = false;
 var hooked = false;
 
+/* FAST MODE, and it is the whole reason this is not free.
+
+   The onEnter below used to do, on EVERY hooked call: `L.toString()` (which allocates a string),
+   a Map.get, a Map.set, then `mainL.toString()` and another Map.get. `lua_gettop` is called for
+   essentially every Lua operation the VM performs, so that ran hundreds of thousands of times a
+   second and cost a fixed slice of every frame - measured 2026-09-21 at ~2.6 ms per frame in the
+   main menu (165 fps -> 115) with the tool attached and NOTHING installed, which is what
+   identified it: no feature is involved, so the tax is in here.
+
+   All of that work is for CAPTURE - picking the busiest lua_State - and it only has to be right
+   once. So it runs for the first `countLimit` hits (enough evidence to see which state dominates,
+   and a few milliseconds of real time) and then stops for the rest of the session. `total` keeps
+   incrementing in fast mode, because perf_probe reads the hook-hit rate out of it.
+
+   The alternative considered and rejected: detaching the Interceptor when idle. It cannot work -
+   pump() runs Lua on the game's thread, and the only way to get a turn on that thread is for the
+   game itself to call into a hooked function. The hook has to stay; it just does not have to
+   count. */
+var counted = 0;
+var countLimit = 20000;
+var fastMode = false;
+
 /* Only `lua_gettop` is strictly needed to capture the state and run code; the
    rest are extra chances to catch the Lua thread, but they are extremely hot
    functions, so `--perf` style callers may want to trim this list. */
@@ -98,12 +120,25 @@ function installHooks() {
                     var L = args[0];
                     if (!L || L.isNull()) return;
                     total++;
+                    if (fastMode) {
+                        /* the steady state: no string work, no Map work, just the pump check */
+                        if (pending.length && !busy) pump();
+                        return;
+                    }
                     var key = L.toString();
                     var c = (L_counts.get(key) || 0) + 1;
                     L_counts.set(key, c);
                     /* the busiest state is the game's main state */
                     if (mainL === null || c > (L_counts.get(mainL.toString()) || 0)) mainL = L;
                     if (pending.length && !busy && mainL) pump();
+                    counted++;
+                    /* capture is over once a state has clearly won; see the fast-mode note above */
+                    if (mainL !== null && counted >= countLimit) {
+                        fastMode = true;
+                        L_counts.clear();
+                        send({type: 'info', msg: 'hook fast mode after ' + counted +
+                              ' hits, state=' + mainL.toString()});
+                    }
                 }
             });
         } catch (e) { send({type: 'info', msg: 'hook fail ' + name + ': ' + e}); }
@@ -175,12 +210,19 @@ function pump() {
 rpc.exports = {
     eval: function (id, code) {
         pending.push({id: id, code: code});
+        /* RECAPTURE ON DEMAND. Fast mode stops updating mainL, so it gets re-verified here - at the
+           one moment it is about to be used - instead of being trusted from startup for the whole
+           session. mainL is deliberately NOT cleared: pump() can run on the very next hit, and the
+           counting can only move it to a state that has been measurably busier. A few milliseconds
+           of counting per request, and nothing between requests. */
+        fastMode = false;
+        counted = 0;
         /* give the game a nudge: if it is idle the hook may not fire for a while */
         return true;
     },
     status: function () {
         return {state: mainL ? mainL.toString() : null, hooks: total, queued: pending.length,
-                ready: ready(), hooked: hooked};
+                ready: ready(), hooked: hooked, fast: fastMode, counted: counted};
     }
 };
 """

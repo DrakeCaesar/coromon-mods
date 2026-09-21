@@ -144,10 +144,19 @@ local function cdMarkers()
         local h = tonumber(c.height) or tonumber(c.contentHeight)
         if type(c.getScale) == 'function' and h and h > 0 and h <= 3 then
           local ok, s = pcall(function() return c:getScale() end)
-          local okp, _, cy = pcall(function() return c:localToContent(0, 0) end)
-          if ok and okp and type(s) == 'number' and s > 0.001 and s < 0.999
-             and type(cy) == 'number' and cy < strip then
-            out[#out + 1] = c
+          -- THE SCALE TEST COMES FIRST, ON ITS OWN, and that ordering is the whole optimisation.
+          -- It is the discriminating one: a marker's scale IS remaining/max, so it is a fraction,
+          -- while every other node in the tree sits at 1. `localToContent` walks a matrix chain up
+          -- the node's whole parent chain - it is far and away the most expensive call in this
+          -- walk - so making it run only for nodes that can actually be a marker, instead of for
+          -- every small node in the tree, is the difference between two pcalls per small node and
+          -- two pcalls per real candidate. Same predicate, short-circuited; the set `out` receives
+          -- is identical.
+          if ok and type(s) == 'number' and s > 0.001 and s < 0.999 then
+            local okp, _, cy = pcall(function() return c:localToContent(0, 0) end)
+            if okp and type(cy) == 'number' and cy < strip then
+              out[#out + 1] = c
+            end
           end
         end
         walk(c, d + 1)
@@ -161,30 +170,11 @@ end
 -- The save's own world effects. This is where a running item effect lives, and it reports its
 -- own clock, so the countdown can be read rather than inferred.
 --
--- The table is not reachable from any global, from Game/Save/the player, or from anything on
--- screen: it exists only as an upvalue of functions inside loaded modules. So it is found the
--- way steptimer finds it - walk package.loaded, ask each function for its upvalues, and take
--- the table carrying both SAVEABLE_BATTLE_EFFECTS and VISITED_MAPS, which no other loaded
--- module holds. That is a walk over all of package.loaded, so it is NOT done on every frame:
--- the section re-finds it on an interval and keeps the table.
-local function cdSaveSettings()
-  for _, mod in pairs(package.loaded) do
-    if type(mod) == 'table' then
-      for _, fn in pairs(mod) do
-        if type(fn) == 'function' then
-          for i = 1, 80 do
-            local n, v = debug.getupvalue(fn, i)
-            if not n then break end
-            if type(v) == 'table' and v.SAVEABLE_BATTLE_EFFECTS ~= nil
-               and v.VISITED_MAPS ~= nil then
-              return v
-            end
-          end
-        end
-      end
-    end
-  end
-end
+-- The SEARCH is no longer written out here: steptimer had already written the same walk, so it
+-- now lives once in core's preamble as saveSettingsTable(). What stays here is the caching policy,
+-- which is this feature's own - it needs the table within about a second of an effect starting,
+-- which is much sooner than steptimer's 12.5 s.
+local cdSaveSettings = saveSettingsTable
 
 -- Every running effect that reports its own clock, as { left, max, fraction, uid }.
 --
@@ -287,10 +277,30 @@ do
   local WHITE = { 1, 1, 1 }
 
   -- The save settings table, re-found on an interval rather than every frame: finding it walks
-  -- all of package.loaded. The old table is kept if a re-find fails, because a save reload can
-  -- replace it and a missing one for a frame should not take the countdown down with it.
+  -- all of package.loaded, every function in every module, asking each for up to 80 upvalues -
+  -- tens of thousands of debug.getupvalue calls per attempt. The old table is kept if a re-find
+  -- fails, because a save reload can replace it and a missing one for a frame should not take the
+  -- countdown down with it.
+  --
+  -- THE THROTTLE USED TO BE DEFEATED, and that is the menu stall. The condition was
+  --
+  --     if f.settings == nil or ((f.passes or 0) % __RESCAN__) == 0 then
+  --
+  -- and the first term does not cache the failure: while the table has never been found, `f.settings`
+  -- is nil on every frame, so the whole package.loaded walk ran EVERY frame instead of every
+  -- __RESCAN__ frames. That is the state on the title screen - the table carries
+  -- SAVEABLE_BATTLE_EFFECTS and VISITED_MAPS and does not exist until a save is loaded - which is
+  -- exactly the reported shape: at the main menu the frame cost is tens of milliseconds (165 fps
+  -- down to ~20, CPU up), and it goes away the moment a game is loaded and the table appears and
+  -- gets cached.
+  --
+  -- So the interval is now measured from the LAST ATTEMPT rather than from the last SUCCESS. A
+  -- failed scan is remembered like a successful one; the only difference is that there is nothing
+  -- to keep using in between.
   local function settings()
-    if f.settings == nil or ((f.passes or 0) % __RESCAN__) == 0 then
+    local passes = f.passes or 0
+    if f.lastScan == nil or (passes - f.lastScan) >= __RESCAN__ then
+      f.lastScan = passes
       local s = cdSaveSettings()
       if s then f.settings = s end
     end
@@ -302,16 +312,24 @@ do
   local function clear()
     for _, t in pairs(f.labels or {}) do pcall(function() t:removeSelf() end) end
     f.labels = {}
-    f.entries, f.settings = {}, nil
+    -- lastScan goes too, so a re-install after kill() looks for the settings table on its next
+    -- frame rather than waiting out the interval it inherited.
+    f.entries, f.settings, f.lastScan = {}, nil, nil
   end
 
   local function update()
     if not f.on then return end
     local markers = cdMarkers()
-    local effects = cdEffects(settings())
     local entries, seen, used = {}, {}, {}
     f.passes = (f.passes or 0) + 1
     f.markers = #markers
+    -- LAZY, AND THIS IS THE SECOND HALF OF THE MENU COST. The settings table exists only to MATCH a
+    -- marker to the effect whose fraction it is showing, so with no markers there is nothing to
+    -- match and no reason to pay for finding it. On the title screen, and across the whole overworld
+    -- whenever nothing is running, there are no markers - so the package.loaded walk no longer
+    -- happens there at all: not every frame (which was the bug), and not amortised over every 120th
+    -- frame either. It is now driven by a marker actually existing.
+    local effects = (#markers > 0) and cdEffects(settings()) or {}
 
     for i = 1, #markers do
       local marker = markers[i]
