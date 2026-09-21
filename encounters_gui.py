@@ -58,6 +58,7 @@ except ImportError:                     # the button then explains itself instea
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import encounters  # noqa: E402
 import encounter_zones as ez  # noqa: E402
+import dex  # noqa: E402
 import skills  # noqa: E402
 
 STATE_PATH = os.path.join(
@@ -262,7 +263,8 @@ class GrindApp:
         self.search = tk.StringVar(value="")
         self.checks = {}
         self.zone_pick = {}
-        self.selected_zone = None     # what the map tab draws
+        self.selected_zone = None     # what the map draws
+        self.monsters = dex.monsters()
         self.skill_pick = {}
         self._geom_job = None
         self.geometry = None
@@ -399,9 +401,163 @@ class GrindApp:
 
         self.sort_col, self.sort_desc = "explvl", True
 
+        dex_tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(dex_tab, text="  Coromon  ")
+        self.build_dex(dex_tab)
+
         skills_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(skills_tab, text="  Skills  ")
         self.build_skills(skills_tab)
+
+    # ---------------------------------------------------------------- coromon list
+    def build_dex(self, tab):
+        """Every Coromon in dex order, and where each one appears.
+
+        The order is the game's own `number`, not the order of the data file: the wiki, the dex
+        screen and any "where do I find #87" answer all use that number, so sorting by it is the
+        point rather than reading the JSON as it comes.
+        """
+        tab.columnconfigure(0, weight=1)
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(1, weight=1)
+
+        top = ttk.Frame(tab)
+        top.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.dex_search = tk.StringVar(value=str(self.state.get("dex_search", "")))
+        ttk.Label(top, text="find").pack(side="left")
+        ttk.Entry(top, textvariable=self.dex_search, width=22).pack(side="left", padx=4)
+        self.dex_search.trace_add("write", lambda *_: self.refresh_dex())
+        self.dex_count = ttk.Label(top, text="")
+        self.dex_count.pack(side="left", padx=8)
+
+        # a row per Coromon carrying its dex icon: 24 px cells doubled, because that is the only
+        # kind of scaling Tk has and it keeps pixel art crisp
+        ttk.Style(self.root).configure("Dex.Treeview", rowheight=52)
+        self.dex_tree = ttk.Treeview(tab, show="tree", style="Dex.Treeview", height=20)
+        self.dex_tree.column("#0", width=280, stretch=True)
+        self.dex_tree.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        bar = ttk.Scrollbar(tab, orient="vertical", command=self.dex_tree.yview)
+        self.dex_tree.configure(yscrollcommand=bar.set)
+        bar.grid(row=1, column=0, sticky="nse")
+        self.dex_tree.bind("<<TreeviewSelect>>", lambda e: self.show_dex_locations())
+
+        right = ttk.Frame(tab)
+        right.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(6, 0))
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+        self.dex_head = ttk.Label(right, text="", wraplength=520, justify="left")
+        self.dex_head.grid(row=0, column=0, sticky="w")
+        self.dex_loc = ttk.Treeview(right, columns=("area", "zone", "levels", "share"),
+                                    show="headings", height=14)
+        for cid, text, width, anchor in (("area", "Area", 165, "w"), ("zone", "Zone", 165, "w"),
+                                         ("levels", "levels", 85, "e"), ("share", "share", 65, "e")):
+            self.dex_loc.heading(cid, text=text)
+            self.dex_loc.column(cid, width=width, anchor=anchor, stretch=False)
+        self.dex_loc.grid(row=1, column=0, sticky="nsew")
+        self.dex_loc.bind("<Double-1>", lambda e: self.jump_to_zone())
+        ttk.Label(right, foreground=NOTE, wraplength=520, justify="left", text=(
+            "Wild encounters only - evolutions, starters and gift Coromon have no locations. "
+            "Shares are the zone's own encounter weights. Double-click a location to show it on "
+            "the map."
+        )).grid(row=2, column=0, sticky="w", pady=(6, 0))
+
+        self.dex_icons = {}
+        self.dex_icon_errors = {}
+        self.dex_pick = {}
+        self.dex_zone = {}
+        self.dex_ready = False
+        self.dex_tab = tab
+        # NOT filled in here: every row carries an image, and building the whole list costs about
+        # 2.3 s (the atlas is decoded once - see dex._sheets). Paid at startup that is 2.3 s of the
+        # window not appearing, so it is paid the first time this tab is opened instead.
+
+    def dex_icon(self, mon):
+        """That Coromon's dex icon at 2x, cached, and cut to a file the first time it is needed.
+
+        THE FILE IS THE POINT. Reading one 24 px icon costs 0.18 ms; composing it from the 768x744
+        atlas costs 2200 ms for the FIRST one, because that is Tk's PNG decode - and doing that per
+        row is what made this list take minutes to appear. So each icon is composed once, written
+        beside the others, and every run after that just reads it: the whole list comes to ~0.02 s.
+        The drawing itself lives in dex.build_icon, so the window, the files it writes and the
+        extracted icon set all agree on what an icon is.
+
+        Tk discards an image that nothing references, so these stay in self.dex_icons or the rows
+        come up blank.
+        """
+        if mon.uid in self.dex_icons:
+            return self.dex_icons[mon.uid]
+        image = None
+        path = dex.icon_path(mon, 1)
+        try:
+            if os.path.exists(path):
+                # 24 px on disk, zoomed here: Tk's per-file PNG overhead dominates, so 118 small
+                # files read in ~0.05 s against ~0.46 s for their doubled versions
+                image = tk.PhotoImage(file=path).zoom(2)
+            else:
+                image = dex.build_icon(mon, zoom=2)
+                native = dex.build_icon(mon, zoom=1)
+                if native is not None:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    native.write(path, format="png")
+        except (tk.TclError, OSError) as exc:
+            # recorded, not swallowed: a dex row with no icon should be explainable
+            self.dex_icon_errors[mon.uid] = str(exc)
+        self.dex_icons[mon.uid] = image
+        return image
+
+    def refresh_dex(self):
+        self.dex_ready = True
+        # cut the icons out if they are not cut yet: 0.2 ms each to read afterwards, against 2200
+        # ms to decode the atlas they come from - see dex.ensure_icons
+        dex.ensure_icons(1)
+        needle = self.dex_search.get().strip().lower()
+        self.dex_tree.delete(*self.dex_tree.get_children())
+        self.dex_pick = {}
+        shown = 0
+        for mon in self.monsters:
+            label = "#%s  %s" % (mon.number if mon.number else "--", mon.name)
+            if needle and needle not in label.lower() and needle not in (mon.uid or "").lower():
+                continue
+            icon = self.dex_icon(mon)
+            # no image argument at all when there is no icon: `image=None` is not "no icon" to
+            # Tk, it is a missing value, and it raises
+            self.dex_pick[self.dex_tree.insert("", "end", text=label, image=icon)
+                          if icon is not None else
+                          self.dex_tree.insert("", "end", text=label)] = mon
+            shown += 1
+        self.dex_count.configure(text="%d of %d" % (shown, len(self.monsters)))
+        kids = self.dex_tree.get_children()
+        if kids:
+            self.dex_tree.selection_set(kids[0])
+        self.show_dex_locations()
+
+    def show_dex_locations(self):
+        sel = self.dex_tree.selection()
+        mon = self.dex_pick.get(sel[0]) if sel else None
+        self.dex_loc.delete(*self.dex_loc.get_children())
+        self.dex_zone = {}
+        if mon is None:
+            self.dex_head.configure(text="")
+            return
+        found = dex.where(mon.uid)
+        self.dex_head.configure(text="%s   %s   %d location(s)%s" % (
+            mon.name, mon.family or "-", len(found),
+            "" if found else "   - no wild encounters: an evolution, a starter or a gift"))
+        for zone, lo, hi, share, _battles in found:
+            self.dex_zone[self.dex_loc.insert("", "end", values=(
+                pretty(zone.map_file), zone.name, "L%s-%s" % (lo, hi),
+                "%.1f%%" % share))] = zone
+
+    def jump_to_zone(self):
+        """Show the double-clicked location on the map, on the grind tab."""
+        sel = self.dex_loc.selection()
+        zone = self.dex_zone.get(sel[0]) if sel else None
+        if zone is None:
+            return
+        self.selected_zone = zone
+        self.notebook.select(0)
+        self.root.update_idletasks()   # the canvas has no size until the tab is on screen
+        self.redraw_map(force=True)
 
     # ---------------------------------------------------------------- zone map
     def build_map(self, parent):
@@ -429,10 +585,10 @@ class GrindApp:
             "markers name no layer and show as small outlined squares."
         )).grid(row=3, column=0, sticky="w", pady=(6, 0))
 
-    def redraw_map(self):
+    def redraw_map(self, force=False):
         """Draw the selected zone's area. Silent while the tab is not on screen."""
         canvas = self.map_canvas
-        if not canvas.winfo_ismapped():
+        if not force and not canvas.winfo_ismapped():
             return
         canvas.delete("all")
         for child in self.map_legend.winfo_children():
@@ -564,6 +720,10 @@ class GrindApp:
         # the map is only drawn once it is on screen: an unmapped canvas reports a 1-pixel size, so
         # drawing early would pick a nonsense scale and sit there looking broken
         self.redraw_map()
+        # and the Coromon list is built the first time its tab is opened, for the same reason taken
+        # further - see build_dex
+        if not self.dex_ready and self.notebook.index("current") == self.notebook.index(self.dex_tab):
+            self.refresh_dex()
 
     def on_configure(self, event=None):
         if self._geom_job is not None:

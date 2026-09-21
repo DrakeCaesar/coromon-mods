@@ -19,3 +19,7 @@ overlays_runtime.json.tmp
 
 
 reload-probe.txt
+
+# generated: the encounter-zone map page, and the icon export folder
+encounter_zones.html
+icons/
