@@ -669,7 +669,13 @@ if type(_G.inputHelper) == 'table' and type(debug) == 'table'
   end
   _G.__qrTargetLevel = target
   _G.__qrFinalTarget = target
-  if type(level) == 'number' and type(target) == 'number' and level > target
+  -- NOT RUN when the reload goes through the main menu (MENU_ROUND_TRIP). On that path the level is
+  -- raised and lowered by the game's OWN paired calls - titleScreen:new() -> increaseInputLevel, then
+  -- the title screen's own exit preamble -> decreaseInputLevel - so a second, hand-derived correction
+  -- on top of them would only make the measurement ambiguous. The reading is taken either way.
+  if _G.__qrMenuRoundTrip then
+    _G.__qrStepsDown = 'skipped - the game owns the level on this path'
+  elseif type(level) == 'number' and type(target) == 'number' and level > target
      and overlaysLeft == 0 then
     local steps = 0
     while level > target and steps < 16 do
@@ -685,8 +691,10 @@ if type(_G.inputHelper) == 'table' and type(debug) == 'table'
   _G.__qrInputLevelAfter = level
 
   -- And focus, which is what actually routes input: the nav serving the CURRENT level has to be
-  -- focused.
-  if perLevel ~= nil and level ~= nil then
+  -- focused. Skipped on the menu round trip for the same reason as the step-down above - the game's
+  -- own decreaseInputLevel is what hands focus back (inputHelper L169-171), and it clears
+  -- pausedInputNavigations on the way, which a hand-rolled handleObtainFocus cannot do.
+  if not _G.__qrMenuRoundTrip and perLevel ~= nil and level ~= nil then
     local nav = perLevel[level]
     _G.__qrNavAtLevel = (nav == nil) and 'nothing registered' or 'present'
     if type(nav) == 'table' and type(nav.isFocused) == 'function' then
@@ -723,7 +731,17 @@ ps:quitCurrentGame()
 -- existed, because the lowest-registered-level reading it came from is not available any more once the
 -- world is gone.
 _G.__qrStep = 'settling the input level'
-if type(_G.__qrFinalTarget) == 'number' and type(_G.inputHelper) == 'table'
+if _G.__qrMenuRoundTrip then
+  -- Nothing to settle: on this path the level is raised by titleScreen:new() and lowered by the title
+  -- screen's own exit preamble, in the game's own order and with the game's own calls, and both of
+  -- those call inputHelper:releaseInput() - which is what drops a press still held in its bookkeeping.
+  -- A settle here would be a second opinion about the same number, and the two would disagree in a way
+  -- that is impossible to read.
+  _G.__qrFinalUp, _G.__qrFinalDown = 'skipped', 'skipped'
+  _G.__qrFinalNav = 'not read - the game owns the level on this path'
+  local okv0, v0 = pcall(function() return _G.inputHelper:getInputLevel() end)
+  _G.__qrFinalLevel = okv0 and v0 or nil
+elseif type(_G.__qrFinalTarget) == 'number' and type(_G.inputHelper) == 'table'
    and type(_G.inputHelper.getInputLevel) == 'function' then
   local ih = _G.inputHelper
   local up, down = 0, 0
@@ -785,33 +803,116 @@ end
 _G.__qrStep = 'torn down'
 '''
 
-# The last two calls of the Quit button's sequence, kept SEPARATE because a reload must not run them.
-# They are what puts the game back on the main menu - and a reload does not want a menu, it wants a
-# world. Creating the title screen and then taking it away is also what crashed the third attempt:
-# the screen starts an intro `transition.to`, and its onComplete (titleScreen.lu:520 ->
-# CoromonLogo:playSwurmySequence -> setSequenceAndPlay) fired after the screen had been removed and
-# called into a destroyed sprite. `timer.cancel('titleScreen')` does not stop that, because it is a
-# transition and not a timer - and the game never has to cancel it, because a human leaves the menu
-# up until the animation has finished.
+# The last two calls of the Quit button's sequence. They are what puts the game back on the main menu,
+# and the reload now RUNS them rather than skipping them (see MENU_ROUND_TRIP below).
+#
+# Skipping them was the earlier design, and it was wrong twice. It was wrong first because stopping
+# here leaves the game with no world and no screen. Then it was wrong in the other direction: creating
+# the screen and taking it away again crashed the next attempt, with
+#     CoromonLogo.lua:35 playSwurmySequence -> 'setSequenceAndPlay' (a nil value)
+#       <- titleScreen.lua:200 playRandomSwurmySequences
+#       <- titleScreen.lua:520 onComplete  <- transition.lua:29 completeTransition
+# and the reason is a race that only the full timeline explains. `titleScreen:new()` ends by starting
+# its own entrance, L512-517:
+#     transition.fadeIn(parentGroup, 350, outQuad, <closure at L519-540>)
+# that closure is `_onShow`, and _onShow starts two more transitions - 500 ms with a 150 ms delay, on
+# `logo` and on `menuButtonsGroup` - whose completion is `playRandomSwurmySequences`. So the screen's
+# timeline runs to 350 + 150 + 500 = ~1000 ms, while the leave preamble removes the group at ~350 ms.
+#     new() at t=0 | cancelRecursive at t~304 | remove at t~354 | crash at t~1000
+# Cancelling at leave time cannot fix that: at 300 ms the fadeIn has not completed, so the two
+# transitions that actually crash HAVE NOT BEEN CREATED YET, and nothing can cancel a transition that
+# does not exist. The answer is NOT to cancel it: `new()` ends with `inputHelper:blockInput()` (L479)
+# and the entrance's completion is what calls `inputHelper:unblockInput()` (L522), so cancelling the
+# entrance leaves input blocked for the rest of the session - buttons and mapped keys dead while polled
+# movement still works. The entrance is therefore left to run, and leaveMenuThenLoad() waits on
+# `inputHelper:isInputBlocked()` before taking the screen away.
+#
+# `timer.cancel('titleScreen')` was never going to help here: the entrance is a transition, not a
+# timer. It IS still needed, for a different thing - the birds and the swurmy rolls are scheduled with
+# `timer.performWithRandomDelay(..., 'titleScreen')` (L158-173, L199-205), and that is the key it
+# cancels. (An earlier note here said input stays blocked until the intro has finished, which would
+# have made this impossible for a player. That was wrong: nothing in `new()` blocks input - the only
+# `blockInput` in the module is in the Play handler at L361 - so the screen's entrance is a timeline we
+# are obliged to respect rather than one the game enforces.)
+#
+# The other half is now answered from the game too: the screen is LEFT the game's own way
+# (titleScreen.lu L386-393, see leaveMenuThenLoad in RELOAD_BODY), so the input level it raised is
+# lowered by the game's own decreaseInputLevel, and focus and pausedInputNavigations are unwound by the
+# game's own code rather than by the four hand-rolled substitutes this file used to carry.
 TEARDOWN_MENU = r'''
 if type(_G.Achievement) == 'table' and
    _G.Achievement.resetPercentageOfMaxProgressCache ~= nil then
   _G.__qrStep = 'Achievement:resetPercentageOfMaxProgressCache'
   _G.Achievement:resetPercentageOfMaxProgressCache()
 end
+-- Recorded, NOT returned. In the reload this chunk sits in the middle of the body chunk, and a
+-- `return` here would end the body before RELOAD_BODY ever ran - the load would never be queued and
+-- the feature would sit `busy` forever, which is a worse failure than the one being guarded against.
+-- So the title screen is skipped, the reason is written down, and leaveMenuThenLoad() sees
+-- __qrTitleGroup == nil and loads straight from the teardown, exactly as the reload used to.
 if type(_G.titleScreen) ~= 'table' or _G.titleScreen.new == nil then
-  return _G.__qrStep .. '; but titleScreen:new is not there, so the game was left with no screen'
+  _G.__qrTitleGroup = nil
+  _G.__qrStep = 'titleScreen:new is not there, so there is no menu to go back to'
+  _G.__qrNote = _G.__qrStep .. ' - the load goes straight from the teardown'
+else
+  _G.__qrStep = 'titleScreen:new'
+  -- keep what it returns. It IS the group the screen is built into and it IS what display.remove
+  -- accepts - a reload reported "title group removed = true" - and it is the handle the title
+  -- screen's OWN exit from the menu uses for its display.remove(parentGroup) (L389).
+  _G.__qrTitleGroup = _G.titleScreen:new()
+  -- THE ENTRANCE IS LEFT ALONE, AND IT HAS TO BE. `new()` ends by calling
+  -- `inputHelper:blockInput()` (L479, pc 825-827) and then starting the entrance
+  --     transition.fadeIn(parentGroup, 350, outQuad, <closure at L519-540>)        -- L512-517
+  -- and that closure's FIRST ACTION is `inputHelper:unblockInput()` (L522). So the block and the
+  -- unblock are a pair, and the entrance's completion is the only thing that clears it. Cancelling
+  -- the entrance - which is what this file did, with `transition.cancelAll()` right here - leaves
+  -- input BLOCKED for the rest of the session: every touch, mouse and mapped-button dispatch is
+  -- suppressed, while movement keeps working because it is polled from the axes and never goes through
+  -- that gate. That is exactly the report "movement works, but no other keys do", and it appeared the
+  -- moment the cancelAll was added.
+  --
+  -- So instead of cancelling it, leaveMenuThenLoad() WAITS for it. `inputHelper:isInputBlocked()` is
+  -- the game's own "the entrance has finished" signal, and it is the exact partner of the block above -
+  -- nothing else in this path blocks input. Waiting also removes the original crash without cancelling
+  -- anything: by the time the group is removed, the entrance's transitions have completed and their
+  -- onCompletes have already run against a LIVE screen, so there is nothing left to fire into a removed
+  -- one. That crash was `CoromonLogo:playSwurmySequence` -> `setSequenceAndPlay` being nil, called from
+  -- the onComplete at t~1000 ms while the group had been removed at t~354 ms.
+  --
+  -- The cost is honest and visible: the menu is up for ~1 s before the load, and its entrance plays.
+  -- That IS the game's own timeline (350 + 150 + 500 ms), and the player's route through the menu is
+  -- no faster. It also means the entrance's other work happens normally - the game-settings migration
+  -- popups, playRandomSwurmySequences and the `hasShownSaveslotClustersScreen` bookkeeping - none of
+  -- which this file would otherwise replicate.
+  _G.__qrMenuEntrance = 'left to run; the leave step waits for input to be unblocked'
+  _G.__qrStep = 'at the main menu'
 end
-_G.__qrStep = 'titleScreen:new'
--- keep what it returns. It IS the group the screen is built into and it IS what display.remove
--- accepts - a reload reported "title group removed = true" - so it is also the handle the title
--- screen's own load routine would use for its display.remove(parentGroup).
-_G.__qrTitleGroup = _G.titleScreen:new()
-_G.__qrStep = 'at the main menu'
 '''
 
 # what --teardown runs: the whole Quit button sequence, ending at the menu
 TEARDOWN = TEARDOWN_BASE + TEARDOWN_MENU
+
+
+# GO THROUGH THE MAIN MENU ON THE WAY TO THE LOAD, which is the point of the exercise.
+#
+# The teardown is the Quit button's sequence, verbatim: it destroys the world, calls quitCurrentGame and
+# puts the title screen up. What it does NOT do is LEAVE the menu, and the game's own exit from the menu
+# is five statements that do the input bookkeeping (see leaveMenuThenLoad in RELOAD_BODY). Skipping them
+# is why this file had to hand-roll a level correction, a target derived from "the lowest level with a
+# navigation registered", a focus repair in two places and a bidirectional settle - four substitutes for
+# one game call, each of which has been wrong at least once.
+#
+# So the reload now runs the player's OWN route: quit to the menu, leave the menu, load. The level is
+# raised by the game (titleScreen:new -> increaseInputLevel) and lowered by the game (the screen's own
+# exit -> decreaseInputLevel), and the load happens from the state the game loads from.
+#
+# Set to False to go straight from the teardown to the load, which is what the reload did before this.
+# One flag rather than a deleted path, because the measurement that decides between them is the
+# `leaving the menu` / `left the menu` pair in the probe log: `lvl` has to come back down by exactly
+# one. If it does not, this is the switch to flip back.
+MENU_ROUND_TRIP = True
+
+# BODY itself is composed below RELOAD_BODY, which it needs.
 
 
 def run_guard(run_id):
@@ -1137,6 +1238,104 @@ if type(_G.timer) ~= 'table' or type(_G.timer.performWithDelay) ~= 'function' th
   return table.concat(report, ' | ') .. ' | no timer, so the load was NOT queued'
 end
 
+-- The body is its own chunk, so it cannot see the section's `qrLog`; the teardown's log table is the
+-- one thing they share.
+local function say(line)
+  _G.__qrLog[#_G.__qrLog + 1] = tostring(line)
+  if #_G.__qrLog > 60 then table.remove(_G.__qrLog, 1) end
+end
+
+-- The level, and the two tables the level is bookkept in. Read-only, and read through
+-- debug.getupvalue because `inputNavigationPerInputLevel` and `pausedInputNavigations` are closure
+-- upvalues of increase/decreaseInputLevel rather than fields (inputHelper L143-144).
+local function levelSnapshot()
+  local ih = _G.inputHelper
+  local out = { level = nil, navs = nil, paused = nil }
+  if type(ih) ~= 'table' then return out end
+  local ok, v = pcall(function() return ih:getInputLevel() end)
+  if ok and type(v) == 'number' then out.level = v end
+  local per, paused = nil, nil
+  if type(debug) == 'table' and type(debug.getupvalue) == 'function' then
+    local function collect(fn)
+      if type(fn) ~= 'function' then return end
+      for i = 1, 16 do
+        local nm, u = debug.getupvalue(fn, i)
+        if nm == nil then break end
+        if nm == 'inputNavigationPerInputLevel' and type(u) == 'table' then per = u end
+        if nm == 'pausedInputNavigations' and type(u) == 'table' then paused = u end
+      end
+    end
+    collect(ih.increaseInputLevel)
+    collect(ih.decreaseInputLevel)
+  end
+  local function keysOf(t, truthyOnly)
+    if type(t) ~= 'table' then return '?' end
+    local ks = {}
+    for k, val in pairs(t) do
+      if val ~= nil and (not truthyOnly or val) then ks[#ks + 1] = tostring(k) end
+    end
+    table.sort(ks)
+    return '{' .. table.concat(ks, ',') .. '}'
+  end
+  out.navs = keysOf(per, false)
+  out.paused = keysOf(paused, true)
+  return out
+end
+
+local function levelLine(p)
+  return string.format('lvl=%s navs=%s paused=%s',
+    tostring(p.level), tostring(p.navs), tostring(p.paused))
+end
+
+-- The KEY path's state, which is a different machine from the level/axis one. Movement is routed by
+-- the navigation at the current level and arrives as direction/axis input, so it survives anything
+-- that only touches key events - which is exactly why "movement works, nothing else does" points here.
+-- `shouldKeyEventDetectUnknownGamepads` is an upvalue of its own setter (inputHelper.lu L777-779), and
+-- the two flags are read by the key handler at L881-888, whose shape for an UNKNOWN device is:
+--
+--   if shouldKeyEventAcceptFallbackForUnknownGamepads then
+--     handleKeyOrMappedButton(t, fallbackButtonNameByKeyName[keyName], ...)   -- L883, buttons work
+--   elseif shouldKeyEventDetectUnknownGamepads then
+--     handleKeyOrMappedButton(t, nil, ...)                                  -- L885, resolve the device
+--   else                                                                     -- L886-888, nothing
+--
+-- so for an unknown pad, buttons work only with one of those flags set. Read-only.
+local function keyFlag(fn, name)
+  if type(fn) ~= 'function' or type(debug) ~= 'table'
+     or type(debug.getupvalue) ~= 'function' then
+    return '?'
+  end
+  for i = 1, 8 do
+    local k, v = debug.getupvalue(fn, i)
+    if k == nil then break end
+    if k == name then return tostring(v) end
+  end
+  return '?'
+end
+
+local function keyState()
+  local ih = _G.inputHelper
+  local out = {}
+  if type(ih) ~= 'table' then return 'no inputHelper' end
+  out[#out + 1] = 'detect=' .. keyFlag(ih.setKeyEventShouldDetectUnknownGamepads,
+                                       'shouldKeyEventDetectUnknownGamepads')
+  out[#out + 1] = 'fallback=' .. keyFlag(ih.setKeyEventShouldAcceptFallbackForUnknownGamepads,
+                                         'shouldKeyEventAcceptFallbackForUnknownGamepads')
+  local function call(name)
+    if type(ih[name]) ~= 'function' then return '?' end
+    local ok, v = pcall(function() return ih[name](ih) end)
+    if not ok then return '?' end
+    if type(v) == 'table' then return tostring(v.productName or v.displayName or 'table') end
+    return tostring(v)
+  end
+  out[#out + 1] = 'device=' .. call('getCurrentDevice')
+  out[#out + 1] = 'usingGamepad=' .. call('isUsingGamepad')
+  out[#out + 1] = 'usingKeyboard=' .. call('isUsingKeyboard')
+  out[#out + 1] = 'gamepadNav=' .. call('isGamepadNavigationSelected')
+  out[#out + 1] = 'keyboardNav=' .. call('isKeyboardNavigationSelected')
+  return table.concat(out, ' ')
+end
+
 local function finish()
   -- The game's own debug loader, verbatim (debug_load_saveslot lines 50-51).
   _G.__qrStep = 'reading slot ' .. tostring(slot) .. ' out of the store'
@@ -1159,6 +1358,120 @@ local function finish()
     restoreMenu('loadGame threw')
   end
   _G.__qrStep = 'finished'
+end
+
+-- LEAVING THE MAIN MENU, THE GAME'S OWN WAY. Everything below is titleScreen.lu proto
+-- 0.2.12.0.0.1.0.0, lines 386-393, in the game's own order. This is the half of the flow that was
+-- missing: the teardown goes to the menu (the Quit button's own sequence, verbatim) and the game then
+-- leaves the menu for the world. Those five statements are the input bookkeeping, not decoration -
+-- `decreaseInputLevel` is the ONLY thing that clears inputNavigationPerInputLevel[current] (L166) and
+-- the only thing that hands focus back to the level below (L169-171), and both it and
+-- increaseInputLevel call inputHelper:releaseInput() (L154, L163), which is what drops a press still
+-- held in inputHelper's bookkeeping.
+--
+-- The one addition is transition.cancelRecursive before the group is removed - harmless (it is a
+-- display-object walk and __qrTitleGroup is a container object, so it finds nothing here), kept only
+-- as belt and braces now that the entrance is waited out rather than cancelled.
+local function leaveMenuThenLoad()
+  if not _G.__qrMenuRoundTrip or _G.__qrTitleGroup == nil then
+    _G.__qrLeaveSteps = _G.__qrMenuRoundTrip and 'no title group to leave'
+                        or 'skipped - not going through the menu'
+    finish()
+    return
+  end
+  _G.__qrStep = 'waiting for the menu entrance'
+  local before = levelSnapshot()
+  _G.__qrLevelBeforeLeave = levelLine(before)
+  _G.__qrKeysBeforeLeave = keyState()
+  say('  leaving the menu: ' .. _G.__qrLevelBeforeLeave .. '  (' ..
+      tostring(_G.__qrMenuEntrance or 'the entrance state was not recorded') .. ')')
+  say('    keys before: ' .. _G.__qrKeysBeforeLeave)
+
+  -- WAIT FOR THE ENTRANCE. `titleScreen:new()` blocks input (L479) and the entrance's completion
+  -- unblocks it (L522), so isInputBlocked() going false IS "the screen has finished coming up".
+  -- Leaving before that has two consequences, both measured: the screen's own onCompletes fire into a
+  -- group that has been removed (the CoromonLogo crash), and input stays blocked (movement works, no
+  -- other keys do). The bound is a backstop for a build where the flag never clears, not a timing
+  -- guess - what it normally waits for is the transition itself, and the line below records the real
+  -- number so it can be checked rather than assumed.
+  local waited = 0
+  local function entranceDone()
+    if type(_G.inputHelper) ~= 'table'
+       or type(_G.inputHelper.isInputBlocked) ~= 'function' then
+      return nil
+    end
+    local ok, v = pcall(function() return _G.inputHelper:isInputBlocked() end)
+    return ok and v or nil
+  end
+  local function attempt()
+    local blocked = entranceDone()
+    if blocked == true and waited < 3000 then
+      waited = waited + 50
+      _G.timer.performWithDelay(50, attempt, 1)
+      return
+    end
+    _G.__qrEntranceWait = string.format('%d ms (blocked=%s)', waited, tostring(blocked))
+    say('    entrance: ' .. _G.__qrEntranceWait)
+    -- cancelRecursive is belt and braces only - see above. It returns silently when handed a
+    -- non-display-object (transition.lu L393), which is why the log records that too.
+    local okcanc, errcanc = pcall(function()
+      _G.transition.cancelRecursive(_G.__qrTitleGroup)
+    end)
+    _G.__qrLeaveCancel = okcanc and 'cancelled' or ('FAILED: ' .. tostring(errcanc))
+    _G.timer.performWithDelay(50, function()
+    local steps = {}
+    local function step(what, f)
+      local oks, errs = pcall(f)
+      steps[#steps + 1] = what .. (oks and '=ok' or ('=FAILED:' .. tostring(errs)))
+    end
+    -- whether __qrTitleGroup is a display object at all. It matters because transition.cancelRecursive
+    -- returns SILENTLY when it is not (transition.lu L393: `if not display.isDisplayObject(_g) then
+    -- return end`), so a logged `cancelled` meant nothing - and the probe log confirms it is false
+    -- (__qrTitleGroup is the container object rectHelper.newContainerObject returns, not a group).
+    local isDisp = false
+    if type(_G.display) == 'table' and type(_G.display.isDisplayObject) == 'function' then
+      local okd, v = pcall(function() return _G.display.isDisplayObject(_G.__qrTitleGroup) end)
+      isDisp = okd and v or false
+    end
+    step('cancelRecursive(displayObject=' .. tostring(isDisp) .. ')', function()
+      _G.transition.cancelRecursive(_G.__qrTitleGroup)
+    end)
+    step('timer.cancel', function() _G.timer.cancel('titleScreen') end)
+    step('display.remove', function() _G.display.remove(_G.__qrTitleGroup) end)
+    step('pauseMenu:forceDestroyIfCreated',
+         function() _G.pauseMenu:forceDestroyIfCreated() end)
+    step('decreaseInputLevel', function() _G.inputHelper:decreaseInputLevel() end)
+    -- NOT `setKeyEventShouldDetectUnknownGamepads(false)`, and leaving it out is deliberate.
+    --
+    -- The game does call it false on the way into a world (titleScreen.lu L393, and L55 in its
+    -- leave-the-screen helper), but it can afford to: the menu was up with the flag at its default
+    -- TRUE (set by `new()`, L31), so the player's first button press ran the detect branch at
+    -- inputHelper L885 and RESOLVED the device. Once the device is known, the whole unknown-device
+    -- branch (L881-888) is not taken at all and the flag stops mattering.
+    --
+    -- A reload does not give the menu that button press - there is no player in the loop - so if the
+    -- pad is still unknown when we set the flag false, every button key event from it afterwards
+    -- falls through to the `else` at L886-888 and is DROPPED, while the stick keeps working because
+    -- axes are not key events. That is precisely the report: "movement works, but no other keys do".
+    --
+    -- So the flag is left exactly as `titleScreen:new()` set it, which is also the state the game is
+    -- in for the entire time the menu is up. The keys line below records what it actually is, so this
+    -- can be checked rather than trusted.
+    _G.__qrLeaveSteps = table.concat(steps, ' ')
+    local after = levelSnapshot()
+    _G.__qrLevelAfterLeave = levelLine(after)
+    -- The title screen raised the level when it was created, so leaving it should take the level back
+    -- down by exactly one. This line is the check on the whole idea: if `lvl` does not come back down,
+    -- the pair did not balance and the hand-rolled settle has to come back on.
+    say('  left the menu:    ' .. _G.__qrLevelAfterLeave .. '  (' .. _G.__qrLeaveSteps .. ')')
+    _G.__qrKeysAfterLeave = keyState()
+    say('    keys after:  ' .. _G.__qrKeysAfterLeave)
+    _G.__qrStep = 'left the menu, loading'
+    finish()
+    end, 1)
+  end
+  -- the entrance poll starts one frame in, so the very first check is not made before the fadeIn exists
+  _G.timer.performWithDelay(50, attempt, 1)
 end
 -- NOT a fixed delay. `worldHelper:destroy()` is only half done when it returns: it ends with
 -- `nextFrame(function() instance = display.remove(instance); setmetatable(t, nil) end)`. Loading
@@ -1196,7 +1509,7 @@ local function poll()
                      or 'timed out after 5 s with isCreated() still true')
     _G.__qrStep = 'waiting stopped after ' .. tostring(waited) .. ' ms'
     if (settled and waited >= 300) or (noGate and waited >= 250) then
-      finish()
+      leaveMenuThenLoad()
     else
       restoreMenu('worldHelper:isCreated() never went false')
     end
@@ -1211,6 +1524,14 @@ _G.__qrReport = table.concat(report, ' | ') ..
                 ' | waiting for the teardown to finish, then loading'
 return _G.__qrReport
 '''
+
+# what the reload runs: the Quit button's sequence, then the title screen's own exit from the menu,
+# then the load. The flag goes at the top of the chunk because TEARDOWN_BASE reads it to decide
+# whether to do its own level surgery.
+BODY = (('_G.__qrMenuRoundTrip = true\n' if MENU_ROUND_TRIP else '')
+        + TEARDOWN_BASE
+        + (TEARDOWN_MENU if MENU_ROUND_TRIP else '')
+        + RELOAD_BODY)
 
 
 def do_reload(slot=None, bridge=None):

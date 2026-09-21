@@ -45,6 +45,24 @@ gold booster sit in it - and those have no step target at all. So an entry count
 it actually exposes `getTargetPlayerSteps`. Nothing is keyed on a class name, and a third
 step-counted effect would appear without a change here.
 
+AND IT HAS TO STILL HAVE ITS COROMON, which is the part that was missing and is what the
+screenshot of "Potentiflator: 1000 steps" over an empty machine was. The constructor files the
+monster away and keeps only its identifier:
+
+    abstractUpgradeMonsterAfterPlayerStepsWorldEffect L16
+      monsterIdentifier  = playerMonsters:addToHiddenMonsterStorage(_monster)
+      targetPlayerSteps  = playerStats:getSteps() + _amountOfPlayerStepsRequired
+    getMonster L34
+      return playerMonsters:getMonsterInHiddenStorage(monsterIdentifier)
+
+so `getMonster()` is nil once the Coromon has been collected - and the game keeps the entry in
+that list anyway, in the SAVED data. That is why the stale countdown could survive a reload and
+come back: the step number was real, the deposit was not. An entry with a target but no parked
+monster is therefore not shown, and `--report` says how many were skipped rather than hiding it
+silently. A deposit whose steps are done but whose Coromon has not been collected still has its
+monster, so "ready" still shows. Where an effect type has no `getMonster` at all it is shown as
+before, so an unknown future one is not silently suppressed.
+
 THE NAMES are the one thing that is a lookup rather than the game's word: the two the game
 has are shown as "Potentiflator" and "Traitformator", from a table keyed on the last part of
 the effect's class path. Anything else falls back to its own class name, spaced out, so an
@@ -214,23 +232,52 @@ end
 -- Every pending step-counted deposit, smallest remaining first. An entry counts only when it
 -- exposes getTargetPlayerSteps, which is what separates the two reroll services from the
 -- item effects (a magnet hat and a gold booster) sitting in the same list with no target.
+--
+-- AND only when its Coromon IS STILL PARKED. That is the second condition and it is the one that
+-- matters after a reload:
+--
+--   abstractUpgradeMonsterAfterPlayerStepsWorldEffect L16
+--     _saveableOptions.monsterIdentifier = playerMonsters:addToHiddenMonsterStorage(_monster)
+--     _saveableOptions.targetPlayerSteps = playerStats:getSteps() + _amountOfPlayerStepsRequired
+--   getMonster (L34)
+--     return playerMonsters:getMonsterInHiddenStorage(_saveableOptions.monsterIdentifier)
+--
+-- so `getMonster()` is a pure lookup of that identifier and comes back nil once the Coromon has been
+-- collected. The game keeps the entry in the list after that, and it is SAVED, which is why
+-- "Potentiflator: 1000 steps" could sit on screen over an empty machine and come back after a quit to
+-- the menu and a reload. Nothing is keyed on a class name: a genuine handover is in hidden storage by
+-- definition, and the same accessor exists on both reroll services because they share that base
+-- class. A completed-but-uncollected deposit still has its monster, so "ready" still shows.
 local function stepJobs(settings)
   settings = settings or saveSettings()
   local out = {}
+  _G.__hudStepsSkipped = 0
   if type(settings) ~= 'table' then return out end
   local steps = stepsWalked()
   if not steps then return out end
   for _, e in ipairs(settings.SAVEABLE_BATTLE_EFFECTS or {}) do
     local getter = type(e) == 'table' and e.getTargetPlayerSteps
     if type(getter) == 'function' then
-      local ok, target = pcall(function() return e:getTargetPlayerSteps() end)
-      target = ok and tonumber(target) or nil
-      if target then
+      local ok, v = pcall(function() return e:getTargetPlayerSteps() end)
+      local target = ok and tonumber(v) or nil
+      -- The parked-Coromon test only applies where the accessor exists: an effect that has a target
+      -- but no getMonster is something this does not know about, and showing it as before is the
+      -- safe answer there.
+      local checkable = type(e.getMonster) == 'function'
+      local parked = false
+      if checkable then
+        local okM, mon = pcall(function() return e:getMonster() end)
+        parked = okM and type(mon) == 'table'
+      end
+      if target and (not checkable or parked) then
         local left = target - steps
         if left < 0 then left = 0 end
         local from, to = decidedPotential(e)
         out[#out + 1] = { name = effectName(e), left = left, target = target,
                           from = from, to = to }
+      elseif target then
+        -- a leftover, not a deposit: counted so the report can say so instead of hiding it silently
+        _G.__hudStepsSkipped = _G.__hudStepsSkipped + 1
       end
     end
   end
@@ -423,6 +470,16 @@ def report(cfg):
   local steps = stepsWalked()
   out[#out + 1] = 'steps walked: ' .. (steps and tostring(steps) or 'unavailable')
   local jobs = stepJobs()
+  if _G.__hudStepsSkipped and _G.__hudStepsSkipped > 0 then
+    out[#out + 1] = string.format(
+      '%d entr%s in the saveable list had no Coromon in hidden storage, so %s not shown:',
+      _G.__hudStepsSkipped, (_G.__hudStepsSkipped == 1) and 'y' or 'ies',
+      (_G.__hudStepsSkipped == 1) and 'it is' or 'they are')
+    out[#out + 1] = '  that is the leftover the game keeps after a Coromon is collected. It is in the'
+    out[#out + 1] = '  SAVED data, which is why a stale countdown came back over an empty machine'
+    out[#out + 1] = '  after a quit to the menu and a reload - the steps number was real, but there'
+    out[#out + 1] = '  was nothing left to collect.'
+  end
   if #jobs == 0 then
     out[#out + 1] = 'nothing pending at the Potentiflator or Traitformator'
     return table.concat(out, '\n')
