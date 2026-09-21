@@ -108,20 +108,35 @@ def section(cfg):
         r"""
 do
   local f = makeFeature('autoroll', __POLL__)
-  f.rolls = 0
-  -- 'starting', NOT 'waiting'. The driver presses only while the loop is 'waiting', so this is
-  -- what makes the loop LOOK BEFORE ANYTHING IS PRESSED: a Coromon that is already rolled to the
-  -- target is found on the first tick and the state goes straight to 'done', with no press ever
-  -- sent. The alternative is a real hazard rather than a tidiness point - the driver presses every
-  -- 0.05 s and this only looks every POLL_MS, so a first press could land on the collect prompt
-  -- and take a perfect roll away before anything had read what it was.
-  f.state = 'starting'
-  f.last, f.hit, f.why = nil, nil, nil
-  -- the walk: which way the driver is being asked to hold, the tile last seen, and whether the tile
-  -- ahead is solid (nil only while the query is unreachable)
-  f.walk, f.dir, f.left = nil, nil, nil
-  f.blocked = nil
-  f.tx, f.ty = nil, nil
+
+  -- EVERYTHING THE LOOP REMEMBERS, IN ONE PLACE, because it is now reset from two directions: at
+  -- install, and on demand from outside when the driver takes the loop over. Two copies of this
+  -- list would drift, and a field missed by one of them is a stale value read as a live one - which
+  -- is exactly what let a restarted driver sit on 'state=ready last=P19 to P21 left=0' for a
+  -- Coromon the player had already collected, pressing nothing at all.
+  --
+  -- 'starting', NOT 'waiting', and that is the load-bearing part of the reset. The driver presses
+  -- only while the loop is 'waiting', so 'starting' is what makes the loop LOOK BEFORE ANYTHING IS
+  -- PRESSED: a Coromon that is already rolled to the target is found on the first tick and the
+  -- state goes straight to 'walking', with no press ever sent. The alternative is a real hazard
+  -- rather than a tidiness point - the driver presses every 0.05 s and this only looks every
+  -- POLL_MS, so a first press could land on the collect prompt and take a perfect roll away before
+  -- anything had read what it was.
+  --
+  -- `f.on` is deliberately NOT touched: re-arming is not switching the loop on or off, and being
+  -- switched off is a separate thing the caller checks for itself.
+  local function rearm()
+    f.rolls, f.state = 0, 'starting'
+    f.last, f.hit, f.why = nil, nil, nil
+    -- the walk: which way the driver is being asked to hold, the tile last seen, and whether the
+    -- tile ahead is solid (nil only while the query is unreachable)
+    f.walk, f.dir, f.left = nil, nil, nil
+    f.blocked, f.tx, f.ty = nil, nil, nil
+  end
+  -- Exposed so the driver can ask for a fresh start without knowing what one consists of. The
+  -- install path below runs this same function, so the two cannot disagree about what is cleared.
+  f.rearm = rearm
+  rearm()
   f.on = false
 
   local TARGET = __TARGET__

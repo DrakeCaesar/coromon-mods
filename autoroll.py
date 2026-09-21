@@ -21,6 +21,11 @@ is the one part that cannot come from inside, and reports what the feature is do
 decide anything and it does not reload anything, so there is no way for it to fire a reload twice:
 the feature is installed once and the host tears the previous copy down before installing it again.
 
+IT DOES ASK FOR A FRESH START ON THE WAY IN. The loop stops for good at `ready` - that is what keeps
+it off a Coromon it has already rolled to the target - so `ready` outlives the Coromon it describes.
+A driver started after that Coromon was collected would read `ready`, press nothing, and exit. So
+`rearm()` is called once at startup; see it for exactly what it does and does not clear.
+
 It also means one eval of a few lines per poll instead of a 12 KB chunk recompiled each time, and
 it works whether or not this script is the one that turned the feature on.
 
@@ -110,6 +115,51 @@ def read_state(b):
         if key:
             fields[key] = value
     return fields
+
+
+ARM_CODE = r"""
+local f = _G.__hud and _G.__hud.feats and _G.__hud.feats.autoroll
+if type(f) ~= 'table' then return '!the autoroll feature is not installed!' end
+if not f.on then return '!the autoroll feature is switched off!' end
+-- An installed-but-older chunk would have no rearm(), and silently pretending to have re-armed it
+-- would leave exactly the state this exists to clear. Say so instead.
+if type(f.rearm) ~= 'function' then
+  return '!this copy of the feature cannot be re-armed - restart overlays.py to reinstall it!'
+end
+local was = tostring(f.state)
+f.rearm()
+return was
+"""
+
+
+def rearm(b):
+    """Clear the loop's memory of the Coromon it was last working on, at startup.
+
+    WHY IT IS NEEDED. `ready` is TERMINAL in the feature, deliberately: it is how the loop stops
+    once it has hit the target, which is what keeps a reload away from the perfect Coromon it has
+    just walked. But terminal means the state OUTLIVES the Coromon it describes - collect that
+    Coromon, hand in a new one, and the loop is still sitting at `ready` with the old result and a
+    step count of zero. A restarted driver then does nothing whatsoever: its first read says
+    `ready`, and it exits having pressed nothing.
+
+    WHY HERE AND NOT IN THE FEATURE. The feature could re-arm itself the moment its terminal
+    deposit goes away, and in the long run that is the better home for it. What it cannot fix is
+    the RACE: the driver's first read may land before the loop's next tick has noticed anything, so
+    it would still see the inherited `ready` and stop. Asking on the way in has no race, and the
+    state machine keeps its single, meaningful meaning of terminal.
+
+    The loop's own reset is what runs - `rearm()` in the feature, the same code its install path
+    runs - rather than this script assigning to fields itself, so the feature stays the only thing
+    that knows what it remembers. A run already in progress survives being re-armed: the loop goes
+    back to 'starting', reads the deposit again, and because a walk's remaining steps are the
+    game's own absolute countdown, it carries on from where it was.
+
+    Returns the state that was replaced, or an error string prefixed with '!' like read_state.
+    """
+    out = (b.eval(ARM_CODE, timeout=15.0) or {}).get("out") or ""
+    if out == "":
+        return "!no answer from the game!"
+    return out
 
 
 def game_foreground(hwnd):
@@ -251,6 +301,15 @@ def main():
         if not b.status().get("state"):
             print("attached, but no lua_State captured yet - is the game past its loading screen?")
             return 2
+
+        # A FRESH START, BEFORE ANYTHING ELSE, and before the focus grab for no better reason than
+        # that this is the order the messages read in. The loop may be sitting in a terminal state
+        # left over from the last Coromon - see rearm() for why that strands a restarted run.
+        was = rearm(b)
+        if was.startswith("!"):
+            print(was.strip("!"))
+            return 2
+        print("loop re-armed (was %s)" % was)
 
         # Take the foreground before anything is pressed. Later presses only need the game to still
         # own it, so the forced grab happens here, once, and the loop only takes it back if it is
