@@ -60,10 +60,23 @@ PROCESS = "coromon.exe"
 # pressing any faster. 0.05 is what the press interval was tuned to before it became a constant
 # here; it is fast enough that the dialogue cannot keep up, which is the point.
 PRESS_INTERVAL = 0.05
-# How often the game is asked what the autoroll feature is doing. Kept well under PRESS_INTERVAL,
-# because this is also the delay between the game deciding a potential and the reload being fired -
-# and every press in that window is a press past the handover.
-POLL_INTERVAL = 0.12
+# How often the game is asked what the autoroll feature is doing. This number IS the wasted time,
+# and it is paid in two places:
+#
+#   * WHILE THE WALK RUNS it is stand-still time. The feature flips the direction on the frame the
+#     Coromon reaches the end of the corridor, but the Coromon is still held into the wall until
+#     this loop notices and swaps the keys - so every millisecond here is a millisecond of the
+#     1000-step walk not happening, paid at both ends of every traverse.
+#   * WHILE WAITING FOR A HANDOVER it is the delay between the game deciding a potential and the
+#     reload being fired, and every press inside that window is a press PAST the handover.
+#
+# So it wants to be as small as the round trip allows, and MEASURED on this machine the round trip
+# is 3-5 ms - and the cost sits in Frida's message hop, NOT in the Lua that runs, because the fat
+# seven-field read and a bare direction read cost the same (3.18 ms vs 2.99 ms median, n=300). The
+# interval is therefore latency and nothing else; 0.005 puts the loop period at about 10 ms, which
+# is where the round trip itself puts the floor. This is NOT the press rate - that is PRESS_INTERVAL,
+# and it is gated separately.
+POLL_INTERVAL = 0.005
 # How long to sit still after the game window loses the foreground, before saying so again.
 PAUSE_REPORT = 3.0
 
@@ -164,10 +177,10 @@ def hold(key, held):
 def pump(b, hwnd):
     """Press Space while the feature waits for a handover, and report every change.
 
-    The press is gated on PRESS_INTERVAL and the poll runs at POLL_INTERVAL, so the game is asked
-    about four times as often as it is poked. That gap is the reason for two numbers rather than
-    one: the delay between the game deciding a potential and the feature firing the reload is
-    POLL_INTERVAL, and every press inside that window is a press past the handover.
+    TWO CADENCES, DELIBERATELY SEPARATE. Pressing is paced by PRESS_INTERVAL and by nothing else -
+    the loop simply wakes far more often than it presses. Polling is paced by POLL_INTERVAL, which
+    is the loop's floor and is there to be small: the round trip only costs 3-5 ms, and everything
+    this loop spends beyond that is a delay the Coromon or the roll pays for (see the constants).
     """
     seen = None
     presses = 0

@@ -62,8 +62,13 @@ POLL_MS = 0
 # After a hit, the Coromon still needs its 1000 steps walked before it can be collected, so the loop
 # walks it: hold a direction, and turn round when the game says the tile AHEAD is solid.
 WALK_AFTER_HIT = True
-# Which way to walk first: +1 is right, -1 is left. The walk alternates from here.
-START_DIRECTION = 1
+# Which way the walk pushes first: +1 is right, -1 is left. It alternates from here.
+#
+# LEFT, because of WHERE THE WALK STARTS: on the rightmost walkable tile, since that is where the
+# Coromon was handed over. So pushing right from there is pushing into the wall - the Coromon stands
+# still while the driver is told to turn round - and starting left means the walk moves on its first
+# frame and its first turn is at the far end of the corridor.
+START_DIRECTION = -1
 
 SETTINGS = [
     (
@@ -302,6 +307,12 @@ do
       -- HIT. Take the roll, then walk its steps so it can actually be collected.
       f.hit = f.last
       f.state = WALK_AFTER_HIT and 'walking' or 'ready'
+      -- And the walk is entered HERE, in this frame, through the same transition everything else
+      -- goes through - rather than leaving it to the next frame's tick. The driver holds a
+      -- direction only while the state says walking, so a frame that says walking with `walk`
+      -- still nil is a frame the Coromon stands still at the very start of the walk, which is the
+      -- one place it is in plain sight. walkStep() sets both halves: the state and the direction.
+      if f.state == 'walking' then walkStep() end
       return
     end
     local said, why = fireReload()
