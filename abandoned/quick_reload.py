@@ -1100,50 +1100,7 @@ return 'ok ' .. tostring(slot)
 '''
 
 
-def do_reload(slot=None, bridge=None):
-    """Tear the current game down and load a slot back, using only the game's own code.
-
-    pre-flight  read-only: is there a world, are the globals there, which slot are we in
-    teardown    the Quit button's sequence UP TO the title screen
-    wait        until worldHelper:isCreated() is false, so the deferred destroyInstance has run
-    load        the debug loader's own three lines: read the slot out of the preferences, bring
-                it up to the current data version, then loadGame with 'instant' and no callback
-
-The pre-flight is separate from the teardown on purpose, and that ordering is the whole point.
-Reading the slot index AFTER the teardown does not work: `quitCurrentGame` ends with
-`selectedSaveslotIndex = nil`, so the value being asked for had just been cleared by our own
-teardown - which is exactly what happened, and since a reload's teardown deliberately creates no
-title screen, bailing out there left no world AND no menu, i.e. a black screen. Nothing is
-destroyed now until every input is known good, and if the load still fails the menu is put back.
-
-Not done, and why. No title screen is created for the load: a reload wants a world, not a menu, and
-the screen's intro transition completes AFTER it has been removed and calls into a destroyed
-sprite. And arguments are not replayed from a captured menu load: the game empties
-`constructorList` while building the world, so a captured table is a reference to something that
-has changed since, and loadGame then dies on `saveslotDataHelper`'s
-`constructorList.maincharacter.mapPath`.
-"""
-    bridge = bridge or _bridge()
-    pre = ask(bridge, run_guard("preflight-%s" % time.time())
-              + inject(slot, None) + PREFLIGHT)
-    if pre is not None and pre.startswith("ok "):
-        log("pre-flight: " + pre)
-        if not pre.startswith("ok "):
-            log("nothing was torn down")
-            return 1
-        picked = int(pre.split()[1])
-        log("")
-    else:
-        log("the game did not answer")
-        return 1
-
-    sample_transitions(bridge, "before the cancel")
-    sample_input(bridge, "before the cancel")
-    stop_transitions(bridge, "cancel-%s" % time.time())
-    sample_transitions(bridge, "after the settle")
-
-    code = (run_guard("reload-%s" % time.time()) + inject(picked, device_id())
-            + TEARDOWN_BASE + r'''
+RELOAD_BODY = r'''
 _G.__qrDone = nil
 _G.__qrStep = 'starting'
 local slot = _G.__qrSlotArg
@@ -1253,7 +1210,53 @@ pollTimer = _G.timer.performWithDelay(16, poll, 0)
 _G.__qrReport = table.concat(report, ' | ') ..
                 ' | waiting for the teardown to finish, then loading'
 return _G.__qrReport
-''')
+'''
+
+
+def do_reload(slot=None, bridge=None):
+    """Tear the current game down and load a slot back, using only the game's own code.
+
+    pre-flight  read-only: is there a world, are the globals there, which slot are we in
+    teardown    the Quit button's sequence UP TO the title screen
+    wait        until worldHelper:isCreated() is false, so the deferred destroyInstance has run
+    load        the debug loader's own three lines: read the slot out of the preferences, bring
+                it up to the current data version, then loadGame with 'instant' and no callback
+
+The pre-flight is separate from the teardown on purpose, and that ordering is the whole point.
+Reading the slot index AFTER the teardown does not work: `quitCurrentGame` ends with
+`selectedSaveslotIndex = nil`, so the value being asked for had just been cleared by our own
+teardown - which is exactly what happened, and since a reload's teardown deliberately creates no
+title screen, bailing out there left no world AND no menu, i.e. a black screen. Nothing is
+destroyed now until every input is known good, and if the load still fails the menu is put back.
+
+Not done, and why. No title screen is created for the load: a reload wants a world, not a menu, and
+the screen's intro transition completes AFTER it has been removed and calls into a destroyed
+sprite. And arguments are not replayed from a captured menu load: the game empties
+`constructorList` while building the world, so a captured table is a reference to something that
+has changed since, and loadGame then dies on `saveslotDataHelper`'s
+`constructorList.maincharacter.mapPath`.
+"""
+    bridge = bridge or _bridge()
+    pre = ask(bridge, run_guard("preflight-%s" % time.time())
+              + inject(slot, None) + PREFLIGHT)
+    if pre is not None and pre.startswith("ok "):
+        log("pre-flight: " + pre)
+        if not pre.startswith("ok "):
+            log("nothing was torn down")
+            return 1
+        picked = int(pre.split()[1])
+        log("")
+    else:
+        log("the game did not answer")
+        return 1
+
+    sample_transitions(bridge, "before the cancel")
+    sample_input(bridge, "before the cancel")
+    stop_transitions(bridge, "cancel-%s" % time.time())
+    sample_transitions(bridge, "after the settle")
+
+    code = (run_guard("reload-%s" % time.time()) + inject(picked, device_id())
+            + TEARDOWN_BASE + r'''RELOAD_BODY''')
     log(ask(bridge, code) or "the game did not answer")
     sample_transitions(bridge, "just after the teardown")
     sample_input(bridge, "just after the teardown")

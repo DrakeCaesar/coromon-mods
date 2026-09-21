@@ -165,6 +165,8 @@ and the overworld zoom, all driven from one settings file.
 | `ingame/items.py` | the markers over the map's collectable objects |
 | `ingame/zoom.py` | the overworld zoom keys |
 | `ingame/fog.py` | switch off the darkness/fog effect on the maps that draw it |
+| `ingame/guard.py` | stop the interaction button's background swap crashing the game, and record what broke it |
+| `ingame/reload.py` | press a button in game to put the save back (the Potentiflator loop) - the old standalone `reload_r3.py` folded in here |
 | `coromon_starter.py` | the useful one — read the 3 starter potentials and draw them on screen |
 | `scroll_fix.py` | make the overworld scroll a constant number of pixels per frame |
 | `fps_patch.py` | set the frame rate in the game's own files, and put it back (60/120, or any value with one more patch) |
@@ -173,7 +175,6 @@ and the overworld zoom, all driven from one settings file.
 | `car_extract.py` | Solar2D `resource.car` reader/extractor (`--list`, `--extract`) |
 | `luadis.py` | Lua 5.1 bytecode reader/disassembler/string dumper for `.lu` chunks |
 | `slot_move.py` | move or copy a save between slots (`--list`, `--move 2 1`, `--copy 2 1`, `--restore <backup>`) |
-| `reload_r3.py` | press the right stick in game to run the quick reload (`--key`, `--watch`, `--unbind`) |
 | `engine_source.py` | clone the Solar2D engine source at the tag this game was built from (`--clone`, `--update`) |
 
 ### Everything at once (`overlays.py`)

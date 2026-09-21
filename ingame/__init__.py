@@ -31,16 +31,33 @@ from . import (
     dialog,
     fog,
     gold,
+    guard,
     items,
     potential,
+    reload,
     sprint,
     squad,
     steptimer,
     zoom,
 )
 
-# Order is only the order their lines appear in the installer's output.
-FEATURES = [potential, items, squad, steptimer, zoom, sprint, gold, dialog, cooldowns, fog]
+# Order is only the order their lines appear in the installer's output - except that `guard` is
+# first on purpose: it wraps groupHelper.setObjectContainer, and installing it before the others
+# means the wrap is in place before any of them touch the UI.
+FEATURES = [
+    guard,
+    potential,
+    items,
+    squad,
+    steptimer,
+    zoom,
+    sprint,
+    reload,
+    gold,
+    dialog,
+    cooldowns,
+    fog,
+]
 
 __all__ = [
     "config",
@@ -49,8 +66,10 @@ __all__ = [
     "dialog",
     "fog",
     "gold",
+    "guard",
     "items",
     "potential",
+    "reload",
     "sprint",
     "squad",
     "steptimer",
