@@ -200,16 +200,10 @@ end
 -- Only the potential-reroll effect has these accessors, and `didRerollPotential` is the flag
 -- the game sets once it has applied the result; without it `mon.potential` would still be
 -- the untouched original, so it is checked rather than assumed.
-local function decidedPotential(e)
-  if type(e) ~= 'table' then return nil, nil end
-  if type(e.getOriginalPotential) ~= 'function' or type(e.getMonster) ~= 'function' then
-    return nil, nil        -- the trait reroll has no such accessors
-  end
-  local okM, mon = pcall(function() return e:getMonster() end)
-  if not okM or type(mon) ~= 'table' or not mon.didRerollPotential then return nil, nil end
-  local okO, from = pcall(function() return e:getOriginalPotential() end)
-  return (okO and tonumber(from) or nil), tonumber(mon.potential)
-end
+-- The reader is shared now (core's preamble, `decidedPotentialOf`): autoroll needs the same
+-- answer to decide whether to reload, and carrying two copies of the accessor names is how the two
+-- got out of step before. Named locally so every call site below is unchanged.
+local decidedPotential = decidedPotentialOf
 
 -- Every pending step-counted deposit, smallest remaining first. An entry counts only when it
 -- exposes getTargetPlayerSteps, which is what separates the two reroll services from the

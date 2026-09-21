@@ -109,6 +109,71 @@ local function saveSettingsTable()
   end
 end
 
+-- THE DECIDED REROLL RESULT, if the game has made one. One copy, because two features need it
+-- now: steptimer to draw it, autoroll to decide whether to reload.
+--
+-- The game decides the potential the moment the Coromon is handed over, not when the steps are
+-- walked, and it records that on the monster: `didRerollPotential` is set and `potential` holds
+-- the new value, while `getOriginalPotential` still has the old one. That flag is what makes this
+-- readable BEFORE the walk finishes, which is the whole reason a reroll loop is cheap.
+--
+-- The Traitformator has no such accessors and answers nil, which is right: only the Potentiflator
+-- has a decided potential to report.
+local function decidedPotentialOf(e)
+  if type(e) ~= 'table' then return nil, nil end
+  if type(e.getOriginalPotential) ~= 'function' or type(e.getMonster) ~= 'function' then
+    return nil, nil
+  end
+  local okM, mon = pcall(function() return e:getMonster() end)
+  if not okM or type(mon) ~= 'table' or not mon.didRerollPotential then return nil, nil end
+  local okO, from = pcall(function() return e:getOriginalPotential() end)
+  return (okO and tonumber(from) or nil), tonumber(mon.potential)
+end
+
+-- THE LIVE SAVE TABLE, CACHED. saveSettingsTable() above is the search; this is the throttle, and
+-- it is here so a feature cannot get the throttle wrong on its own.
+--
+-- The mistake this exists to prevent has now been made twice: `if <cache> == nil or
+-- (<ticks> % INTERVAL) == 0` runs the search EVERY TICK while the table has never been found,
+-- because a failed search is not cached. In cooldowns that cost ~40 ms a frame; in steptimer,
+-- whose poll is 250 ms, it was four full walks of package.loaded per second. So this counts from
+-- the LAST ATTEMPT, and it refuses to search at all until a save is loaded - `playerStats.getSteps()`
+-- is the game's own step counter, it only answers once a save exists, and it is far cheaper than
+-- the search it guards.
+--
+-- It keeps NO reference of its own between calls beyond the cache, so it is safe for any number of
+-- features to call every tick. Callers that want the table to survive a save reload should keep
+-- their own copy; this only guarantees a recent one.
+local LS_found, LS_lastMs = nil, nil
+local LS_HUNT_MS, LS_FOUND_MS = 1000, 12000
+local function liveSaveSettings()
+  local ok, n = pcall(function() return playerStats.getSteps() end)
+  if not ok or tonumber(n) == nil then
+    LS_found, LS_lastMs = nil, nil     -- no save: nothing to read, nothing to remember
+    return nil
+  end
+  -- THROTTLED IN MILLISECONDS, NOT IN CALLS, and that is about who is allowed to call this.
+  --
+  -- A call-counted interval makes the cost depend on the caller's rate: the same helper driven once
+  -- per frame instead of four times a second searches package.loaded twelve times more often. At 165
+  -- fps this would search once every 0.36 s with the table found, and forty times a second while it
+  -- is not - which is exactly the mistake that cost cooldowns ~40 ms a frame and steptimer four
+  -- searches a second. Measured in time, any feature may call it every frame and the search still
+  -- happens at this rate and no faster.
+  --
+  -- 1 s while nothing has been found, because a save load is the moment the table appears; 12 s once
+  -- it has been, matching steptimer's own rescan.
+  local now = system.getTimer()
+  if type(now) ~= 'number' then now = 0 end
+  local every = LS_found and LS_FOUND_MS or LS_HUNT_MS
+  if LS_lastMs == nil or (now - LS_lastMs) >= every then
+    LS_lastMs = now
+    local s = saveSettingsTable()
+    if s then LS_found = s end
+  end
+  return LS_found
+end
+
 -- A localised string, or the fallback. A MISSING key comes back as '???' rather than nil
 -- (checked live), so it has to be tested for explicitly.
 local function loc(key, fallback)

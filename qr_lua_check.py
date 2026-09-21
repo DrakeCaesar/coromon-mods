@@ -7,11 +7,17 @@ line:column, instead of `luaparser.ast.parse`, which bails with `syntax errors: 
   python qr_lua_check.py
 """
 import os
+import re
 import sys
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(BASE, "abandoned"))
 sys.path.insert(0, BASE)
+
+# A `__NAME__` left behind in a composed chunk. It is VALID Lua - an ordinary identifier - so a
+# chunk that still contains one parses happily and then reads a global that does not exist, which
+# is nil. See the note in check().
+PLACEHOLDER = re.compile(r"\b__[A-Z][A-Z0-9_]*__\b")
 
 from antlr4 import CommonTokenStream, InputStream, Token  # noqa: E402
 from antlr4.error.ErrorListener import ErrorListener  # noqa: E402
@@ -36,6 +42,15 @@ def check(name, text):
         parser.start_()
     except Exception as exc:  # noqa: BLE001 - report anything the parser throws
         errs.append("  threw: %r" % (exc,))
+
+    # UNSUBSTITUTED PLACEHOLDERS, and this is the check that was missing. `__WALK__` is a perfectly
+    # legal Lua identifier, so a chunk that still contains one PARSES - and then reads a global that
+    # does not exist, which is nil. autoroll shipped with `local WALK_AFTER_HIT = __WALK__` for
+    # exactly that reason: the substitution was never added, the parse check passed, and the flag
+    # silently became falsy. Nothing but reading the composed text can catch this.
+    leftover = sorted(set(PLACEHOLDER.findall(text)))
+    if leftover:
+        errs.append("  unsubstituted placeholder(s): %s" % ", ".join(leftover))
 
     if errs:
         print("FAIL  %-18s (%d chars)" % (name, len(text)))
@@ -116,13 +131,25 @@ def main():
         section = getattr(module, "section", None)
         if not settings or not callable(section):
             continue
-        try:
-            # Entries are (key, default, comment) in most modules and carry a fourth field in
-            # others, so index rather than unpack.
-            text = section({entry[0]: entry[1] for entry in settings})
-        except Exception as exc:  # noqa: BLE001
-            print("SKIP  %-18s (cfg: %r)" % (label, exc))
-            continue
+        base_cfg = {entry[0]: entry[1] for entry in settings}
+        # A feature that SHIPS SWITCHED OFF still has to compile - it is installed the moment
+        # someone ticks it, and a `section()` that returns "" for the default would otherwise never
+        # be checked at all. So the default is tried first, then the same cfg with enabled forced.
+        candidates = [base_cfg]
+        if base_cfg.get("enabled") is False:
+            forced = dict(base_cfg)
+            forced["enabled"] = True
+            candidates.append(forced)
+        text = None
+        for cand in candidates:
+            try:
+                text = section(cand)
+            except Exception as exc:  # noqa: BLE001
+                print("SKIP  %-18s (cfg: %r)" % (label, exc))
+                text = None
+                break
+            if text:
+                break
         if isinstance(text, str) and text:
             good &= check(label, text)
         else:

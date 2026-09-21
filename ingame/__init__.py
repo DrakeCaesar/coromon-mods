@@ -25,6 +25,7 @@ themselves, because overlays.toml is generated from SETTINGS.
 """
 
 from . import (
+    autoroll,
     config,
     cooldowns,
     core,
@@ -50,6 +51,7 @@ FEATURES = [
     items,
     squad,
     steptimer,
+    autoroll,
     zoom,
     sprint,
     reload,
