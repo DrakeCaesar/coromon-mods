@@ -30,7 +30,10 @@ The three things worth knowing about the numbers, all of them also in encounters
 
 Run it with `--selftest` to build the model and print the top ranking without opening a window.
 
-The window has two tabs. "Where to grind" is everything described above. "Skills" is a
+The window has two tabs. "Where to grind" is everything described above, and a third column
+beside the ranking draws the AREA the selected row belongs to, with the game's own zone letters on
+it - which patch of grass "Grass B" is, which the wiki never says. The species of the selected
+zone sit under that map. "Skills" is a
 second view over the game's own `skills.json` - all 258 of them, in the columns the wiki's
 skill table uses, with the full description of whichever one is selected underneath. It
 shares nothing with the ranking except the window: it needs no save, no game and no areas
@@ -54,6 +57,7 @@ except ImportError:                     # the button then explains itself instea
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import encounters  # noqa: E402
+import encounter_zones as ez  # noqa: E402
 import skills  # noqa: E402
 
 STATE_PATH = os.path.join(
@@ -67,6 +71,7 @@ FG = "#dcdcdc"        # text
 DIM = "#3a3d41"       # borders and hover
 ACCENT = "#3d6ea8"    # selection
 NOTE = "#9aa0a6"      # the small print
+MAP_GROUND = "#101114"  # the solid ground the zone colours sit on, in the map tab
 
 
 def apply_dark(root):
@@ -257,14 +262,15 @@ class GrindApp:
         self.search = tk.StringVar(value="")
         self.checks = {}
         self.zone_pick = {}
+        self.selected_zone = None     # what the map tab draws
         self.skill_pick = {}
         self._geom_job = None
         self.geometry = None
 
         root.title("Coromon - grind & skills")
         self.geometry = sanitize_geometry(self.state.get("geometry"), root)
-        root.geometry(self.geometry or "1060x640")
-        root.minsize(820, 480)
+        root.geometry(self.geometry or "1420x760")
+        root.minsize(1040, 560)
         root.attributes("-topmost", self.on_top.get())
         # <Configure> fires for every pixel of a drag, so the save is debounced
         root.bind("<Configure>", self.on_configure)
@@ -290,7 +296,8 @@ class GrindApp:
         outer = ttk.Frame(grind_tab)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=0)
-        outer.columnconfigure(1, weight=1)
+        outer.columnconfigure(1, weight=1)                # the ranking
+        outer.columnconfigure(2, weight=1, minsize=360)   # the map, with the species under it
         outer.rowconfigure(0, weight=1)
 
         left = ttk.LabelFrame(outer, text="Areas you have", padding=6)
@@ -328,13 +335,12 @@ class GrindApp:
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(
             self.window, width=e.width))
 
-        right = ttk.Frame(outer)
-        right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        right.rowconfigure(1, weight=1)
-        right.rowconfigure(3, weight=1)
-        right.columnconfigure(0, weight=1)
+        middle = ttk.Frame(outer)
+        middle.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        middle.rowconfigure(1, weight=1)
+        middle.columnconfigure(0, weight=1)
 
-        controls = ttk.Frame(right)
+        controls = ttk.Frame(middle)
         controls.grid(row=0, column=0, sticky="ew")
         ttk.Label(controls, text="squad level").pack(side="left")
         spin = ttk.Spinbox(controls, from_=1, to=100, width=4, textvariable=self.level,
@@ -352,7 +358,7 @@ class GrindApp:
                         command=self.apply_on_top).pack(side="right")
 
         cols = ("area", "zone", "explvl", "best", "flags")
-        self.tree = ttk.Treeview(right, columns=cols, show="headings", height=12)
+        self.tree = ttk.Treeview(middle, columns=cols, show="headings", height=12)
         for cid, text, width, anchor in (
             ("area", "Area", 190, "w"), ("zone", "Zone", 170, "w"),
             ("explvl", "exp level", 80, "e"), ("best", "most common", 240, "w"),
@@ -361,30 +367,149 @@ class GrindApp:
             self.tree.heading(cid, text=text, command=lambda c=cid: self.sort_by(c))
             self.tree.column(cid, width=width, anchor=anchor, stretch=False)
         self.tree.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
-        scroll = ttk.Scrollbar(right, orient="vertical", command=self.tree.yview)
+        scroll = ttk.Scrollbar(middle, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.grid(row=1, column=1, sticky="ns", pady=(6, 0))
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.show_detail())
 
+        # the small print stays under the ranking, next to the numbers it explains
+        ttk.Label(middle, foreground=NOTE, wraplength=700, justify="left", text=(
+            "Shares are the game's own encounter weights, normalised - whether the game draws "
+            "proportionally to them is unverified. The monster data has no XP yield, so zones "
+            "are ranked by how high the monsters are, not by XP per battle."
+        )).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        # the map, then the species under it: WHICH patch of grass a zone is belongs next to the
+        # ranking that made you ask, and the species of the selected zone belong under the map
+        # because they are what the map is being read for
+        right = ttk.Frame(outer)
+        right.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(2, weight=3)
+        right.rowconfigure(4, weight=2)
+        self.build_map(right)
+
         detail = ttk.LabelFrame(right, text="species in the selected zone", padding=6)
-        detail.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        detail.grid(row=4, column=0, sticky="nsew", pady=(6, 0))
         self.detail = tk.Text(detail, height=8, wrap="none", font=("Consolas", 9),
                               bd=0, highlightthickness=0, background=FIELD, foreground=FG,
                               insertbackground=FG, selectbackground=ACCENT)
         self.detail.pack(fill="both", expand=True)
         self.detail.configure(state="disabled")
 
-        ttk.Label(right, foreground=NOTE, wraplength=760, justify="left", text=(
-            "Shares are the game's own encounter weights, normalised - whether the game draws "
-            "proportionally to them is unverified. The monster data has no XP yield, so zones "
-            "are ranked by how high the monsters are, not by XP per battle."
-        )).grid(row=4, column=0, sticky="w", pady=(6, 0))
-
         self.sort_col, self.sort_desc = "explvl", True
 
         skills_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(skills_tab, text="  Skills  ")
         self.build_skills(skills_tab)
+
+    # ---------------------------------------------------------------- zone map
+    def build_map(self, parent):
+        """WHERE the zone selected in the ranking actually is - the right-hand column.
+
+        The wiki lists rates per area as "Grass A / Grass B / ..." and never says which patch each
+        one is. The game's maps do: a patch carries a `grassArea` marker whose zoneUID IS that
+        letter. So this draws the area with its zones coloured and the selected row picked out,
+        beside the ranking rather than on a tab of its own - the question only comes up while
+        looking at the ranking.
+        """
+        self.map_head = ttk.Label(parent, text="", wraplength=420, justify="left")
+        self.map_head.grid(row=0, column=0, sticky="w")
+
+        self.map_legend = ttk.Frame(parent)
+        self.map_legend.grid(row=1, column=0, sticky="w", pady=(3, 4))
+
+        self.map_canvas = tk.Canvas(parent, highlightthickness=0, bd=0, background=FIELD)
+        self.map_canvas.grid(row=2, column=0, sticky="nsew")
+        self.map_canvas.bind("<Configure>", lambda e: self.redraw_map())
+
+        ttk.Label(parent, foreground=NOTE, wraplength=420, justify="left", text=(
+            "Patches are read from the map tiles: the marker's tile, plus the connected tiles of "
+            "the same tileset - exact for grass, whose tiles are one map cell. Water and cave "
+            "markers name no layer and show as small outlined squares."
+        )).grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+    def redraw_map(self):
+        """Draw the selected zone's area. Silent while the tab is not on screen."""
+        canvas = self.map_canvas
+        if not canvas.winfo_ismapped():
+            return
+        canvas.delete("all")
+        for child in self.map_legend.winfo_children():
+            child.destroy()
+
+        zone = self.selected_zone
+        if zone is None:
+            self.map_head.configure(text="pick a zone on the first tab")
+            return
+        data = ez.zone_map(zone.map_file)
+        if data is None:
+            self.map_head.configure(text="no map file found for %s" % zone.map_file)
+            return
+        m, layers, zones = data
+        drawn = {n: v for n, v in zones.items() if v["patches"] or v["unplaced"]}
+        entry = drawn.get(zone.name)
+        if entry is None:
+            self.map_head.configure(text=(
+                "%s is not marked on the map of %s - it has %s"
+                % (zone.name, pretty(zone.map_file), ", ".join(sorted(drawn)) or "no zones")))
+            return
+
+        # fit the map into whatever the tab got: 8x is the ceiling, because a small map blown up to
+        # fill a maximised window is all block
+        mw, mh = m["width"], m["height"]
+        scale = max(1.0, min(canvas.winfo_width() / mw, canvas.winfo_height() / mh, 8.0))
+
+        for (y, x0, x1) in ez.runs_by_row(ez.cells_by_row(ez.terrain_cells(m, layers))):
+            canvas.create_rectangle(x0 * scale, y * scale, x1 * scale, (y + 1) * scale,
+                                    fill=MAP_GROUND, outline="")
+
+        for name in sorted(drawn):
+            other = drawn[name]
+            colour = ez.colour_for(name)
+            selected = name == zone.name
+            # solid for the selected zone and stippled for the rest: Tk has no alpha, and a patch
+            # you cannot pick out of six is not an answer
+            stipple = "" if selected else "gray50"
+            for tiles in other["patches"]:
+                for (y, x0, x1) in ez.runs_by_row(ez.cells_by_row(tiles)):
+                    canvas.create_rectangle(x0 * scale, y * scale, x1 * scale, (y + 1) * scale,
+                                            fill=colour, outline="", stipple=stipple)
+            for i, tiles in enumerate(other["patches"]):
+                xs = [t[0] for t in tiles]
+                ys = [t[1] for t in tiles]
+                size = max(7, int(scale * (2.2 if (selected and i == 0) else 1.4)))
+                canvas.create_text((min(xs) + max(xs) + 1) / 2 * scale,
+                                   (min(ys) + max(ys) + 1) / 2 * scale,
+                                   text=name.rsplit("_", 1)[-1], fill="#ffffff",
+                                   font=("Consolas", size, "bold"))
+            for (x, y, why) in other["unplaced"]:
+                # a fixed size, not the map scale: a one-tile mark on a small scale is a single
+                # pixel, and cave and water zones can be nothing BUT these marks
+                cx, cy = (x + 0.5) * scale, (y + 0.5) * scale
+                canvas.create_rectangle(cx - 2, cy - 2, cx + 2, cy + 2, outline=colour, width=1)
+
+        placed = sum(len(p) for p in entry["patches"])
+        spots = ", ".join("(%d,%d)" % (min(t[0] for t in p), min(t[1] for t in p))
+                          for p in entry["patches"])
+        if entry["patches"]:
+            text = "%s   %d patch(es), %d tiles   at %s" % (
+                zone.name, len(entry["patches"]), placed, spots or "-")
+            if entry["unplaced"]:
+                text += "   - %d marker(s) not placed" % len(entry["unplaced"])
+        else:
+            # NOT a failure to report as one: these zones mark a tile with no layer of its own, so
+            # the tiles cannot say what shape the zone is. The marks still say where it is.
+            text = ("%s   the map gives %d marker(s) with no tile layer, so only their spots are "
+                    "known - they are the small squares" % (zone.name, len(entry["unplaced"])))
+        self.map_head.configure(text=text)
+
+        for name in sorted(drawn):
+            tk.Label(self.map_legend, text=name.rsplit("_", 1)[-1], bg=ez.colour_for(name),
+                     fg="#ffffff", width=3,
+                     relief="solid" if name == zone.name else "flat", bd=1).pack(side="left", padx=1)
+        ttk.Label(self.map_legend, text="   same colour as the tool's map page; the selected zone "
+                                        "is the solid one", foreground=NOTE).pack(side="left")
 
     def build_skills(self, tab):
         """The second tab: every skill in the wiki's columns, with a full description.
@@ -436,6 +561,9 @@ class GrindApp:
 
     def on_tab_changed(self, event=None):
         self.persist()
+        # the map is only drawn once it is on screen: an unmapped canvas reports a 1-pixel size, so
+        # drawing early would pick a nonsense scale and sit there looking broken
+        self.redraw_map()
 
     def on_configure(self, event=None):
         if self._geom_job is not None:
@@ -590,6 +718,8 @@ class GrindApp:
         self.detail.delete("1.0", "end")
         self.detail.insert("end", text)
         self.detail.configure(state="disabled")
+        self.selected_zone = None
+        self.redraw_map()
 
     def sort_by(self, col):
         if col == self.sort_col:
@@ -604,6 +734,7 @@ class GrindApp:
     def show_detail(self):
         sel = self.tree.selection()
         zone = self.zone_pick.get(sel[0]) if sel else None
+        self.selected_zone = zone
         self.detail.configure(state="normal")
         self.detail.delete("1.0", "end")
         if zone is not None:
@@ -615,6 +746,7 @@ class GrindApp:
                 self.detail.insert("end", "  %-14s L%-3s-%-3s  %5.1f%%%s\n" % (
                     r["name"], r["min"], r["max"], r["share"], tag))
         self.detail.configure(state="disabled")
+        self.redraw_map()
 
     # ---------------------------------------------------------------- skills tab
     def refresh_skills(self):
