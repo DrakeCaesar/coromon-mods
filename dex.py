@@ -162,6 +162,22 @@ def strip_frame(uid, variant=VARIANT):
 _SHEETS = {}      # tk root -> {"atlas": image, "containers": {type: image}}
 
 
+def icon_layout(uid):
+    """How a dex icon is composed, as geometry rather than as pixels.
+
+    Returns the atlas rect holding the avatar and where the 17 px type frame sits inside the
+    24 px icon. Two renderers draw from this - `build_icon` below, with Tk, which is what
+    writes the extracted PNG set, and the Qt window, with QImage - and keeping the geometry in
+    one place is what stops them disagreeing about what an icon is.
+
+    None when the atlas order is unknown, which is the caller's cue to use the strip fallback.
+    """
+    xy = avatar_cell(uid)
+    if xy is None:
+        return None
+    return {"cell": (xy[0], xy[1], CELL, CELL), "frame_offset": (CELL - CONTAINER) // 2}
+
+
 def _sheets():
     """The atlas and the type containers as photo images, decoded once per Tk interpreter.
 
@@ -202,13 +218,14 @@ def build_icon(mon, zoom=1):
     import tkinter as tk
 
     cell = container = None
-    xy = avatar_cell(mon.uid)
+    layout = icon_layout(mon.uid)
     sheets = _sheets()
-    if xy is not None and sheets is not None:
+    if layout is not None and sheets is not None:
         try:
             sheet = sheets["atlas"]
+            x, y = layout["cell"][0], layout["cell"][1]
             cell = tk.PhotoImage(width=CELL, height=CELL)
-            cell.tk.call(cell, "copy", sheet, "-from", xy[0], xy[1], xy[0] + CELL, xy[1] + CELL,
+            cell.tk.call(cell, "copy", sheet, "-from", x, y, x + CELL, y + CELL,
                          "-to", 0, 0, "-compositingrule", "set")
             kind = primary_type(mon)
             container = sheets["containers"].get(kind)
@@ -235,7 +252,7 @@ def build_icon(mon, zoom=1):
         return icon.zoom(zoom) if zoom > 1 else icon
 
     icon = tk.PhotoImage(width=CELL, height=CELL)
-    icon.tk.call(icon, "copy", container, "-to", (CELL - CONTAINER) // 2, (CELL - CONTAINER) // 2)
+    icon.tk.call(icon, "copy", container, "-to", layout["frame_offset"], layout["frame_offset"])
     icon.tk.call(icon, "copy", cell, "-to", 0, 0)
     return icon.zoom(zoom) if zoom > 1 else icon
 
