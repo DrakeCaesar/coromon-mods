@@ -25,14 +25,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtCore import QSettings, QSize, Qt                    # noqa: E402
 from PySide6.QtTest import QTest                                  # noqa: E402
-from PySide6.QtWidgets import QApplication                  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel        # noqa: E402
 
 import encounters                                           # noqa: E402
 import skills                                               # noqa: E402
 
+import dex                                                  # noqa: E402
+import savefile                                             # noqa: E402
+
 import coromontools.state as state                          # noqa: E402
 from coromontools import MainWindow, font, icons             # noqa: E402
 from coromontools import config                              # noqa: E402
+from coromontools.database_tab import SKIN_COLUMN            # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 
 SMOKE_ORG, SMOKE_APP = "CoromonGrindSmoke", "smoke"
@@ -357,6 +361,62 @@ def main():
           "%s vs %s" % (getattr(grind.map.zone, "name", None), getattr(picked, "name", None)))
     window.tabs.setCurrentIndex(2)
     pump(app, 3)
+
+    # THE CRIMSONITE SECTION - a fourth column group after Perfect, the user's own suggestion: the
+    # skins the game SPAWNS IN THE WILD, which is the crimsonite one and nothing else (every monster
+    # slot in the encounter data carries one skin flag, and the 38 other skins a save can unlock are
+    # cosmetic - see `dex.crimsonite_forms`). It is NOT a potential category: the game has no
+    # crimsonite dex entry, so the cells are filled from the save's SKIN UNLOCKS instead
+    # (`savefile.has_skin`), and each sits in the stage column of the Coromon it is a form of.
+    heads = {label.text(): label for label in database.holder.findChildren(QLabel)}
+    check("the crimsonite section is titled, after the Perfect group",
+          "Crimsonite" in heads and "Perfect" in heads
+          and heads["Crimsonite"].x() > heads["Perfect"].x(),
+          "Crimsonite x=%s, Perfect x=%s" % (
+              heads["Crimsonite"].x() if "Crimsonite" in heads else None,
+              heads["Perfect"].x() if "Perfect" in heads else None))
+    skin_cells = {key: cell for key, cell in database.cells.items() if key[1] == SKIN_COLUMN}
+    module_forms = dex.crimsonite_forms()
+    check("every crimsonite form has a cell, and no other cell has one",
+          len(skin_cells) == len(module_forms)
+          and {database.click_target[cell[0]].key for cell in skin_cells.values()}
+          == {form.key for form in module_forms},
+          "%d cell(s) for %d form(s)" % (len(skin_cells), len(module_forms)))
+    check("a crimsonite cell sits in the stage column of the Coromon it is a form of",
+          all(database.click_target[cell[0]].uid == database.lines[index][1][stage].uid
+              for (index, _group, stage), cell in skin_cells.items()),
+          sorted(key for key in skin_cells))
+    check("a line that spawns no crimsonite form has no cell in the section",
+          all((buzz[0][0], SKIN_COLUMN, stage) not in database.cells
+              for stage in range(database.stages)),
+          "Buzzlet's line")
+    # THE STATE COMES FROM THE SAVE'S OWN SKIN UNLOCKS, so the check is the CONTRAST between an
+    # unlocked form (drawn like a caught dex entry, with the badge) and one no save unlocked (dulled
+    # like a seen one) rather than a count that a different save would fail.
+    try:
+        _slot, _when, _slots, _owned, _seen, skins = savefile.dex_record()
+    except Exception as exc:                                  # noqa: BLE001 - note, not a failure
+        skins = set()
+        print("note the crimsonite skin unlocks could not be read: %s" % exc)
+    met, unmet = [], []
+    for (index, _group, _stage), cell in skin_cells.items():
+        family = database.lines[index][0]
+        (met if savefile.has_skin(skins, family, dex.CRIMSONITE) else unmet).append(cell[0])
+    if met and unmet:
+        check("a crimsonite form is dull until the save has that skin unlocked",
+              met[0].pixmap().toImage() != unmet[0].pixmap().toImage()
+              and "crimsonite skin unlocked" in met[0].toolTip()
+              and "crimsonite skin not unlocked yet" in unmet[0].toolTip(),
+              "%d unlocked, %d not" % (len(met), len(unmet)))
+        QTest.mouseClick(met[0], Qt.MouseButton.LeftButton)
+        pump(app, 2)
+        rows = database.locations.model_.rows
+        check("a crimsonite cell lists its own locations in the footer",
+              bool(rows) and database.footer.text().startswith("Crimsonite "),
+              "%s -> %s" % (database.footer.text(), [row["zone"] for row in rows]))
+    else:
+        print("note the save has all or none of the crimsonite skins unlocked, so the two "
+              "drawings could not be contrasted")
 
     # THE -/+ BUTTONS in the corner: the icon scale is the app's own state (like the window's
     # position, and one scale for the whole window), and it resizes the grid it is pressed on.

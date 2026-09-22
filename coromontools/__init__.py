@@ -137,12 +137,17 @@ def selftest():
     # The Database tab's own numbers, without opening the tab: what the save records per category.
     try:
         import savefile
-        slot, owned, seen = savefile.monster_record()
+        slot, _when, slots, owned, seen, skins = savefile.dex_record()
         for cat, label in (("A", "Standard"), ("B", "Potent"), ("C", "Perfect")):
             caught = sum(1 for m in species if cat in savefile.categories(m.uid, owned))
             met = sum(1 for m in species if cat in savefile.categories(m.uid, seen))
             print("  %-9s caught %3d  seen %3d  of %d" % (label, caught, met, len(species)))
-        print("  dex record from", slot)
+        print("  dex record from", slot, "(newest of %d)" % slots)
+        # THE SKIN UNLOCKS OF THE SAME SLOT, which is where the Database tab's crimsonite section
+        # gets its states from: one key per family, so a line has the skin or it does not.
+        lines_hit = {f.family for f in forms if savefile.has_skin(skins, f.family, dex.CRIMSONITE)}
+        print("  skin unlocks recorded: %d, crimsonite lines among them: %d of %d"
+              % (len(skins), len(lines_hit), len({f.family for f in forms})))
     except Exception as exc:                    # noqa: BLE001 - a missing save is not a crash
         print("  dex record unavailable: %s: %s" % (type(exc).__name__, exc))
     for skill in skills.shown(skill_list, "poison")[:2]:

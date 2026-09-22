@@ -1,8 +1,8 @@
-"""The Database tab: one evolutionary line per row, and the three potential categories as three
-columns of complete lists.
+"""The Database tab: one evolutionary line per row, the three potential categories as three
+columns of complete lists, and the skins the game spawns in the wild as a fourth.
 
 WHY ROWS ARE FAMILIES. The game's own database draws a line per row - `currentMonsterFamilyUID`
-and `getGridBoxIndexByData` in `classes.interface.screens.monsterDatabaseScreen` - and
+and `getGridBoxIndexByData` in `classes.interface.screens.monsterDatabaseScreen` - and
 `dex.lines()` reproduces that from `families.json`: each family's `evolutionObjects`, ordered by
 `atLevel`, so a row reads base form to final form left to right. Every one of the 117 dex entries
 belongs to a family and the longest line is three stages, so the grid is 51 rows of up to three
@@ -12,6 +12,17 @@ WHY THREE COLUMN GROUPS. Caught / seen / unknown is PER CATEGORY, not per Coromo
 as a Potent and later as a Perfect is caught in both, and the game counts them separately
 (`playerStats:hasOwnedMonster(uid, category)`). Showing the three side by side is what makes that
 visible at a glance - the same line three times, and where the ticks are missing.
+
+AND A FOURTH GROUP FOR THE WILD SKINS, the user's own suggestion: "in the Database Grid, we show
+another section after Perfect, that would show ALL crimson variants and any other other skinned
+coromon that spawn naturalry". There is exactly ONE skin the game spawns in the wild and it is the
+crimsonite one - every monster slot in the encounter data carries one skin flag and it is that, so
+nothing else could be in the section (the 38 other skins a save can unlock - "orca", "retro",
+"gold" - are cosmetic and never spawn). It is NOT a potential category: a crimsonite Coromon has no
+dex record of its own, so the section is filled from the save's own SKIN UNLOCKS instead of from
+the dex - see `apply_states`, and `dex.crimsonite_forms` for what a crimsonite is. Each cell sits
+in the same stage column as the Coromon it is a form of, so a row reads across from the ordinary
+Coromon to its crimsonite form, and the lines that spawn none simply have no cell there.
 
 THE STATES, taken from the game rather than invented - `monsterDatabaseScreen` picks between FOUR,
 by testing hasOwnedMonster(uid, category), then hasSeenMonster(uid, category), then
@@ -31,7 +42,9 @@ with the game's line of code next to it, so this can be checked against the game
 believed.
 
 WHERE THE DATA COMES FROM: the save's own dex record, `stats.MONSTERS_OWNED` and
-`stats.MONSTERS_SEEN` (see `savefile.monster_record`).
+`stats.MONSTERS_SEEN` (see `savefile.dex_record`), plus that same slot's
+`unlockedMonsterSpriteSkinUIDs` for the crimsonite section - one read, so the dex and the section
+beside it are the same moment.
 
 ONE PASS, BUILT ONCE. Every cell is created a single time and then filled: a state change here
 means re-reading a save, not switching a filter, so there is no cheaper update to design for - and
@@ -69,6 +82,20 @@ except ImportError:                                    # pragma: no cover - repo
 
 # The game's own categories, in the game's own order, with the names the game gives them.
 CATEGORIES = (("A", "Standard"), ("B", "Potent"), ("C", "Perfect"))
+
+# THE FOURTH COLUMN GROUP, after the three potential categories: the skins the game SPAWNS IN THE
+# WILD, which is the crimsonite one and nothing else (every monster slot in the encounter data
+# carries one skin flag, measured - see `dex.crimsonite_forms`). Each of its cells sits in the same
+# stage column as the Coromon it is a form of, so a row reads across from the species to the form.
+# IT IS NOT A POTENTIAL CATEGORY, and that is why it is filled from a different place than the
+# three beside it: the game has no crimsonite dex entry, so `apply_states` asks the save's SKIN
+# UNLOCKS (`savefile.has_skin`) instead of the dex record.
+SKIN_GROUP = "Crimsonite"
+SKIN_COLUMN = len(CATEGORIES)          # its index among the grid's column groups
+GROUPS = len(CATEGORIES) + 1           # ... and how many groups there are, for the loops below
+SKIN_TIP = ("the Coromon the game spawns in its crimsonite form - a separate Coromon, and the "
+            "only skin that spawns in the wild. A cell is filled once you have unlocked that "
+            "skin (which catching one does); lines that spawn none leave it empty.")
 
 # The preferences key the icon scale is kept under, and how wide the two buttons that change it
 # are - small on purpose: they sit in the corner of a row that is already tight (see `_elide_labels`).
@@ -151,7 +178,7 @@ def clamp_zoom(zoom):
 
 
 class DatabaseTab(QWidget):
-    """The database: a row per evolutionary line, a column group per potential category."""
+    """The database: a row per evolutionary line, three category groups, and the wild skins."""
 
     zoneChosen = Signal(object)      # a Zone the map should show - the Coromon tab's own signal
     zoomChanged = Signal(int)        # the icon scale, for the other tab that draws dex icons
@@ -163,6 +190,7 @@ class DatabaseTab(QWidget):
         self.stages = line_stages(self.lines)
         self.owned = {}                  # uid -> {category: True}
         self.seen = {}
+        self.skins = set()               # "<FAMILY>|<skin>" the save has unlocked (see apply_states)
         self.slot = None                 # the save slot the record came from (the game's key)
         self.saved = None                # ... and its timestamp, as the game wrote it
         self.slots = 0                   # how many slots record a dex at all
@@ -171,7 +199,7 @@ class DatabaseTab(QWidget):
         self._counts_text = ""           # the tally as it was composed, before any eliding
         self._report_text = ""           # ... and the save report, likewise
         self.top_row = None              # the find row, kept for `_elide_labels`
-        self.cells = {}                  # (line index, category index, stage) -> (icon, caption)
+        self.cells = {}                  # (line index, group, stage) -> (icon, caption)
         self.click_target = {}           # a cell widget or one of its labels -> Species
         self.rules = {}                  # line index -> the rule drawn under it
         self._built = False
@@ -257,7 +285,7 @@ class DatabaseTab(QWidget):
         # and the only thing that stretches is the empty column on the right.
         self.gap = 1
         self.stride = self.stages + self.gap
-        self.columns = len(CATEGORIES) * self.stride
+        self.columns = GROUPS * self.stride
         self.grid.setColumnStretch(self.columns, 1)
         self.scroll.setWidget(self.holder)
         outer.addWidget(self.scroll, 1)
@@ -370,7 +398,7 @@ class DatabaseTab(QWidget):
         self.zoomChanged.emit(zoom)
 
     def _build_header(self):
-        """The three column names, each over its own group of stage columns."""
+        """The column names, each over its own group of stage columns."""
         for index, (_category, label) in enumerate(CATEGORIES):
             head = QLabel(label)
             head.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -378,6 +406,16 @@ class DatabaseTab(QWidget):
             font.setBold(True)
             head.setFont(font)
             self.grid.addWidget(head, 0, index * self.stride, 1, self.stages)
+        # THE SKIN GROUP IS TITLED AND EXPLAINED, because it is the one group that is not the game's
+        # own dex and the only one that can be empty: the tooltip says what it is and why a line may
+        # have no cell in it.
+        skin_head = QLabel(SKIN_GROUP)
+        skin_head.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = skin_head.font()
+        font.setBold(True)
+        skin_head.setFont(font)
+        skin_head.setToolTip(SKIN_TIP)
+        self.grid.addWidget(skin_head, 0, SKIN_COLUMN * self.stride, 1, self.stages)
         self.grid.addWidget(self._rule(False), 1, 0, 1, self.columns)
 
     @staticmethod
@@ -389,46 +427,65 @@ class DatabaseTab(QWidget):
         return rule
 
     def _build_cells(self):
-        """One cell per (line, category, stage), created once and filled by `apply_states`.
+        """One cell per (line, group, stage), created once and filled by `apply_states`.
 
-        The icons' size is NOT set here - `_apply_zoom` does that for every cell at once, which is
-        also what a scale change goes through.
+        THE SKIN GROUP ONLY GETS CELLS WHERE THERE IS A FORM (11 Coromon in all - see
+        `dex.crimsonite_of`), and each sits in the column of the stage it is a form of, so a row
+        reads across. The columns themselves exist for every line either way (`_apply_zoom` sizes
+        them), which is what keeps the group aligned with the three beside it.
         """
         for index, (_family, stages) in enumerate(self.lines):
             row = 2 + index * 2
             for cat_index in range(len(CATEGORIES)):
                 for stage, mon in enumerate(stages):
-                    column = cat_index * self.stride + stage
-                    cell = QWidget()
-                    box = QVBoxLayout(cell)
-                    box.setContentsMargins(1, 1, 1, 1)
-                    box.setSpacing(1)
-
-                    picture = QLabel()
-                    picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    box.addWidget(picture, 0, Qt.AlignmentFlag.AlignHCenter)
-
-                    # THE NAME ONLY - the number is already IN the icon, drawn in the game's own
-                    # font and the entry's own state colour (see `icons.icon_pixmap`), so a
-                    # "#35 Buzzlet" caption said it twice under every one of the 117 icons.
-                    caption = QLabel(mon.name)
-                    caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    caption.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-                    box.addWidget(caption)
-
-                    # A CLICK PICKS IT, and the hand cursor says so: a QLabel has no selection state
-                    # to use instead, so this is the tab's own picking (see `eventFilter`). The cell,
-                    # the icon and the caption all count as the same target.
-                    for widget in (cell, picture, caption):
-                        widget.installEventFilter(self)
-                        widget.setCursor(Qt.CursorShape.PointingHandCursor)
-                        self.click_target[widget] = mon
-
-                    self.grid.addWidget(cell, row, column)
-                    self.cells[(index, cat_index, stage)] = (picture, caption)
+                    self._make_cell(row, cat_index * self.stride + stage,
+                                    (index, cat_index, stage), mon, mon.name)
+            for stage, mon in enumerate(stages):
+                form = dex.crimsonite_of(mon.uid)
+                if form is None:
+                    continue
+                self._make_cell(row, SKIN_COLUMN * self.stride + stage,
+                                (index, SKIN_COLUMN, stage), form, mon.name)
             # A rule under each line, so 51 rows of nine icons stay readable as rows.
             self.rules[index] = self._rule(False)
             self.grid.addWidget(self.rules[index], row + 1, 0, 1, self.columns)
+
+    def _make_cell(self, row, column, key, mon, text):
+        """One icon-over-caption cell, registered for clicking and stored under `key`.
+
+        `mon` is what a click picks and what the caption's tooltip describes; `text` is the caption
+        itself - the ordinary name in the skin group, where the group's own title already says which
+        form it is (and where the form's full name would not fit the column at every zoom).
+        The icons' size is NOT set here - `_apply_zoom` does that for every cell at once, which is
+        also what a scale change goes through.
+        """
+        cell = QWidget()
+        box = QVBoxLayout(cell)
+        box.setContentsMargins(1, 1, 1, 1)
+        box.setSpacing(1)
+
+        picture = QLabel()
+        picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        box.addWidget(picture, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        # THE NAME ONLY - the number is already IN the icon, drawn in the game's own font and the
+        # entry's own state colour (see `icons.icon_pixmap`), so a "#35 Buzzlet" caption said it
+        # twice under every one of the 117 icons.
+        caption = QLabel(text)
+        caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        caption.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        box.addWidget(caption)
+
+        # A CLICK PICKS IT, and the hand cursor says so: a QLabel has no selection state to use
+        # instead, so this is the tab's own picking (see `eventFilter`). The cell, the icon and the
+        # caption all count as the same target.
+        for widget in (cell, picture, caption):
+            widget.installEventFilter(self)
+            widget.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.click_target[widget] = mon
+
+        self.grid.addWidget(cell, row, column)
+        self.cells[key] = (picture, caption)
 
     # ------------------------------------------------------------------ data
     def showEvent(self, event):
@@ -446,17 +503,14 @@ class DatabaseTab(QWidget):
             self.error = "savefile.py is missing"
         else:
             try:
-                # THE NEWEST SLOT THAT RECORDS A COROMON, which is what `monster_record` has always
-                # picked - the autosave counts as a slot like any other, so if the newest thing the
-                # game wrote is the autosave, that is what this reads. The slot and its time are
-                # kept so the top-right label can say which one it was instead of leaving it a guess.
-                found = savefile.dex_slots()
-                self.slots = len(found)
-                if found:
-                    self.saved, self.slot, self.owned, self.seen = found[0]
-                else:
-                    self.saved = None
-                    self.slot, self.owned, self.seen = savefile.monster_record()
+                # THE NEWEST SLOT THAT RECORDS A COROMON, which is what this has always picked -
+                # the autosave counts as a slot like any other, so if the newest thing the game wrote
+                # is the autosave, that is what this reads. The slot and its time are kept so the
+                # top-right label can say which one it was instead of leaving it a guess.
+                # ONE READ, ONE SLOT: the skin unlocks the crimsonite section is drawn from come
+                # out of the same call, so the two halves of the grid cannot show two moments.
+                self.slot, self.saved, self.slots, self.owned, self.seen, self.skins = \
+                    savefile.dex_record()
                 self.error = None
             except Exception as exc:                   # noqa: BLE001 - reported, not hidden
                 self.error = "%s: %s" % (type(exc).__name__, exc)
@@ -623,6 +677,43 @@ class DatabaseTab(QWidget):
                         label, stage + 1, len(stages))
                     picture.setToolTip(tip)
                     caption.setToolTip(tip)
+
+        # AND THE SKIN SECTION, whose state does NOT come from the dex: a crimsonite Coromon has no
+        # dex entry of its own (see `dex.crimsonite_forms`), so what says whether it has been met is
+        # the save's own SKIN UNLOCK - "<FAMILY>|<skin>", the key the game writes and the only thing
+        # it records about these forms (see `savefile.has_skin`). Unlocked is drawn exactly like a
+        # caught dex entry and not-yet like a seen one (the game's own darkening), so the section
+        # reads the same way as the three groups beside it. NOTHING IS HIDDEN WHEN IT IS NOT MET: the
+        # point of the section is to show what the wild can turn up, so every form is drawn and the
+        # darkening is what marks the ones not met yet. NOT IN THE TALLY either - it is not a
+        # potential category, and the tally is the count the game's own database screen shows.
+        for index, (family, stages) in enumerate(self.lines):
+            for stage, mon in enumerate(stages):
+                cell = self.cells.get((index, SKIN_COLUMN, stage))
+                if cell is None:
+                    continue          # this line spawns no crimsonite form of that stage
+                picture, caption = cell
+                form = dex.crimsonite_of(mon.uid)
+                met = savefile is not None and savefile.has_skin(self.skins, family, dex.CRIMSONITE)
+                state = STATE_CAUGHT if met else STATE_SEEN
+                pixmap = icons.icon_pixmap(form, self.zoom, caught=met, state=state)
+                if pixmap is None:
+                    picture.clear()
+                else:
+                    picture.setPixmap(pixmap)
+                caption.setEnabled(met)
+                places = [zone.name for zone, _lo, _hi, _share, _battles
+                          in dex.where(form.uid, form.skin)]
+                tip = "%s\nnumber %s\ntype %s\n%s\n%s\ncrimsonite form of %s, stage %d of %d" % (
+                    form.name,
+                    "number %s" % form.number if form.number else "no dex number",
+                    pretty(dex.primary_type(form) or "?"),
+                    "crimsonite skin unlocked" if met else "crimsonite skin not unlocked yet",
+                    "spawns in " + ", ".join(places) if places else "no wild encounters",
+                    mon.name, stage + 1, len(stages))
+                picture.setToolTip(tip)
+                caption.setToolTip(tip)
+
         self._counts_text = TALLY_GAP.join(
             "%s %d caught / %d seen" % (label, tally[category]["caught"], tally[category]["seen"])
             for category, label in CATEGORIES)
@@ -635,6 +726,9 @@ class DatabaseTab(QWidget):
         how a Coromon is usually looked up ("35", or "#35" pasted from a wiki), and the caption
         dropping it is a reason to keep matching it here, not to lose it. A bare "#" matches
         nothing, so the prefix cannot turn into a wildcard.
+        THE SKIN SECTION IS PART OF ITS LINE, so the form's own name is matched too - "crimsonite"
+        finds the six lines that have one (the caption there shows the species name, so the form's
+        name would otherwise be unfindable).
         """
         needle = self.search.text().strip().lower()
         number = needle.lstrip("#")
@@ -642,8 +736,10 @@ class DatabaseTab(QWidget):
             hit = not needle or any(
                 needle in mon.name.lower()
                 or (number and mon.number and number in str(mon.number))
-                for mon in stages)
-            for cat_index in range(len(CATEGORIES)):
+                for mon in stages) or any(
+                needle in form.name.lower() for form in
+                (dex.crimsonite_of(mon.uid) for mon in stages) if form is not None)
+            for cat_index in range(GROUPS):
                 for stage in range(self.stages):
                     cell = self.cells.get((index, cat_index, stage))
                     if cell is not None:

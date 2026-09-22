@@ -22,8 +22,9 @@ fourth reading of the same two files:
     `crimsonite_forms`, and `encounters.Zone.crimsonite` for the flags). Eleven Coromon, six lines,
     every one of them in the water areas; they are a different sprite (`<UID>_crimsonite`), a
     different type container and their own catch milestones, so they are carried here as Coromon of
-    their own - beside the species in the window's list, with their own locations - while
-    `lines()` keeps the database grid to the game's own dex entries.
+    their own - beside the species in the window's list, with their own locations, and as their own
+    section of the database grid (`crimsonite_of`), which `lines()` still keeps to the game's dex
+    entries because the game has no crimsonite dex entry to put in one.
 
 `write_icons()` CARVES THEM OUT as PNG files, one per Coromon, named `<number>_<UID>.png`. It uses
 Tk's own PNG support rather than Pillow - Tk reads a PNG photo image, copies a sub-rectangle with
@@ -564,6 +565,7 @@ CRIMSONITE = "crimsonite"
 
 
 _FORM_CACHE = None
+_FORM_INDEX = None
 
 
 def crimsonite_forms():
@@ -585,10 +587,11 @@ def crimsonite_forms():
     coromon spawn, those need to be integrated too as a separate coromon with their own
     encounters". `where(uid, CRIMSONITE)` is exactly those encounters.
 
-    NOT IN THE DEX GRID: the game's own database has no crimsonite entries - a catch milestone is
-    not a dex entry - and the grid's three column groups are the potenital categories, which a
-    crimsonite form does not have. So `lines()` leaves them out, and this is what the window's
-    Coromon list adds beside each species.
+    NOT IN THE DEX ITSELF: the game's own database has no crimsonite entries - a catch milestone is
+    not a dex entry - and its three column groups are the POTENTIAL categories, which a crimsonite
+    form does not have. `lines()` therefore leaves them out, and they are drawn as a fourth section
+    of the grid instead (`crimsonite_of`), filled from the save's own skin unlocks rather than from
+    the dex, because the dex has nothing to say about them.
     """
     global _FORM_CACHE
     if _FORM_CACHE is None:
@@ -605,6 +608,20 @@ def crimsonite_forms():
         out.sort(key=lambda s: order.get(s.uid, len(order)))    # beside the species it is a form of
         _FORM_CACHE = out
     return list(_FORM_CACHE)
+
+
+def crimsonite_of(uid):
+    """The crimsonite form of that species' UID, or None when it has none.
+
+    Keyed by the ORDINARY UID, because that is what the grid has: a line's stages are the ordinary
+    Coromon, and this is the lookup that finds the form drawn beside one of them (the form carries
+    the same UID plus the skin). Built from `crimsonite_forms`, so it is the same 11 Coromon the
+    encounters have crimsonite slots for and nothing else.
+    """
+    global _FORM_INDEX
+    if _FORM_INDEX is None:
+        _FORM_INDEX = {mon.uid: mon for mon in crimsonite_forms()}
+    return _FORM_INDEX.get(uid)
 
 
 def all_where():

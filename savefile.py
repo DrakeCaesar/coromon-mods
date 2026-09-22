@@ -41,7 +41,7 @@ by exact name first and then by prefix in either direction.
 Not everything in a save maps to an encounter area, so `unmatched()` reports the visits that
 no area claims - useful for spotting a mapping the matching rule missed.
 
-`monster_record()` READS THE DEX instead, out of the same decrypted save:
+`dex_record()` READS THE DEX instead, out of the same decrypted save:
 
     stats.MONSTERS_OWNED   {"GHOST_CAT_1": {"A": True, "B": True, "C": True}, ...}
     stats.MONSTERS_SEEN    {"GHOST_CAT_1": {"A": True}, ...}
@@ -51,6 +51,18 @@ a Coromon UID mapped to the potential categories you have it in - `A` standard, 
 category, each entry caught (`MONSTERS_OWNED`), seen-but-not-caught (`MONSTERS_SEEN`) or
 unknown. The game's own accessors are `playerStats:hasOwnedMonster(uid, category)` and
 `hasSeenMonster`, and the database screen is `classes.interface.screens.monsterDatabaseScreen`.
+
+AND IT BRINGS THE SLOT'S SKIN UNLOCKS WITH IT (`dex_record`):
+
+    unlockedMonsterSpriteSkinUIDs  {"ELECTRIC_FIREFLY|crimsonite": true, "WATER_SHARK|orca": true}
+
+the `<FAMILY UID>|<skin>` keys of the sprite skins that slot has unlocked - the cosmetic ones the
+player picked up ("orca", "retro", "gold", ...) and the crimsonite ones, which the game hands out
+for catching a crimsonite Coromon (`MonsterSpriteSkinMilestone.CATCH_CRIMSONITE_<LINE>`, one per
+line). CRIMSONITE IS THE ONLY SKIN THE GAME SPAWNS IN THE WILD - every monster slot in
+`encounterZones.json` carries one skin flag and it is that one (measured: 612 slots, one flag) -
+so the database grid's crimsonite section takes its cell states from here. The keys are per FAMILY,
+not per stage of it: `ELECTRIC_FIREFLY|crimsonite` covers Lumon, Lampyre and Lumasect alike.
 """
 
 import base64
@@ -154,14 +166,20 @@ def visited():
 # category you have that Coromon in.
 OWNED_KEY = "MONSTERS_OWNED"
 SEEN_KEY = "MONSTERS_SEEN"
+# ... and the sprite skins of the same slot - see the module docstring. Read by NAME like the two
+# above, because the save's shape changes between data versions.
+SKIN_KEY = "unlockedMonsterSpriteSkinUIDs"
 
 
 def _record_in(obj, name):
     """One of those dicts from a decrypted save, wherever it is nested.
 
     Found by NAME rather than by path, exactly like VISITED_MAPS: `stats.MONSTERS_OWNED` is where
-    it lives today, and the save's shape changes between data versions.
+    it lives today, and the save's shape changes between data versions. The name is matched
+    case-insensitively, so a caller can write the game's own spelling of it
+    (`unlockedMonsterSpriteSkinUIDs`) rather than this file's upper-case habit.
     """
+    name = name.upper()
     stack = [obj]
     while stack:
         node = stack.pop()
@@ -177,37 +195,64 @@ def _record_in(obj, name):
 
 
 def dex_slots():
-    """[(when, slot key, owned, seen), ...] for every slot that records either, NEWEST FIRST.
+    """[(when, slot key, owned, seen, skins), ...] for every slot that records either, NEWEST FIRST.
 
     A SLOT WITH NO DEX RECORD IS LEFT OUT, not returned empty: an empty or just-started slot would
     otherwise be the "newest" and hide the one that is actually being played. `when` is the
     `metadata.dateTime` the game wrote next to the payload - a plain Unix timestamp of the local
     clock, so `time.localtime` renders it as the moment the game saved.
+
+    `skins` comes from the SAME slot and the same read, which is the point: the database grid draws
+    the dex and its crimsonite section side by side, and two reads would be two moments.
     """
     out = []
     for when, key, obj in _read_rows():
         owned = _record_in(obj, OWNED_KEY)
         seen = _record_in(obj, SEEN_KEY)
         if owned or seen:
-            out.append((when, key, owned, seen))
+            out.append((when, key, owned, seen, skins_in(obj)))
     return out
 
 
-def monster_record():
-    """(slot name, owned, seen) for the most recent slot that records either - see `dex_slots`.
+def skins_in(obj):
+    """The `unlockedMonsterSpriteSkinUIDs` set of a decrypted save, as `{"<FAMILY>|<skin>", ...}`.
 
-    Both are {coromon uid: {category: True}}; see the module docstring. Measured on a real save:
-    `MONSTERS_OWNED` held 53 UIDs and `MONSTERS_SEEN` 115 of the 117 dex entries (every owned one
-    of them also seen), which is the "seen / caught" the database screen counts for itself.
+    Found by NAME like the records above. A bare `"crimsonite"` key turns up beside the
+    `<FAMILY>|crimsonite` ones and is the mechanic itself rather than a family's skin, so
+    `has_skin` looks for the family key and lets that one be.
+    """
+    return set(_record_in(obj, SKIN_KEY))
+
+
+def has_skin(skins, family, skin):
+    """Whether a save unlocked that FAMILY's skin - "<FAMILY UID>|<skin>", the game's own key.
+
+    PER FAMILY, NOT PER STAGE, because that is what the save records (`ELECTRIC_FIREFLY|crimsonite`
+    is one key for the whole Lumon line): a stage of that line has the skin or it does not, and
+    there is nothing finer to be honest about.
+    """
+    return ("%s|%s" % (family, skin)) in (skins or ())
+
+
+def dex_record():
+    """EVERYTHING this tool reads out of a save, from the newest slot that records a Coromon.
+
+    `(slot key, when, how many slots record one, owned, seen, skins)` - one call and one read, so
+    the dex and the skin unlocks the database grid draws together cannot come from two moments.
+
+    Falls back to the newest slot at all, with an empty dex, when no slot records a Coromon yet: a
+    save that has never seen one is still a save, and the tab should say which one it read rather
+    than nothing. Raises when nothing can be decoded - the keystream is machine-specific.
     """
     slots = dex_slots()
     if slots:
-        _when, key, owned, seen = slots[0]
-        return key, owned, seen
-    rows = _read_rows()                  # decoded, but nothing in it records a Coromon yet
+        when, key, owned, seen, skins = slots[0]
+        return key, when, len(slots), owned, seen, skins
+    rows = _read_rows()
     if not rows:
         raise ValueError("no save slot could be decoded - the keystream may be from another machine")
-    return rows[0][1], {}, {}
+    when, key, obj = rows[0]
+    return key, when, len(rows), {}, {}, skins_in(obj)
 
 
 def categories(uid, record):
