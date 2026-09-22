@@ -25,11 +25,11 @@ from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListW
                                QListWidgetItem, QPushButton, QSpinBox, QSplitter,
                                QVBoxLayout, QWidget)
 
+from . import mapnames
 from .config import (LEVEL_DEFAULT, MIN_SHARE_DEFAULT, ONLY_XP_DEFAULT, ON_TOP_DEFAULT,
                      SCALES_SPAN, XP_MARGIN)
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
-from .text import pretty
 from .widgets import mono_text, note
 
 try:
@@ -157,7 +157,7 @@ class GrindTab(QWidget):
         # the widget that already is a scrolling column of ticks
         self.area_list = QListWidget()
         for map_file in self.maps:
-            item = QListWidgetItem(pretty(map_file))
+            item = QListWidgetItem(mapnames.area(map_file))
             item.setData(Qt.ItemDataRole.UserRole, map_file)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked if map_file in self.available
@@ -334,7 +334,7 @@ class GrindTab(QWidget):
             species = zone_rows(zone, min_share)
             best = species[0] if species else None
             rows.append({
-                "area": pretty(zone.map_file),
+                "area": mapnames.area(zone.map_file),
                 "zone": zone.name,
                 "explvl": "%.2f" % zone.average_level,
                 "best": ("%s L%s-%s  %.0f%%" % (best["name"], best["min"], best["max"],
@@ -384,7 +384,7 @@ class GrindTab(QWidget):
             text = ("No zone here still gives XP at squad level %d.\n\nThe highest monster in "
                     "the ticked areas is L%d, in %s (%s). Untick \"still gives XP\" to rank "
                     "them anyway, or reach further areas."
-                    % (self.level.value(), top, best.name, pretty(best.map_file)))
+                    % (self.level.value(), top, best.name, mapnames.area(best.map_file)))
         self.species.setPlainText(text)
 
     # ------------------------------------------------------------------ selection
@@ -400,7 +400,7 @@ class GrindTab(QWidget):
         self._show_map_head()
 
     def _species_text(self, zone):
-        lines = ["%s  (%s)%s" % (zone.name, pretty(zone.map_file),
+        lines = ["%s  (%s)%s" % (zone.name, mapnames.area(zone.map_file),
                                  "   water" if zone.water else ""), ""]
         rows = zone_rows(zone, self.min_share_value())
         width = max([14] + [len(row["name"]) + 1 for row in rows])

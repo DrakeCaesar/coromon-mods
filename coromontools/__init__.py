@@ -40,13 +40,12 @@ import dex                                                             # noqa: E
 import encounters                                                      # noqa: E402
 import skills                                                          # noqa: E402
 
-from . import state                                                    # noqa: E402
+from . import mapnames, state                                               # noqa: E402
 from .config import ON_TOP_DEFAULT                                     # noqa: E402
 from .coromon import CoromonTab                                        # noqa: E402
 from .database_tab import DatabaseTab                                  # noqa: E402
 from .grind import GrindTab, rank, zone_rows                           # noqa: E402
 from .skills_tab import SkillsTab                                      # noqa: E402
-from .text import pretty                                               # noqa: E402
 from .theme import apply_theme                                         # noqa: E402
 
 GEOMETRY_WIDTH, GEOMETRY_HEIGHT = 1420, 760
@@ -153,7 +152,7 @@ def selftest():
     for zone in rank(all_zones, 64, only_xp=True)[:6]:
         rows = zone_rows(zone)
         print("  %-22s %-18s expLvl %5.2f  %s" % (
-            zone.name, pretty(zone.map_file), zone.average_level,
+            zone.name, mapnames.area(zone.map_file), zone.average_level,
             ", ".join("%s L%s-%s %.0f%%" % (row["name"], row["min"], row["max"], row["share"])
                       for row in rows[:3])))
     return 0

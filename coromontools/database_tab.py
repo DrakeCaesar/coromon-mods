@@ -55,7 +55,7 @@ from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
-from . import icons
+from . import icons, mapnames
 from .config import (ICON_ZOOM, ICON_ZOOM_KEY, ICON_ZOOM_MAX, ICON_ZOOM_MIN, STATE_CAUGHT,
                      STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
 from .mapview import ZoneMap
@@ -502,7 +502,7 @@ class DatabaseTab(QWidget):
             return
         self.footer.setText("%s   %d location(s)" % (mon.name, len(found)))
         self.locations.set_rows([{
-            "area": pretty(zone.map_file),
+            "area": mapnames.area(zone.map_file),
             "zone": zone.name,
             "levels": "L%s-%s" % (low, high),
             "share": "%.1f%%" % share,

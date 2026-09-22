@@ -148,7 +148,9 @@ local function areaTitle(raw)
   if type(raw) ~= 'string' or raw == '' then return nil end
   if type(worldLocationUtility) == 'table' then
     local ok, v = pcall(worldLocationUtility.getLocalised, worldLocationUtility, raw)
-    if ok and type(v) == 'string' and v ~= '' and v ~= '???' then return v end
+    -- '???' is the locator's marker for a missing key and '?' is what the debug maps resolve to
+    -- (`world.map.unknown.name`); neither is a name, and the raw key reads better than either.
+    if ok and type(v) == 'string' and v ~= '' and v ~= '???' and v ~= '?' then return v end
   end
   return raw
 end

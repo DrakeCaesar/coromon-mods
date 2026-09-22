@@ -18,8 +18,8 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 import encounter_zones as ez
 
+from . import mapnames
 from .config import MAP_MAX_SCALE, PATCH_ALPHA, SPOTS_SHOWN
-from .text import pretty
 from .theme import FIELD, MAP_GROUND
 
 
@@ -73,7 +73,7 @@ class ZoneMap(QWidget):
         entry = drawn.get(zone.name)
         if entry is None:
             self.headline = ("%s is not marked on the map of %s - it has %s"
-                             % (zone.name, pretty(zone.map_file),
+                             % (zone.name, mapnames.area(zone.map_file),
                                 ", ".join(sorted(drawn)) or "no zones"))
             self.update()
             return False

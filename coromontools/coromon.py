@@ -20,10 +20,9 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListWidget, QLis
 
 import dex
 
-from . import icons
+from . import icons, mapnames
 from .config import ICON_ZOOM
 from .table import PAYLOAD, Column, DataTable
-from .text import pretty
 from .widgets import note
 
 NOTES = ("Wild encounters only - evolutions, starters and gift Coromon have no locations. "
@@ -202,7 +201,7 @@ class CoromonTab(QWidget):
             mon.name, mon.family or "-", len(found),
             "" if found else "   - no wild encounters: an evolution, a starter or a gift"))
         self.locations.set_rows([{
-            "area": pretty(zone.map_file),
+            "area": mapnames.area(zone.map_file),
             "zone": zone.name,
             "levels": "L%s-%s" % (low, high),
             "share": "%.1f%%" % share,

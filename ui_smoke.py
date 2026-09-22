@@ -330,9 +330,13 @@ def main():
                         tuple((row["area"], row["zone"], row["levels"], row["share"])
                               for row in database.locations.model_.rows)))
     check("Buzzlet has a cell in each category column", len(buzz) == 3, len(buzz))
+    # "Woodlow Harbor" is the game's own name for the `harbor` map (`mapnames.area`, generated
+    # from the map's `setMapName` plus `world.map.<key>.name`), not the file name prettified - the
+    # area column used to read "Harbor" and the whole point of the table is that it reads what the
+    # game shows.
     check("a click lists where it can be captured, whatever the category",
           len(set(answers)) == 1 and answers[0][0].startswith("Buzzlet")
-          and ("Harbor", "HARBOR_A", "L7-12", "44.4%") in answers[0][1],
+          and ("Woodlow Harbor", "HARBOR_A", "L7-12", "44.4%") in answers[0][1],
           "%s -> %s" % (answers[0][0], answers[0][1][:2]))
 
     # THE MAP IS IN THE FOOTER, beside the list: picking a row draws that area there, without
