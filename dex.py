@@ -3,9 +3,12 @@
 
 THREE THINGS, from three places the game already ships:
 
-  * THE LIST AND ITS ORDER - `data/json/monsters.json`, 139 entries with a `number`, which is the
-    in-game dex id. The order the wiki uses is this number, not the file order and not the UID, so
-    sorting by it is the whole point of this module rather than reading the JSON as it comes.
+  * THE LIST AND ITS ORDER - `data/json/monsters.json`, 139 entries of which 131 carry a `number`
+    (the in-game dex id) - and 110 of those are the real dex, because the rest are 900+
+    placeholders. The order the wiki uses is this number, not the file order and not the UID, so
+    sorting by it is the whole point of this module rather than reading the JSON as it comes. The
+    entries that have no number at all get their order from the game's own dex screen: see
+    `unnumbered_order()`.
   * WHERE IT APPEARS - `data/json/encounterZones.json`, read through `encounters.py` and inverted:
     that file is zones -> monsters, and the question is monster -> zones. Note what this can and
     cannot say: it covers wild encounters, so evolutions, starters and gift Coromon have no
@@ -37,13 +40,59 @@ SPRITES = os.path.join(RES, "images", "animatedMonsterSprites", "idle")
 AVATARS = os.path.join(RES, "images", "interface", "icons", "monsterAvatars")
 ATLAS = os.path.join(AVATARS, "borderlessAtlas.png")
 CONTAINERS = os.path.join(AVATARS, "typeContainers")
+OTHER_ICONS = os.path.join(RES, "images", "interface", "icons", "otherIcons")
+# The game's own database badges, straight out of the screen that draws them
+# (`classes.interface.screens.monsterDatabaseScreen` names these two paths): a caught entry gets
+# `icon_caught` in its top-right corner, and `icon_seen` is the weaker marker it uses for one it
+# has only met.
+CAUGHT_BADGE = os.path.join(OTHER_ICONS, "icon_caught.png")
+SEEN_BADGE = os.path.join(OTHER_ICONS, "icon_seen.png")
+# THE PLATE BEHIND AN ENTRY IS A REAL SPRITE, and it is not in the database screen's folder: it is
+# the UIContainer system's rounded-rect MASK, `roundedRect_mask_radius4_18x18.png` - the only
+# rounded rectangle the container builder ever loads (found by grepping every sprite reference out
+# of resource.car: the container names are assembled at runtime, so the style
+# `roundedRect_gridBoxBlueOrRed_radius4_withGridBoxBlueOrRedBorder` never appears as a file). The
+# sprite is WHITE-ON-BLACK: its red channel is the coverage of an 18x18 rounded rect centred in a
+# 28x28 canvas, and the game tints it with the container's fill colour.
+PLATE_SPRITE = os.path.join(RES, "images", "interface", "shared", "UIContainer",
+                            "roundedRect_mask_radius4_18x18.png")
+# WHAT A NEVER-SEEN ENTRY DRAWS INSTEAD OF ITS FRAME: `UNKNOWN.png` is a 17x17 black square (the
+# exact size of a type frame) with a hairline lighter edge, sitting in a 24x24 canvas so the game
+# can place it with the same `magnet:bottomRight` call it uses for everything else. The companion
+# `UNKNOWN_QUESTIONMARK.png` is the same square with the "?" baked into it, used by the screens
+# that want the mark but not the silhouette (`hideMonsterAvatar = 'withQuestionMark'`); the
+# DATABASE screen uses `'withQuestionMarkAndSilhouette'`, which is this square, the real sprite
+# duotoned black, and the "?" drawn as text in the entry's own text colour.
+UNKNOWN_FRAME = os.path.join(AVATARS, "UNKNOWN.png")
+UNKNOWN_QUESTIONMARK = os.path.join(AVATARS, "UNKNOWN_QUESTIONMARK.png")
 CELL = 24                    # atlas cell, and the size of a dex icon
 CONTAINER = 17               # the type frame is SMALLER than the cell: the sprite overhangs it
+# Where the type frame sits inside a cell, in WHOLE TEXELS: (24 - 17 + 1) // 2 = 4. See
+# `frame_offset` below for why a whole texel matters.
+FRAME_TEXELS = (CELL - CONTAINER + 1) // 2
 
 # The atlas order lives in the game's own sheet definition, which is compiled into resource.car -
 # so it is read from the extraction car_extract.py produces. Every other tool here needs it too.
 EXTRACT = os.environ.get("QR_DISASM") or os.path.join(os.path.expanduser("~"), "qr_disasm")
 ATLAS_MODULE = os.path.join(EXTRACT, "classes.modules.monsterAvatarAtlas.lu")
+# THE ORDER OF THE COROMON THAT HAVE NO DEX NUMBER, which is a second thing only the game knows:
+# see `unnumbered_order()`.
+DEX_SCREEN_MODULE = os.path.join(EXTRACT, "classes.interface.screens.monsterDatabaseScreen.lu")
+
+# The same order written out, for a machine with no extraction: `unnumbered_order()` falls back to
+# this when the module cannot be read, so the window shows the game's order rather than an
+# alphabetical one. The titans' names are the ones the game gives them in `monsters.json`.
+UNNUMBERED_FALLBACK = ("FUSEBOX", "TITAN_ELECTRIC", "TITAN_GHOST", "TITAN_SAND", "TITAN_FIRE",
+                       "TITAN_ICE", "TITAN_WATER")
+
+# ONE MONSTER IS IN THE SHIPPED DATA BUT NOT IN THE GAME: `NORMAL_SPINNER`, "Xena", an experimental
+# robot made of Spinners. It has no dex number, the dex screen names neither it nor its family, no
+# zone spawns it, and - the clincher - IT HAS NO ARTWORK AT ALL: no cell in the avatar atlas and no
+# idle strip (`avatar_cell` and `strip_frame` both return None for it, and it is the one entry the
+# icon check used to count as missing). It is unreachable leftovers from the debugging build, the
+# same kind of entry as the 900+ placeholders, so the window leaves it out. (It is why the title
+# also ships `classes.debug.simulation.battles.coromon1`.)
+UNUSED_UIDS = ("NORMAL_SPINNER",)
 
 SPRITE_RE = __import__("re").compile(r"^[A-Z0-9][A-Za-z0-9_]*\.png$")
 
@@ -53,7 +102,7 @@ FRAME = 32          # the idle strips are 780x32: twenty-four 32 px frames
 
 # WHERE THE CUT ICONS LIVE, and why this is not a cache for its own sake: it IS the extraction.
 # Tk takes 2200 ms to read the 768x744 atlas, and 0.18 ms to read one of the 24 px icons cut from
-# it - 118 icons come to 0.02 s. Cutting them once is the difference between a list that appears and
+# it - 117 icons come to 0.02 s. Cutting them once is the difference between a list that appears and
 # one that takes minutes. One folder per atlas, named after the atlas's own size and mtime, so a
 # game update lands in a new folder and nothing has to decide when to invalidate anything.
 ICON_ROOT = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
@@ -112,25 +161,145 @@ class Species:
 def monsters(include_unused=False):
     """Every Coromon, in dex order: numbered first, then the ones with no dex number.
 
-    TWO GROUPS IN THIS FILE ARE NOT THE DEX, and both are easy to list by accident:
+    TWO GROUPS IN THIS FILE ARE NOT THE GAME, and both are easy to list by accident:
       * twenty-one entries numbered 900+, with #900 shared by THREE of them. They are unused slots
         left in the data - no icon, no encounters, duplicate numbers - so they are skipped unless
         asked for, because listing them makes the dex look like it has 139 entries when it has 110.
-      * eight entries with no `number` at all: the titans, plus Fusebox and Xena. They are real
-        Coromon with no dex number, so they are kept and sorted to the end rather than dropped.
+      * `NORMAL_SPINNER` ("Xena"), the one unnumbered entry the game does not have at all - see
+        `UNUSED_UIDS` - which leaves the six titans and Fusebox as the entries with no dex number.
+        They ARE in the game, so they are kept, and they get their order from the game's own dex
+        screen: see `unnumbered_order()`, the one place that order is written down.
     """
     raw = json.load(open(MONSTERS, encoding="utf-8"))
     keep = [m for m in raw if include_unused or not _unused(m)]
     out = [Species(m) for m in keep]
-    out.sort(key=lambda s: (s.number is None, s.number or 0, s.name or ""))
+    rank = _ranks()
+    out.sort(key=lambda s: (s.number is None, s.number or 0, rank.get(s.uid, len(rank)),
+                            s.name or ""))
     return out
 
 
 def _unused(raw):
-    """True for the 900+ placeholder slots. The number is the marker; nothing else distinguishes
-    them, and three of them share #900, which no real dex entry does."""
+    """True for data that ships with the game but is not IN it: the 900+ placeholder slots and
+    `UNUSED_UIDS`. For the placeholders the number is the marker, and nothing else distinguishes
+    them - three of them even share #900, which no real dex entry does."""
     number = raw.get("number")
-    return isinstance(number, int) and number >= 900
+    if isinstance(number, int) and number >= 900:
+        return True
+    return raw.get("UID") in UNUSED_UIDS
+
+
+_UNNUMBERED = None
+
+
+def unnumbered_order():
+    """The order of the Coromon with NO dex number - the six titans and Fusebox - as UIDs.
+
+    THERE IS NO NUMBER TO SORT THEM BY, and nothing in their own data implies an order: they have
+    no `number`, their `id` is a random GUID, and the two lists that DO hold every monster
+    (`classes.lists.monsterDataList`, and `monsters.json` after it) are in ALPHABETICAL UID order,
+    which would put Voltgar third. So the order comes from the game's own database screen, which is
+    the one place that states it (`monsterDatabaseScreen`, lines 49-62):
+
+        local specialList = {"FUSEBOX", "TITAN_ELECTRIC", "TITAN_GHOST", "TITAN_SAND",
+                            "TITAN_FIRE", "TITAN_ICE", "TITAN_WATER"}          -- L49-57
+        local list = monsterDataUtility:getSortedMonsterDataListWithNumber()     -- L59
+        for i = 1, #specialList do                                              -- L60
+            if playerStats:hasSeenMonster(specialList[i]) then                  -- L61
+                list[#list + 1] = list[specialList[i]] end end                  -- L62
+
+    i.e. the numbered dex first, then those seven in that order - Fusebox, Voltgar, Illuginn, Sart,
+    Hozai, Vørst, Chalchiu - for any of them the player has met. `getSortedMonsterDataListWithNumber`
+    is the only other ordering the game has, and it is named for what it leaves out.
+
+    That list is also the proof that nothing else belongs here: it names every unnumbered Coromon
+    the game actually has, and the one it does not name is `NORMAL_SPINNER`, which is left out of
+    the dex rather than sorted into it (see `UNUSED_UIDS`). Anything unnamed would go after the
+    game's own list, in name order, so a patched game that adds one still lists it.
+    """
+    global _UNNUMBERED
+    if _UNNUMBERED is None:
+        raw = json.load(open(MONSTERS, encoding="utf-8"))
+        listed = [m.get("UID") for m in raw if not m.get("number") and not _unused(m)]
+        try:
+            order = _dex_screen_order()
+        except (OSError, ValueError, ImportError):
+            order = []                  # no extraction here: the copy below is the same list
+        order = [uid for uid in (order or UNNUMBERED_FALLBACK) if uid in listed]
+        names = {m.get("UID"): m.get("name") or m.get("UID") for m in raw}
+        order += sorted((uid for uid in listed if uid not in order), key=lambda uid: names[uid])
+        _UNNUMBERED = order
+    return _UNNUMBERED
+
+
+def _dex_screen_order():
+    """The seven UIDs above, read out of the game's own database screen, or [] when unreadable.
+
+    THE LIST IS A LUA TABLE LITERAL, which is why it is read rather than copied: a patched game
+    would move it, and the point of reading it is that the window's order is the game's. In the
+    bytecode a table literal is a run of `LOADK` constants - the same proto, consecutive constant
+    slots - so the list is the LONGEST run of string constants that name a Coromon we know. That
+    also skips an entry that merely resembles one: constants are matched against the UIDs in
+    `monsters.json`, so `OUTFIT_TITAN_WATER` cannot be mistaken for `TITAN_WATER`.
+
+    [] - never a partial list - when the module is missing: the caller has `UNNUMBERED_FALLBACK`.
+    """
+    import luadis                    # only this needs the disassembly tools
+
+    root, _meta = luadis.load(DEX_SCREEN_MODULE)
+    known = {m.get("UID") for m in json.load(open(MONSTERS, encoding="utf-8"))}
+    best, run = [], []
+    for _path, proto in luadis.walk(root):
+        for const in (proto.k or []):
+            if isinstance(const, str) and const in known:
+                run.append(const)
+                continue
+            if len(run) > len(best):
+                best = run
+            run = []
+        if len(run) > len(best):
+            best = run
+        run = []
+    return best if len(best) > 1 else []
+
+
+def _ranks():
+    """{UID: where it goes among the Coromon with no dex number}, for the sort keys above."""
+    return {uid: index for index, uid in enumerate(unnumbered_order())}
+
+
+def lines(include_unused=False):
+    """Every EVOLUTIONARY LINE, in dex order: [(family UID, [Species, ...]), ...].
+
+    THE GAME'S OWN ROWS. The database screen groups by family - it names
+    `currentMonsterFamilyUID`, and `getGridBoxIndexByData` places each entry in a row per line -
+    and `families.json`'s `evolutionObjects` IS that line: ordered by `atLevel`, the base form at
+    level 0, so reading them in that order gives the line left to right.
+
+    Measured on the shipped data: 59 families, every one of the 117 dex entries belongs to one, the
+    longest line is three stages, and the dex numbers inside a family are always consecutive - which
+    is why sorting the rows by the first stage's number is the same as dex order. Seven families
+    (twenty-one entries: ELECTRIC_SPIDER, FIRE_SHARK, GHOST_RAVEN, ICE_WOLF, NORMAL_DRAGON,
+    SAND_CHIPMUNK, WATER_MOSQUITO) are entirely inside the 900+ placeholder block, and one more
+    (NORMAL_SPINNER) is the entry the game does not have, so both groups drop out with the unused
+    entries and the rows come to 51.
+
+    A row with no number to sort by is placed by `unnumbered_order()` instead - that is the seven
+    one-Coromon rows at the end (Fusebox and the six titans), in the game's own order.
+    """
+    raw = json.load(open(FAMILIES, encoding="utf-8"))
+    by_uid = {mon.uid: mon for mon in monsters(include_unused)}
+    out = []
+    for family in raw:
+        stages = family.get("evolutionObjects") or []
+        stages = sorted(stages, key=lambda stage: stage.get("atLevel") or 0)
+        members = [by_uid[stage["UID"]] for stage in stages if stage.get("UID") in by_uid]
+        if members:
+            out.append((family.get("UID"), members))
+    rank = _ranks()
+    out.sort(key=lambda pair: (pair[1][0].number is None, pair[1][0].number or 0,
+                               rank.get(pair[1][0].uid, len(rank)), pair[0] or ""))
+    return out
 
 
 def strip_frame(uid, variant=VARIANT):
@@ -162,7 +331,21 @@ def strip_frame(uid, variant=VARIANT):
 _SHEETS = {}      # tk root -> {"atlas": image, "containers": {type: image}}
 
 
-def icon_layout(uid):
+def frame_offset(zoom=1):
+    """Where the type frame is drawn inside a 24 px icon, in pixels, at `zoom`.
+
+    WHOLE TEXELS, and that is the point: the frame's true centre is 3.5 texels - exactly half a
+    cell, because 17 and 24 differ by an odd number - which is a HALF TEXEL. Drawn at 3.5 texels
+    and scaled, the frame lands 17.5 px into a 5x icon: 2.5 px off the sprite's every-fifth-pixel
+    grid, so the two never line up and every edge of the frame sits between the sprite's pixels.
+    Rounding to 4 texels (20 px at 5x) puts both images on the SAME grid - every offset in a
+    composed icon is now a multiple of the zoom - at the cost of moving the frame half a texel
+    from its exact centre, which is the smallest error the parity allows.
+    """
+    return FRAME_TEXELS * zoom
+
+
+def icon_layout(uid, category=VARIANT, zoom=1):
     """How a dex icon is composed, as geometry rather than as pixels.
 
     Returns the atlas rect holding the avatar and where the 17 px type frame sits inside the
@@ -170,12 +353,23 @@ def icon_layout(uid):
     writes the extracted PNG set, and the Qt window, with QImage - and keeping the geometry in
     one place is what stops them disagreeing about what an icon is.
 
+    `category` IS WHICH PICTURE, not a tint: every Coromon has one atlas cell per potential
+    category - `<uid>_A`, `<uid>_B`, `<uid>_C`, measured four apart (Cubzero at 391/395/399) - and
+    that is how the game draws a Potent green and a Perfect gold. A species with no cell for the
+    category asked for (only the titans, which have no B or C) falls back to A, so the icon still
+    says WHICH Coromon it is even when the category has no artwork.
+
+    `zoom` is the scale the icon will be DRAWN at, because the frame's own offset is 3.5 texels -
+    exactly the centre of a 24 px cell - and that has to be rounded to whole pixels. At an even
+    zoom it comes out exact (7 at 2x); at an odd one it cannot (17.5 at 5x), and rounding keeps the
+    frame as close to centred as the parity allows rather than always low.
+
     None when the atlas order is unknown, which is the caller's cue to use the strip fallback.
     """
-    xy = avatar_cell(uid)
+    xy = avatar_cell(uid, category) or avatar_cell(uid, VARIANT)
     if xy is None:
         return None
-    return {"cell": (xy[0], xy[1], CELL, CELL), "frame_offset": (CELL - CONTAINER) // 2}
+    return {"cell": (xy[0], xy[1], CELL, CELL), "frame_offset": frame_offset(zoom)}
 
 
 def _sheets():
@@ -183,7 +377,7 @@ def _sheets():
 
     THIS IS THE DIFFERENCE BETWEEN A LIST THAT DRAWS AND ONE THAT FREEZES. The atlas is 768x744,
     and the first version of build_icon read and decoded that file again for every Coromon. Measured
-    on this machine: 1990 ms per decode, so drawing one 118-row list would have spent 235 SECONDS
+    on this machine: 1990 ms per decode, so drawing one 117-row list would have spent 235 SECONDS
     decoding artwork that never changes - which is indistinguishable from hanging. Cached here it is
     2.3 s for the whole list.
 
@@ -304,7 +498,12 @@ def primary_type(mon):
 
 
 def avatar_cell(uid, variant=VARIANT):
-    """(x, y) of that Coromon's avatar in the atlas, or None."""
+    """(x, y) of that Coromon's avatar in the atlas, or None.
+
+    `variant` is the potential category (`A` standard, `B` potent, `C` perfect) or a skin
+    (`gold`, `crimsonite`, ...) - they are all the same kind of entry in the sheet's own
+    definition, which is why one parameter covers both.
+    """
     try:
         frame = atlas_index().get("%s_%s" % (uid, variant))
     except (OSError, ValueError):
@@ -360,7 +559,7 @@ def ensure_icons(zoom=1):
     """{uid: path} of the cut icons, cutting out any that are missing first.
 
     THE FAST PATH, and the reason the window no longer waits on the atlas: reading one of these back
-    costs 0.2 ms, so a list of 118 icons comes to about 0.05 s - against 2200 ms to decode the
+    costs 0.2 ms, so a list of 117 icons comes to about 0.05 s - against 2200 ms to decode the
     768x744 atlas they are cut from, which is paid even once. Cutting costs a couple of seconds in
     total, so it happens on the first open and never again; the folder is named after the atlas's
     own size and mtime, so a game update lands in a new one with nothing to invalidate by hand.

@@ -1,9 +1,9 @@
 """Offscreen smoke test for the grind window.
 
-Checks that the data reaches the widgets: three tabs, a filled ranking, a map with a plan, the
-full dex with icons, the skill table and its description, sorting, filtering, the cross-tab
-jump, and the window's saved geometry. Runs on Qt's `offscreen` platform, so it needs no display
-and nothing running.
+Checks that the data reaches the widgets: the four tabs, a filled ranking, a map with a plan, the
+full dex with icons, the game's own database grid, the skill table and its description, sorting,
+filtering, the cross-tab jump, and the window's saved geometry. Runs on Qt's `offscreen` platform,
+so it needs no display and nothing running.
 
     python ui_smoke.py
 
@@ -22,14 +22,15 @@ if "--geometry" not in sys.argv:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PySide6.QtCore import QSettings                        # noqa: E402
+from PySide6.QtCore import QSettings, QSize, Qt                    # noqa: E402
 from PySide6.QtWidgets import QApplication                  # noqa: E402
 
 import encounters                                           # noqa: E402
 import skills                                               # noqa: E402
 
 import coromontools.state as state                          # noqa: E402
-from coromontools import MainWindow, icons                  # noqa: E402
+from coromontools import MainWindow, font, icons             # noqa: E402
+from coromontools import config                              # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 
 SMOKE_ORG, SMOKE_APP = "CoromonGrindSmoke", "smoke"
@@ -37,9 +38,20 @@ SMOKE_ORG, SMOKE_APP = "CoromonGrindSmoke", "smoke"
 FAILURES = []
 
 
+def console(text):
+    """`text` in the console's own encoding, so a Coromon's name cannot kill the run.
+
+    This console is cp1250, which has no "ø" in it - printing Vørst's name raised
+    UnicodeEncodeError from inside the harness, and the run died on the DIAGNOSIS rather than on
+    the check. Only the printout is replaced; the check itself still compares the real strings.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return str(text).encode(encoding, "replace").decode(encoding, "replace")
+
+
 def check(name, condition, detail=""):
-    print("%-4s %s%s" % ("ok" if condition else "FAIL", name,
-                         ("   [%s]" % detail) if detail else ""))
+    print("%-4s %s%s" % ("ok" if condition else "FAIL", console(name),
+                         ("   [%s]" % console(detail)) if detail else ""))
     if not condition:
         FAILURES.append(name)
 
@@ -71,7 +83,7 @@ def main():
     pump(app)
 
     # ---------------------------------------------------------------- window
-    check("three tabs", window.tabs.count() == 3, window.tabs.count())
+    check("four tabs", window.tabs.count() == 4, window.tabs.count())
     check("window titled", bool(window.windowTitle()), window.windowTitle())
     check("min size kept", window.minimumWidth() == 1040 and window.minimumHeight() == 560)
 
@@ -151,10 +163,34 @@ def main():
     check("dex filled on first open", coromon.list.count() == len(coromon.monsters),
           "%d of %d" % (coromon.list.count(), len(coromon.monsters)))
     with_icon = sum(1 for mon in coromon.monsters if icons.icon_image(mon) is not None)
-    check("most Coromon have an icon", with_icon > 100,
+    # EVERY ONE of them: the entry that used to be missing artwork was `NORMAL_SPINNER`, which the
+    # game does not have (`dex.UNUSED_UIDS`), so the count is now the whole list rather than one shy.
+    check("every Coromon has an icon", with_icon == len(coromon.monsters),
           "%d of %d" % (with_icon, len(coromon.monsters)))
-    check("first dex row is #1", coromon.list.item(0).text().startswith("#1 "),
-          coromon.list.item(0).text())
+    # The dex number is drawn with the GAME's font, read out of resource.car at runtime - so this
+    # is the check that the reading still works (see `coromontools/font.py`).
+    check("the game's number font reads", font.available())
+    # ... and that an icon still comes out at the size the tabs lay out for.
+    check("icon canvas is the cell plus the badge overhang",
+          icons.icon_pixmap(coromon.monsters[0], config.ICON_ZOOM).size() ==
+          QSize(*icons.icon_size(config.ICON_ZOOM)),
+          "%s" % (icons.icon_size(config.ICON_ZOOM),))
+    # The row label is the NAME only - the dex number is drawn inside the icon (the game's own
+    # font, see `icons.icon_pixmap`) - so the order is checked through the row's own data.
+    first = coromon.list.item(0)
+    check("first dex row is the #1 Coromon",
+          coromon.monsters[0].number == 1
+          and first.data(Qt.ItemDataRole.UserRole) == coromon.monsters[0].uid,
+          first.text())
+    # THE SEVEN WITH NO DEX NUMBER have no number to sort by, so their order is READ OUT of the
+    # game's own database screen (`dex.unnumbered_order`). This is the check that the reading still
+    # works, and it is written as the order itself rather than as a comparison with `dex`, so a
+    # change in either shows up here: Fusebox, then the six titans.
+    tail = [coromon.list.item(row).text()
+            for row in range(coromon.list.count() - 7, coromon.list.count())]
+    check("the numberless Coromon are in the game's order",
+          tail == ["Fusebox", "Voltgar", "Illuginn", "Sart", "Hozai", "Vørst", "Chalchiu"],
+          tail)
 
     buzzlet = next((mon for mon in coromon.monsters if mon.name == "Buzzlet"), None)
     check("Buzzlet is in the dex", buzzlet is not None)

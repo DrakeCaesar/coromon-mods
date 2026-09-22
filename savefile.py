@@ -40,6 +40,17 @@ by exact name first and then by prefix in either direction.
 
 Not everything in a save maps to an encounter area, so `unmatched()` reports the visits that
 no area claims - useful for spotting a mapping the matching rule missed.
+
+`monster_record()` READS THE DEX instead, out of the same decrypted save:
+
+    stats.MONSTERS_OWNED   {"GHOST_CAT_1": {"A": True, "B": True, "C": True}, ...}
+    stats.MONSTERS_SEEN    {"GHOST_CAT_1": {"A": True}, ...}
+
+a Coromon UID mapped to the potential categories you have it in - `A` standard, `B` potent,
+`C` perfect. That is exactly what the game's own database screen shows: three tabs, one per
+category, each entry caught (`MONSTERS_OWNED`), seen-but-not-caught (`MONSTERS_SEEN`) or
+unknown. The game's own accessors are `playerStats:hasOwnedMonster(uid, category)` and
+`hasSeenMonster`, and the database screen is `classes.interface.screens.monsterDatabaseScreen`.
 """
 
 import base64
@@ -136,6 +147,61 @@ def visited():
     if newest is None:
         raise ValueError("no save slot could be decoded - the keystream may be from another machine")
     return newest
+
+
+# The dex record, keyed by Coromon UID and then by potential category: A standard, B potent,
+# C perfect. Those three are the game's own database tabs, and the value is True for every
+# category you have that Coromon in.
+OWNED_KEY = "MONSTERS_OWNED"
+SEEN_KEY = "MONSTERS_SEEN"
+
+
+def _record_in(obj, name):
+    """One of those dicts from a decrypted save, wherever it is nested.
+
+    Found by NAME rather than by path, exactly like VISITED_MAPS: `stats.MONSTERS_OWNED` is where
+    it lives today, and the save's shape changes between data versions.
+    """
+    stack = [obj]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if str(key).upper() == name and isinstance(value, dict):
+                    return value
+                if isinstance(value, (dict, list)):
+                    stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(x for x in node if isinstance(x, (dict, list)))
+    return {}
+
+
+def monster_record():
+    """(slot name, owned, seen) for the most recent slot that records either.
+
+    Both are {coromon uid: {category: True}}; see the module docstring. Measured on a real save:
+    `MONSTERS_OWNED` held 53 UIDs and `MONSTERS_SEEN` 115 of the 117 dex entries (every owned one
+    of them also seen), which is the "seen / caught" the database screen counts for itself.
+    """
+    newest = None
+    for _, key, obj in _read_rows():
+        owned = _record_in(obj, OWNED_KEY)
+        seen = _record_in(obj, SEEN_KEY)
+        if owned or seen:
+            return key, owned, seen
+        if newest is None:
+            newest = (key, {}, {})
+    if newest is None:
+        raise ValueError("no save slot could be decoded - the keystream may be from another machine")
+    return newest
+
+
+def categories(uid, record):
+    """The categories a UID appears in, as a set - "A", "B", "C". Empty when it does not."""
+    entry = record.get(uid)
+    if not isinstance(entry, dict):
+        return set()
+    return {str(key).upper() for key, value in entry.items() if value}
 
 
 def areas(names, seen=None):

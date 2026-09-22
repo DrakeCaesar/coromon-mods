@@ -23,3 +23,4 @@ reload-probe.txt
 # generated: the encounter-zone map page, and the icon export folder
 encounter_zones.html
 icons/
+_install_out.txt

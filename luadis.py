@@ -84,7 +84,12 @@ class Proto:
 
 
 def load(path):
-    data = open(path, "rb").read()
+    with open(path, "rb") as f:
+        return load_data(f.read())
+
+
+def load_data(data):
+    """Parse a chunk that is already in memory (a module extracted from resource.car)."""
     assert data[:4] == b"\x1bLua", "not lua bytecode"
     fmt = data[4]  # version
     endian = data[6]

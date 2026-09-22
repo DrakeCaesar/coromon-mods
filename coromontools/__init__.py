@@ -13,6 +13,7 @@ Modules are split by responsibility:
 * ``mapview``    - the zone map, which patch of grass each zone is
 * ``grind``      - the "Where to grind" tab
 * ``coromon``    - the Coromon tab
+* ``database_tab`` - the Database tab: caught / seen / unknown, per potential category
 * ``skills_tab`` - the Skills tab
 
 Run it with the entry script beside this package (``encounters_gui.py``), or
@@ -35,12 +36,14 @@ if TOOLS_DIR not in sys.path:
 from PySide6.QtCore import Qt                                          # noqa: E402
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget     # noqa: E402
 
+import dex                                                             # noqa: E402
 import encounters                                                      # noqa: E402
 import skills                                                          # noqa: E402
 
 from . import state                                                    # noqa: E402
 from .config import ON_TOP_DEFAULT                                     # noqa: E402
 from .coromon import CoromonTab                                        # noqa: E402
+from .database_tab import DatabaseTab                                  # noqa: E402
 from .grind import GrindTab, rank, zone_rows                           # noqa: E402
 from .skills_tab import SkillsTab                                      # noqa: E402
 from .text import pretty                                               # noqa: E402
@@ -63,9 +66,11 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.grind = GrindTab(zones, prefs)
         self.coromon = CoromonTab()
+        self.database = DatabaseTab(prefs)
         self.skills = SkillsTab(skill_list, prefs)
         self.tabs.addTab(self.grind, "  Where to grind  ")
         self.tabs.addTab(self.coromon, "  Coromon  ")
+        self.tabs.addTab(self.database, "  Database  ")
         self.tabs.addTab(self.skills, "  Skills  ")
         self.setCentralWidget(self.tabs)
 
@@ -114,6 +119,19 @@ def selftest():
     print("zones:", len(all_zones), "species:", len(species))
     skill_list = skills.load()
     print("skills:", len(skill_list), "in", len(skills.types(skill_list)), "types")
+    species = dex.monsters()
+    print("dex entries:", len(species), "in", len(dex.lines()), "evolutionary lines")
+    # The Database tab's own numbers, without opening the tab: what the save records per category.
+    try:
+        import savefile
+        slot, owned, seen = savefile.monster_record()
+        for cat, label in (("A", "Standard"), ("B", "Potent"), ("C", "Perfect")):
+            caught = sum(1 for m in species if cat in savefile.categories(m.uid, owned))
+            met = sum(1 for m in species if cat in savefile.categories(m.uid, seen))
+            print("  %-9s caught %3d  seen %3d  of %d" % (label, caught, met, len(species)))
+        print("  dex record from", slot)
+    except Exception as exc:                    # noqa: BLE001 - a missing save is not a crash
+        print("  dex record unavailable: %s: %s" % (type(exc).__name__, exc))
     for skill in skills.shown(skill_list, "poison")[:2]:
         print("  ", "  ".join("%s=%s" % (key, value) for key, value in skills.row(skill).items()))
         print("    ", skills.resolve(skill.get("description"), skill))

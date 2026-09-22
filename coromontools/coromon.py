@@ -6,7 +6,7 @@ than reading the JSON as it comes.
 
 The list is built the first time the tab is opened rather than at startup, and unlike the Tk
 version there is no cost left to defer: icons are composed in memory by Qt (`icons.py`) instead
-of being cut into 118 files on disk, so the first open is one atlas decode.
+of being cut into 117 files on disk, so the first open is one atlas decode.
 """
 
 from PySide6.QtCore import QSize, Qt, Signal
@@ -64,7 +64,6 @@ class CoromonTab(QWidget):
         panel = QWidget()
         box = QVBoxLayout(panel)
         box.setContentsMargins(0, 0, 8, 0)
-
         top = QHBoxLayout()
         top.addWidget(QLabel("find"))
         self.search = QLineEdit()
@@ -75,7 +74,7 @@ class CoromonTab(QWidget):
         box.addLayout(top)
 
         self.list = QListWidget()
-        self.list.setIconSize(QSize(dex.CELL * ICON_ZOOM, dex.CELL * ICON_ZOOM))
+        # `icons.icon_size`, not `dex.CELL * ICON_ZOOM`: the composed icon carries the game's own\n        # entry plate and any badge overhang, so the cell it is drawn in is that much bigger.\n        width, height = icons.icon_size(ICON_ZOOM)\n        self.list.setIconSize(QSize(width, height))
         self.list.currentItemChanged.connect(lambda *_: self._show_locations())
         box.addWidget(self.list, 1)
         return panel
@@ -105,7 +104,10 @@ class CoromonTab(QWidget):
 
     def fill(self):
         for mon in self.monsters:
-            label = "#%s  %s" % (mon.number if mon.number else "--", mon.name)
+            # THE NAME ONLY: the dex number is drawn INSIDE the icon (in the game's own font - see
+            # `icons.icon_pixmap`), so the row label no longer repeats it. A Coromon with no dex
+            # number (the titans) is now just its name, rather than a "#-- " prefix.
+            label = mon.name
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, mon.uid)
             pixmap = icons.icon_pixmap(mon, ICON_ZOOM)
@@ -124,12 +126,20 @@ class CoromonTab(QWidget):
             self._show_locations()
 
     def apply_filter(self):
-        """Hide rows that do not match, rather than rebuilding the list on each keystroke."""
+        """Hide rows that do not match, rather than rebuilding the list on each keystroke.
+
+        The row label is the name only (the number is in the icon), so the dex NUMBER is matched
+        separately - typing "35" or "#35" still finds Buzzlet, and a bare "#" matches nothing.
+        """
         needle = self.search.text().strip().lower()
+        number = needle.lstrip("#")
         shown = 0
         for uid, item in self.rows.items():
+            mon = self.pick.get(uid)
             match = (not needle or needle in item.text().lower()
-                     or needle in (uid or "").lower())
+                     or needle in (uid or "").lower()
+                     or (number and mon is not None and mon.number
+                         and number in str(mon.number)))
             item.setHidden(not match)
             shown += 1 if match else 0
         self.count_label.setText("%d of %d" % (shown, len(self.monsters)))
