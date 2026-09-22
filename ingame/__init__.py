@@ -40,6 +40,7 @@ from . import (
     sprint,
     squad,
     steptimer,
+    turn,
     zoom,
 )
 
@@ -56,6 +57,7 @@ FEATURES = [
     autoroll,
     zoom,
     sprint,
+    turn,
     reload,
     gold,
     dialog,
@@ -78,6 +80,7 @@ __all__ = [
     "sprint",
     "squad",
     "steptimer",
+    "turn",
     "zoom",
     "FEATURES",
 ]

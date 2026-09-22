@@ -193,6 +193,16 @@ key = ["leftJoystickButton"]
 # start in mode 2 (run by default) rather than the game's own mode 1
 start_running = false
 
+[turn]
+# hold a button together with a direction to face that way without taking a step
+enabled = true
+# which button does it. This is the game's own button name, not the pad's key name, so it follows
+# the controller mapping the game itself resolved. `BACK` IS the controller's B: the default pad
+# config binds it with `setButton('BACK', 'buttonB')`. The others are `USE` (A), `EXTRA_1` (X),
+# `EXTRA_2` (Y), `START` (menu), `LEFT_SHOULDER`, `RIGHT_SHOULDER`, and the four directions. In
+# the overworld BACK does nothing else, which is why it is the default
+button = "BACK"
+
 [reload]
 # press a button to put the save back, for the Potentiflator loop
 enabled = true
