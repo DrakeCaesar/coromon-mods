@@ -114,6 +114,23 @@ toast_seconds = 3
 # printed by `python overlays.py --status`
 store = "loadouts.txt"
 
+[area]
+# show the current area's name in the pause menu
+enabled = true
+# label font: outline_8 is the game's small font, outline_10_bold the larger one   (one of:
+# outline_8, outline_10_bold)
+font = "outline_8"
+# also show the part of the map's name that the game does not: the floor number or letter taken
+# from the map file, so `Frozen Cavern 1` rather than `Frozen Cavern` on all six floors. It is
+# only used when the map's file name starts with the map's own name, so a room named differently
+# inside a town is left as the plain name rather than invented
+show_sub_area = true
+# how far in from the right end of the pause menu's bottom bar the label sits, in content units -
+# negative moves it left
+offset_x = -12
+# how far off the bar's vertical centre the label sits, in content units
+offset_y = 0
+
 [steptimer]
 # show the Potentiflator / Traitformator step countdown
 enabled = true
