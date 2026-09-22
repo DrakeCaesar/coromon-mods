@@ -151,6 +151,27 @@ class DataTable(QTableView):
         self.model_.set_rows(sort_rows(rows, self._sort_key, self._sort_desc))
         self._select_first_or(keep_row)
 
+    def content_height(self):
+        """The height this table needs to draw every row it has, header and frame included.
+
+        A `QTableView`'s own `sizeHint` is not content aware - it is whatever the layout wants to
+        give it - and `sizeHintForRow` is not either: it reports the DELEGATE's 12 px hint, while the
+        view lays its rows out at the vertical header's `defaultSectionSize`, which is 20. So the
+        rows are counted at the size the view really uses (measured: `visualRect` steps 20 px a row).
+
+        The answer is never smaller than the widget's own `minimumSizeHint`, because Qt will not draw
+        a table shorter than a header, one row and its scrollbars - MEASURED at 62 px however few
+        rows there are, against the 27 px a rowless table asks for. A caller that wants to sit flush
+        under the last row needs the number Qt will actually honour, not the arithmetic one.
+
+        NO ROWS IS NOT ONE ROW: an empty table is its header and nothing under it, which is what lets
+        an empty location list leave the map the whole column.
+        """
+        rows = self.model_.rowCount()
+        asked = (self.horizontalHeader().height() + 2 * self.frameWidth()
+                 + rows * self.verticalHeader().sectionSize(0))
+        return max(asked, self.minimumSizeHint().height())
+
     def current_payload(self):
         index = self.currentIndex()
         if not index.isValid():

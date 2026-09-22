@@ -12,8 +12,8 @@ Modules are split by responsibility:
 * ``icons``      - dex icons, composed in memory with Qt
 * ``mapview``    - the zone map, which patch of grass each zone is
 * ``grind``      - the "Where to grind" tab
-* ``coromon``    - the Coromon tab
-* ``database_tab`` - the Database tab: caught / seen / unknown, per potential category
+* ``database_tab`` - the Database tab: the game's own grid, caught / seen / unknown per potential
+                   category, and where the picked Coromon can be caught
 * ``skills_tab`` - the Skills tab
 
 Run it with the entry script beside this package (``encounters_gui.py``), or
@@ -42,7 +42,6 @@ import skills                                                          # noqa: E
 
 from . import mapnames, state                                               # noqa: E402
 from .config import ON_TOP_DEFAULT                                     # noqa: E402
-from .coromon import CoromonTab                                        # noqa: E402
 from .database_tab import DatabaseTab                                  # noqa: E402
 from .grind import GrindTab, rank, zone_rows                           # noqa: E402
 from .skills_tab import SkillsTab                                      # noqa: E402
@@ -62,24 +61,27 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(MIN_WIDTH, MIN_HEIGHT)
 
+        # THREE TABS, and they are the three questions: where to grind, what the save records (with
+        # where each Coromon can be caught), and what the skills do. The Coromon tab USED to sit
+        # between the first two with a flat list of every Coromon and its locations - the user:
+        # "get rid of the coromon tab, since the database tab superseeds it". It was a second view
+        # of the same data: the Database grid holds every dex entry, its crimsonite forms included,
+        # and clicking a cell lists that Coromon's locations (see `database_tab.py`), so the list
+        # was a copy - and the copy that could not show what the save records.
         self.tabs = QTabWidget()
         self.grind = GrindTab(zones, prefs)
-        self.coromon = CoromonTab()
         self.database = DatabaseTab(prefs)
         self.skills = SkillsTab(skill_list, prefs)
         self.tabs.addTab(self.grind, "  Where to grind  ")
-        self.tabs.addTab(self.coromon, "  Coromon  ")
         self.tabs.addTab(self.database, "  Database  ")
         self.tabs.addTab(self.skills, "  Skills  ")
         self.setCentralWidget(self.tabs)
 
         self.grind.onTopToggled.connect(self.set_on_top)
-        self.coromon.zoneChosen.connect(self.show_zone_on_map)
+        # ONE TAB PICKS A WILD LOCATION NOW, and it is the Database tab's location list: the ranking
+        # it can hand a zone to is the first tab, so the gesture crosses tabs and the window is the
+        # one that owns the switch (see `show_zone_on_map`).
         self.database.zoneChosen.connect(self.show_zone_on_map)
-        # ONE ICON SCALE FOR THE WINDOW: the Database tab's -/+ buttons change it, the Coromon tab's
-        # list follows, and both start from the saved value (see `DatabaseTab.set_zoom`).
-        self.coromon.set_zoom(self.database.zoom)
-        self.database.zoomChanged.connect(self.coromon.set_zoom)
         self.tabs.currentChanged.connect(self._tab_changed)
 
         saved = prefs.get("tab")
@@ -105,8 +107,9 @@ class MainWindow(QMainWindow):
     def show_zone_on_map(self, zone):
         """Show a location picked in another tab: the first tab, with that zone selected.
 
-        Both tabs that list wild locations emit this - the Coromon tab's list and the Database tab's
-        footer - so one handler serves both and they cannot drift apart.
+        The Database tab's location list emits this - it is the only place a wild location is picked
+        now that the Coromon tab is gone - and the ranking it is being handed to lives in the first
+        tab, so this is the window's own switch rather than anything a tab can do to its sibling.
         """
         self.tabs.setCurrentIndex(0)
         self.grind.show_zone_from_elsewhere(zone)

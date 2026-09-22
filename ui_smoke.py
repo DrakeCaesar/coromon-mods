@@ -1,7 +1,7 @@
 """Offscreen smoke test for the grind window.
 
-Checks that the data reaches the widgets: the four tabs, a filled ranking, a map with a plan, the
-full dex with icons, the game's own database grid, the skill table and its description, sorting,
+Checks that the data reaches the widgets: the three tabs, a filled ranking, a map with a plan, the
+game's own database grid and the dex icons in it, the skill table and its description, sorting,
 filtering, the cross-tab jump, and the window's saved geometry. Runs on Qt's `offscreen` platform,
 so it needs no display and nothing running.
 
@@ -36,7 +36,7 @@ import savefile                                             # noqa: E402
 import coromontools.state as state                          # noqa: E402
 from coromontools import MainWindow, font, icons             # noqa: E402
 from coromontools import config                              # noqa: E402
-from coromontools.database_tab import SKIN_COLUMN            # noqa: E402
+from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 
 SMOKE_ORG, SMOKE_APP = "CoromonGrindSmoke", "smoke"
@@ -89,7 +89,11 @@ def main():
     pump(app)
 
     # ---------------------------------------------------------------- window
-    check("four tabs", window.tabs.count() == 4, window.tabs.count())
+    # THE COROMON TAB IS GONE - the Database tab supersedes it (see `coromontools/__init__.py`), so
+    # the tabs are the three questions there are, in that order.
+    titles = [window.tabs.tabText(index).strip() for index in range(window.tabs.count())]
+    check("three tabs, in that order",
+          titles == ["Where to grind", "Database", "Skills"], titles)
     check("window titled", bool(window.windowTitle()), window.windowTitle())
     check("min size kept", window.minimumWidth() == 1040 and window.minimumHeight() == 560)
 
@@ -202,96 +206,142 @@ def main():
         grind.min_share.setValue(keep_share)
         pump(app)
 
-    # ---------------------------------------------------------------- coromon tab
+    # ---------------------------------------------------------------- database tab
+    # THE GRID IS THE ONLY DEX VIEW NOW. The Coromon tab used to list every Coromon beside its
+    # locations; the user: "get rid of the coromon tab, since the database tab superseeds it". The
+    # grid already holds every dex entry and clicking a cell lists that Coromon's locations in the
+    # right column, so what that tab's checks were checking is checked here, on the grid.
+    # The tab reads the save when it is first SHOWN and never on its own again, so the Reload button
+    # is the only way a save made while the window is open gets in - both paths, then.
     window.tabs.setCurrentIndex(1)
     pump(app, 5)
-    coromon = window.coromon
-    check("dex filled on first open", coromon.list.count() == len(coromon.monsters),
-          "%d of %d" % (coromon.list.count(), len(coromon.monsters)))
-    with_icon = sum(1 for mon in coromon.monsters if icons.icon_image(mon) is not None)
+    database = window.database
+
+    # THE LAYOUT: two columns with a slider between them, and the right column split again into the
+    # locations OVER the map - the user's own instruction, and the reason the grid gets its full
+    # height back ("no footer needed").
+    check("there is no footer any more", not hasattr(database, "footer"))
+    check("the grid and the right column are the two children of one slider",
+          database.split.orientation() == Qt.Orientation.Horizontal
+          and database.split.count() == 2
+          and database.split.widget(0) is database.scroll
+          and database.split.widget(1) is database.head.parentWidget(),
+          "%d child(ren)" % database.split.count())
+    check("neither column can be dragged shut", not database.split.childrenCollapsible())
+    check("the right column is the location list OVER the map",
+          database.right_split.orientation() == Qt.Orientation.Vertical
+          and database.right_split.count() == 2
+          and database.right_split.widget(0) is database.locations
+          and database.right_split.widget(1).isAncestorOf(database.map),
+          "%d child(ren)" % database.right_split.count())
+    # AND THE MAP IS DIRECTLY UNDER THE LIST'S LAST ROW, not half the column: the list gets its own
+    # content height back and the map takes the rest - the user: "the map section should be directly
+    # below the last line in the list, so we can fit a taller map if needed".
+    database.select(database.lines[0][1][0])
+    pump(app, 3)
+    sizes = database.right_split.sizes()
+    check("the list is only as tall as its own rows",
+          abs(sizes[0] - database.locations.content_height()) <= 2,
+          "list %d px, %d row(s) want %d"
+          % (sizes[0], database.locations.model_.rowCount(),
+             database.locations.content_height()))
+    check("the map takes the rest of the column", sizes[1] > sizes[0] * 2,
+          "list %d, map %d" % tuple(sizes))
+
+    # ... AND THE GRID IS THE WHOLE DEX: one cell per entry per category, plus one per crimsonite
+    # form (which has no dex entry of its own - see `dex.crimsonite_forms`).
+    entries = sum(len(line) for _family, line in database.lines)
+    check("the grid holds every dex entry in every category, and each form once",
+          len(database.cells) == entries * len(CATEGORIES) + len(dex.crimsonite_forms()),
+          "%d cell(s) = %d entries x %d categories + %d form(s)"
+          % (len(database.cells), entries, len(CATEGORIES), len(dex.crimsonite_forms())))
+    with_icon = sum(1 for mon in dex.monsters(with_crimsonite=True)
+                    if icons.icon_image(mon) is not None)
     # EVERY ONE of them: the entry that used to be missing artwork was `NORMAL_SPINNER`, which the
     # game does not have (`dex.UNUSED_UIDS`), so the count is now the whole list rather than one shy.
-    check("every Coromon has an icon", with_icon == len(coromon.monsters),
-          "%d of %d" % (with_icon, len(coromon.monsters)))
+    check("every Coromon has an icon", with_icon == len(dex.monsters(with_crimsonite=True)),
+          "%d of %d" % (with_icon, len(dex.monsters(with_crimsonite=True))))
     # The dex number is drawn with the GAME's font, read out of resource.car at runtime - so this
     # is the check that the reading still works (see `coromontools/font.py`).
     check("the game's number font reads", font.available())
-    # ... and that an icon still comes out at the size the tabs lay out for - the cell, the side the
+    # ... and that an icon still comes out at the size the grid lays out for - the cell, the side the
     # sprite overhangs and the badge, which is what `icon_size` adds up.
-    check("icon canvas is the cell plus the overhangs the tabs size for",
-          icons.icon_pixmap(coromon.monsters[0], config.ICON_ZOOM).size() ==
+    check("icon canvas is the cell plus the overhangs the grid sizes for",
+          icons.icon_pixmap(dex.monsters()[0], config.ICON_ZOOM).size() ==
           QSize(*icons.icon_size(config.ICON_ZOOM)),
           "%s" % (icons.icon_size(config.ICON_ZOOM),))
-    # The row label is the NAME only - the dex number is drawn inside the icon (the game's own
-    # font, see `icons.icon_pixmap`) - so the order is checked through the row's own data.
-    first = coromon.list.item(0)
-    check("first dex row is the #1 Coromon",
-          coromon.monsters[0].number == 1
-          and first.data(Qt.ItemDataRole.UserRole) == coromon.monsters[0].uid,
-          first.text())
+    # THE CAPTIONS CARRY THE NAME ONLY - the dex number is drawn INSIDE the icon, in the game's own
+    # font and the entry's state colour (see `icons.icon_pixmap`) - so a caption repeating it is
+    # checked against here rather than trusted to stay gone.
+    numbered = [caption.text() for _pic, caption in database.cells.values()
+                if "#" in caption.text()]
+    check("no caption repeats the number the icon draws", not numbered, numbered)
+    check("the first row starts at the #1 Coromon",
+          database.lines[0][1][0].number == 1,
+          "%s (#%s)" % (database.lines[0][1][0].name, database.lines[0][1][0].number))
     # THE SEVEN WITH NO DEX NUMBER have no number to sort by, so their order is READ OUT of the
-    # game's own database screen (`dex.unnumbered_order`). This is the check that the reading still
-    # works, and it is written as the order itself rather than as a comparison with `dex`, so a
-    # change in either shows up here: Fusebox, then the six titans.
-    tail = [coromon.list.item(row).text()
-            for row in range(coromon.list.count() - 7, coromon.list.count())]
-    check("the numberless Coromon are in the game's order",
+    # game's own database screen (`dex.unnumbered_order`) and they are the last rows of the grid.
+    # This is the check that the reading still works, and it is written as the order itself rather
+    # than as a comparison with `dex`, so a change in either shows up here: Fusebox, then the six
+    # titans.
+    tail = [database.lines[index][1][0].name
+            for index in range(len(database.lines) - 7, len(database.lines))]
+    check("the numberless Coromon are the last rows, in the game's order",
           tail == ["Fusebox", "Voltgar", "Illuginn", "Sart", "Hozai", "Vørst", "Chalchiu"],
           tail)
 
-    # CRIMSONITE FORMS ARE COROMON OF THEIR OWN: a row beside the species they are a form of, with
-    # the encounters their crimsonite slots spawn them in - which are NOT the ordinary form's places,
-    # because the encounter data says which slot is which (`encounters.Zone.crimsonite`).
-    plain = next((m for m in coromon.monsters
+    # CRIMSONITE FORMS ARE COROMON OF THEIR OWN, and the cell they have in the fourth group is where
+    # they are picked: clicking it has to list the places the FORM spawns - its own encounters, not
+    # the species' - because the encounter data says which slot is which
+    # (`encounters.Zone.crimsonite`).
+    plain = next((m for m in dex.monsters(with_crimsonite=True)
                   if m.uid == "ELECTRIC_FIREFLY_1" and not m.skin), None)
-    form = next((m for m in coromon.monsters
+    form = next((m for m in dex.monsters(with_crimsonite=True)
                  if m.uid == "ELECTRIC_FIREFLY_1" and m.skin), None)
-    check("a crimsonite form is its own Coromon in the list",
+    check("a crimsonite form is a Coromon of its own",
           plain is not None and form is not None and form.key != plain.key
           and form.name.startswith("Crimsonite "),
           "%s / %s" % (getattr(plain, "name", None), getattr(form, "name", None)))
     if form is not None and plain is not None:
-        coromon.list.setCurrentItem(coromon.rows[form.key])
-        pump(app)
-        rows = coromon.locations.model_.rows
-        check("... with its own encounters, not the ordinary form's",
-              bool(rows) and all(row["zone"].startswith("WATER") for row in rows),
-              [row["zone"] for row in rows])
         form_icon = icons.icon_pixmap(form, config.ICON_ZOOM)
         plain_icon = icons.icon_pixmap(plain, config.ICON_ZOOM)
         check("... and its own crimsonite sprite",
               form_icon is not None and plain_icon is not None
               and form_icon.toImage() != plain_icon.toImage(), form.name)
+        form_cell = next((cell for key, cell in database.cells.items()
+                          if key[1] == SKIN_COLUMN
+                          and database.click_target[cell[0]].key == form.key), None)
+        check("... with a cell of its own in the crimsonite group", form_cell is not None)
+        if form_cell is not None:
+            QTest.mouseClick(form_cell[0], Qt.MouseButton.LeftButton)
+            pump(app, 2)
+            rows = database.locations.model_.rows
+            check("... that lists where the FORM spawns, not the species",
+                  bool(rows) and all(row["zone"].startswith("WATER") for row in rows),
+                  [row["zone"] for row in rows])
+            check("... and names the form in the heading",
+                  database.head.text().startswith("Crimsonite "), database.head.text())
 
-    buzzlet = next((mon for mon in coromon.monsters if mon.name == "Buzzlet"), None)
-    check("Buzzlet is in the dex", buzzlet is not None)
-    if buzzlet is not None:
-        coromon.list.setCurrentItem(coromon.rows[buzzlet.key])
+    # THE FIND BOX HIDES WHOLE LINES, because a row is the unit here: a species that matches shows
+    # the LINE it is on and nothing else, so Buzzlet's row is three stages wide and comes up in all
+    # three category groups. The dex NUMBER still matches even though no caption shows it any more,
+    # because "35" or "#35" pasted out of a wiki is how a Coromon is usually looked up.
+    line = next((stages for _family, stages in database.lines if stages[0].name == "Buzzlet"), [])
+    names = sorted(stage.name for stage in line * len(CATEGORIES))
+    database.search.setText("zzz-nothing")
+    pump(app)
+    shown = [caption.text() for _pic, caption in database.cells.values()
+             if caption.parentWidget().isVisible()]
+    check("a find that matches nothing hides every line", not shown, shown)
+    for needle in ("buzzlet", "35"):
+        database.search.setText(needle)
         pump(app)
-        check("Buzzlet has locations", coromon.locations.model_.rowCount() > 0,
-              coromon.locations.model_.rowCount())
-        check("locations header names it", "Buzzlet" in coromon.head.text(), coromon.head.text())
-        zone = coromon.locations.current_payload()
-        check("a location carries its zone", zone is not None)
-        coromon.zoneChosen.emit(zone)
-        pump(app, 3)
-        check("jump switched to the grind tab", window.tabs.currentIndex() == 0)
-        check("jump drew that zone", grind.map.zone is zone,
-              "%s vs %s" % (getattr(grind.map.zone, "name", None), zone.name))
-
-    coromon.search.setText("zzz-nothing")
-    pump(app)
-    check("dex filter matches nothing", coromon.count_label.text().startswith("0 of"),
-          coromon.count_label.text())
-    coromon.search.setText("")
+        shown = sorted(caption.text() for _pic, caption in database.cells.values()
+                       if caption.parentWidget().isVisible())
+        check("the line for %r is the only one shown" % needle, shown == names, shown)
+    database.search.setText("")
     pump(app)
 
-    # ---------------------------------------------------------------- database tab
-    # The tab reads the save when it is first SHOWN and never on its own again, so the Reload
-    # button is the only way a save made while the window is open gets in - both paths, then.
-    window.tabs.setCurrentIndex(2)
-    pump(app, 5)
-    database = window.database
     if database.error is None:
         # WHICH slot is stated rather than implied: it is the newest that records a dex and the
         # autosave is a slot like any other, so "newest of 2" plus the timestamp IS the answer.
@@ -304,8 +354,8 @@ def main():
               report)
     else:
         print("note database tab could not read the save: %s" % database.error)
-    check("the footer says nothing about the save", "save:" not in database.footer.text(),
-          database.footer.text()[:60])
+    check("the heading says nothing about the save", "save:" not in database.head.text(),
+          database.head.text()[:60])
     # ONE COMPACT LINE: the search field is capped rather than stretching, and the save report sits
     # on the same line as the button that re-reads the file, immediately to its left. A wrapped row
     # would show up here as a label taller than the button.
@@ -322,15 +372,15 @@ def main():
           (database.counts.toolTip() or database.counts.text()).count(" \u00b7 ") == 2,
           database.counts.toolTip() or database.counts.text())
 
-    # THE FOOTER LISTS WHERE A COROMON CAN BE CAPTURED, and potential is not a factor: the three
+    # THE LIST LISTS WHERE A COROMON CAN BE CAPTURED, and potential is not a factor: the three
     # category columns are three pictures of ONE species, so a click in any of them must list the
-    # same places - the same areas, zones, levels and shares the Coromon tab's table shows.
+    # same places - the same areas, zones, levels and shares.
     buzz = [key for key, (_pic, caption) in database.cells.items() if caption.text() == "Buzzlet"]
     answers = []
     for key in buzz:
         QTest.mouseClick(database.cells[key][0], Qt.MouseButton.LeftButton)
         pump(app, 2)
-        answers.append((database.footer.text(),
+        answers.append((database.head.text(),
                         tuple((row["area"], row["zone"], row["levels"], row["share"])
                               for row in database.locations.model_.rows)))
     check("Buzzlet has a cell in each category column", len(buzz) == 3, len(buzz))
@@ -343,23 +393,23 @@ def main():
           and ("Woodlow Harbor", "HARBOR_A", "L7-12", "44.4%") in answers[0][1],
           "%s -> %s" % (answers[0][0], answers[0][1][:2]))
 
-    # THE MAP IS IN THE FOOTER, beside the list: picking a row draws that area there, without
-    # leaving the tab - which is what "the map in the right half of the footer" means.
+    # THE MAP IS UNDER THE LIST: picking a row draws that area there, without leaving the tab - and
+    # that is what the slider between the two halves is for.
     database.locations.selectRow(1)
     pump(app, 3)
     picked = database.locations.current_payload()
-    check("picking a row draws that area in the footer's map",
+    check("picking a row draws that area on the map below",
           picked is not None and database.map.zone is picked
           and not database.map_head.isVisible(),
           "%s | %r" % (getattr(picked, "name", None), database.map_head.text()))
     # ... and a DOUBLE click is the step beyond it: hand that area to the first tab, which is where
-    # the grinder can use it (the Coromon tab's own gesture, through the same signal and handler).
+    # the grinder can use it (the tab's own gesture, through the signal the window handles).
     database._jump()
     pump(app, 3)
     check("a double-clicked location opens on the first tab's map",
           window.tabs.currentIndex() == 0 and grind.map.zone is picked,
           "%s vs %s" % (getattr(grind.map.zone, "name", None), getattr(picked, "name", None)))
-    window.tabs.setCurrentIndex(2)
+    window.tabs.setCurrentIndex(1)
     pump(app, 3)
 
     # THE CRIMSONITE SECTION - a fourth column group after Perfect, the user's own suggestion: the
@@ -411,9 +461,9 @@ def main():
         QTest.mouseClick(met[0], Qt.MouseButton.LeftButton)
         pump(app, 2)
         rows = database.locations.model_.rows
-        check("a crimsonite cell lists its own locations in the footer",
-              bool(rows) and database.footer.text().startswith("Crimsonite "),
-              "%s -> %s" % (database.footer.text(), [row["zone"] for row in rows]))
+        check("a crimsonite cell lists its own locations in the list",
+              bool(rows) and database.head.text().startswith("Crimsonite "),
+              "%s -> %s" % (database.head.text(), [row["zone"] for row in rows]))
     else:
         print("note the save has all or none of the crimsonite skins unlocked, so the two "
               "drawings could not be contrasted")
@@ -422,17 +472,20 @@ def main():
     # position, and one scale for the whole window), and it resizes the grid it is pressed on.
     start = database.zoom
     size = database.cells[(0, 0, 0)][0].size()
+    column = database.grid.columnMinimumWidth(0)
     database.zoom_in.click()
     pump(app, 5)
-    check("+ makes every icon bigger, on both tabs, and remembers it",
-          database.zoom == start + 1 and coromon.zoom == database.zoom
+    check("+ makes every icon bigger - and its column with it - and remembers it",
+          database.zoom == start + 1
           and database.cells[(0, 0, 0)][0].size() != size
+          and database.grid.columnMinimumWidth(0) != column
           and prefs.get(config.ICON_ZOOM_KEY) == database.zoom,
-          "zoom %d -> %d, cell %s -> %s" % (start, database.zoom, size,
-                                            database.cells[(0, 0, 0)][0].size()))
+          "zoom %d -> %d, cell %s -> %s, column %s -> %s"
+          % (start, database.zoom, size, database.cells[(0, 0, 0)][0].size(), column,
+             database.grid.columnMinimumWidth(0)))
     database.zoom_out.click()
     pump(app, 5)
-    check("- puts it back", database.zoom == start and coromon.zoom == start,
+    check("- puts it back", database.zoom == start and database.grid.columnMinimumWidth(0) == column,
           "%d, cell %s" % (database.zoom, database.cells[(0, 0, 0)][0].size()))
     for _ in range(config.ICON_ZOOM_MIN + config.ICON_ZOOM_MAX):
         database.zoom_out.click()

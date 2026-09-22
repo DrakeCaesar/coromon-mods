@@ -53,10 +53,24 @@ the save again and refills the same cells (`reload_save`), which is the whole up
 THE SAVE IS READ WHEN THE TAB IS FIRST SHOWN, not when the window is built, and again only when
 the button is pressed - so a save made while the window is open is picked up by pressing it.
 WHERE THE SAVE CAME FROM is reported on the top row, immediately LEFT of the button that re-reads
-it, and the FOOTER is for the picked Coromon: `select` puts its wild locations there as the same
-sortable list the Coromon tab shows, and picking a row (a DOUBLE click, as in that tab) shows the
-area on the map. Potential is not a factor in that - the three category columns are three copies of
-one species, and it can only be captured where it can be captured.
+it.
+THE LAYOUT IS TWO COLUMNS AND TWO SLIDERS, and there is no footer any more. The grid is the left
+column; the right column is the picked Coromon's LOCATIONS over the MAP that draws the one selected
+- the user: "instead of horizontal split with footer, there are 2 columns, the left one has the
+coromon and the right one has the spawn list in the top and the map in the bottom, put a sliding
+separator between the two sections, no footer needed". The footer was a fixed 300 px of the grid's
+height for an answer that reads better beside the grid it was asked from, and the two halves of the
+right column want very different room on different days - a species with fourteen locations, an
+area with a big map - which is exactly what the slider between them is for.
+THE LIST IS SIZED TO ITS OWN ROWS and the map takes everything below the last of them (`_fit_list`)
+- the user again: "the map section should be directly below the last line in the list, so we can fit
+a taller map if needed". A `QSplitter` with equal stretch factors would put the boundary in the
+middle of the column and leave a hole under a two-row list, so the stretch is on the MAP: a resized
+window grows the map rather than moving a boundary that was dragged by hand.
+`select` fills that list with the picked Coromon's wild locations, the list's own selection draws
+its area on the map below, and a DOUBLE CLICK hands the area to the first tab's ranking.
+POTENTIAL IS NOT A FACTOR in any of it: the three category columns are three pictures of ONE
+species, and it can only be captured where it can be captured.
 THE TOP ROW IS ALWAYS ONE LINE. Nothing on it wraps: what does not fit is ELIDED (see
 `_elide_labels`), because a wrapped row is two lines and a clipped row loses letters mid-word.
 """
@@ -66,7 +80,7 @@ import time
 import dex
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget)
 
 from . import icons, mapnames
 from .config import (ICON_ZOOM, ICON_ZOOM_KEY, ICON_ZOOM_MAX, ICON_ZOOM_MIN, STATE_CAUGHT,
@@ -101,25 +115,25 @@ SKIN_TIP = ("the Coromon the game spawns in its crimsonite form - a separate Cor
 # are - small on purpose: they sit in the corner of a row that is already tight (see `_elide_labels`).
 ZOOM_BUTTON_WIDTH = 22
 
-# What the footer's own heading says before anything has been picked.
+# What the right column's heading says before anything has been picked: the FIRST of the two steps
+# there are (the map has its own line for the second one, see `MAP_EMPTY`).
 HINT = "Click a Coromon, then one of its locations, to see the area on the map."
 
-# AND HERE IS THAT MAP: the first tab's own widget (`ZoneMap`), in the right half of the footer.
-# Its own choice of words for having nothing to draw - the first tab's default would tell this tab
-# to go and look at the first tab.
+# AND HERE IS THAT MAP: the first tab's own widget (`ZoneMap`). Its own choice of words for having
+# nothing to draw - the first tab's default would tell this tab to go and look at the first tab.
 MAP_EMPTY = "pick one of its locations"
 
-# HOW TALL THE FOOTER'S MAP IS, in pixels - THE KNOB FOR "A BIGGER MAP". `ZoneMap` picks the scale
-# that fits the room it is given (`min(width / map_tiles_w, height / map_tiles_h)`, never below 1:1
-# and never above `config.MAP_MAX_SCALE`), so for anything but a very wide map the HEIGHT it gets is
-# exactly how big the map comes out. Its own floor is 180; the user: "make the footer taller so we
-# can fit a bigger map". The location list beside it grows with it, which is how the 14-location
-# Coromon fit without scrolling.
-FOOTER_MAP_HEIGHT = 300
+# HOW THE TWO COLUMNS OPEN, in pixels. The WIDTHS are the real choice: the grid needs
+# `GROUPS * (stages + 1)` columns - 1955 px at the default icon scale - and the panel needs about
+# 500 to show the location list's four columns without scrolling itself. The right column's opening
+# HEIGHTS are only what the first layout pass gets: the list is then given exactly its own content
+# height by `_fit_list`, so the map takes everything below the last row it has.
+GRID_WIDTH, PANEL_WIDTH = 900, 500
+LIST_OPENING, MAP_OPENING = 60, 400
 
-# THE LOCATION LIST IS THE COROMON TAB'S, columns and all: it is the same question ("where can I
-# catch this one?"), asked from the grid instead of from the list, so it gets the same answers in
-# the same shape - and a row carries its Zone (`PAYLOAD`) so picking one can show it on the map.
+# THE LOCATION LIST'S COLUMNS: where can I catch this one, as the area, the zone's own name, the
+# level range and the encounter share. A row carries its Zone (`PAYLOAD`), which is what lets the
+# selection draw that area on the map below and a double click hand it to the first tab.
 LOCATION_COLUMNS = (
     Column("area", "Area", 165, "w"),
     Column("zone", "Zone", 165, "w"),
@@ -180,8 +194,7 @@ def clamp_zoom(zoom):
 class DatabaseTab(QWidget):
     """The database: a row per evolutionary line, three category groups, and the wild skins."""
 
-    zoneChosen = Signal(object)      # a Zone the map should show - the Coromon tab's own signal
-    zoomChanged = Signal(int)        # the icon scale, for the other tab that draws dex icons
+    zoneChosen = Signal(object)      # a Zone the first tab's map should show
 
     def __init__(self, prefs, parent=None):
         super().__init__(parent)
@@ -203,6 +216,7 @@ class DatabaseTab(QWidget):
         self.click_target = {}           # a cell widget or one of its labels -> Species
         self.rules = {}                  # line index -> the rule drawn under it
         self._built = False
+        self._fitted = False            # the right column has been sized to the list's content
         self._build()
 
     # ------------------------------------------------------------------ layout
@@ -288,39 +302,67 @@ class DatabaseTab(QWidget):
         self.columns = GROUPS * self.stride
         self.grid.setColumnStretch(self.columns, 1)
         self.scroll.setWidget(self.holder)
-        outer.addWidget(self.scroll, 1)
 
-        # THE FOOTER IS THE LOCATION LIST ON THE LEFT AND THE MAP ON THE RIGHT, which is what the
-        # user meant by "show the map on the right with the area": the area is drawn HERE, in the
-        # footer, not by jumping to the first tab - so picking a row costs nothing and can be done
-        # for every row in turn. The footer's height is what the map needs (it will not go below
-        # 240x180); the list fills it, which comes to about nine of its rows.
-        # No prose down here any more - the user: "remove all that useless text in the footer".
-        self.footer = QLabel(HINT)
-        self.footer.setWordWrap(True)
-        outer.addWidget(self.footer)
+        # TWO COLUMNS, EACH WITH A SLIDER: the grid on the left, and on the right the locations of
+        # the picked Coromon ABOVE the map that draws the one selected. The area is drawn HERE, in
+        # this tab, rather than by jumping to the first tab - so picking a row costs nothing and can
+        # be done for every row in turn.
+        # The heading names what is in the list, and says what to do before anything is picked.
+        # THERE IS NO FOOTER ANY MORE (the user: "no footer needed"): it was a fixed 300 px of the
+        # grid's height for an answer that reads better beside the grid it was asked from.
+        self.head = QLabel(HINT)
+        self.head.setWordWrap(True)
 
         self.locations = DataTable(LOCATION_COLUMNS, sort_key="area")
         self.locations.selectionChangedTo.connect(self.show_location)
         self.locations.doubleClicked.connect(lambda *_: self._jump())
 
-        right = QVBoxLayout()
-        right.setContentsMargins(8, 0, 0, 0)
+        self.map = ZoneMap(empty=MAP_EMPTY)
+        # THE MAP'S OWN CAPTION, shown only when the map could NOT draw the zone, and the legend
+        # under it - both filled by `show_location`, which is also what empties them again.
         self.map_head = QLabel("")
         self.map_head.setWordWrap(True)
-        right.addWidget(self.map_head)
         self.legend_row = QWidget()
         self.legend_box = QHBoxLayout(self.legend_row)
         self.legend_box.setContentsMargins(0, 0, 0, 0)
-        right.addWidget(self.legend_row)
-        self.map = ZoneMap(empty=MAP_EMPTY)
-        self.map.setMinimumHeight(FOOTER_MAP_HEIGHT)
-        right.addWidget(self.map, 1)
 
-        footer = QHBoxLayout()
-        footer.addWidget(self.locations, 1)
-        footer.addLayout(right, 1)
-        outer.addLayout(footer)
+        below = QWidget()
+        stack = QVBoxLayout(below)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.addWidget(self.map_head)
+        stack.addWidget(self.legend_row)
+        stack.addWidget(self.map, 1)
+
+        # THE SLIDER BETWEEN THE LIST AND THE MAP, so the map can be as tall as the column allows:
+        # the list is given exactly the height of its own rows and the map takes everything below
+        # them (see `_fit_list`). THE STRETCH IS ON THE MAP ALONE, which is what keeps a resize from
+        # moving a boundary the user dragged - extra height grows the map, not the split. The map's
+        # own floor (240x180) is the one size the slider cannot go under.
+        self.right_split = QSplitter(Qt.Orientation.Vertical)
+        self.right_split.addWidget(self.locations)
+        self.right_split.addWidget(below)
+        self.right_split.setStretchFactor(0, 0)
+        self.right_split.setStretchFactor(1, 1)
+        self.right_split.setSizes([LIST_OPENING, MAP_OPENING])
+
+        panel = QWidget()
+        right = QVBoxLayout(panel)
+        right.setContentsMargins(8, 0, 0, 0)
+        right.addWidget(self.head)
+        right.addWidget(self.right_split, 1)
+
+        # AND THE SLIDER BETWEEN THE COLUMNS. Not collapsible: the grid IS the tab, and a column
+        # dragged to nothing would leave nothing to pick a Coromon with, which is what fills the
+        # other one.
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.split.setChildrenCollapsible(False)
+        self.split.addWidget(self.scroll)
+        self.split.addWidget(panel)
+        self.split.setStretchFactor(0, 3)
+        self.split.setStretchFactor(1, 2)
+        self.split.setSizes([GRID_WIDTH, PANEL_WIDTH])
+        outer.addWidget(self.split, 1)
+
         self.show_location(None)      # the empty map says what to do, from the start
 
         self._build_header()
@@ -359,9 +401,38 @@ class DatabaseTab(QWidget):
             label.setToolTip(text if shown != text else "")
 
     def resizeEvent(self, event):
-        """Re-fit the top row: the room its labels have changed, so what they say has to."""
+        """Re-fit the top row - and the right column's first fit, which needs a size to work with."""
         super().resizeEvent(event)
         self._elide_labels()
+        # ONCE. `_build` runs before the widget has a size to divide, so the content height cannot
+        # be turned into slider sizes there; after this one the sizes belong to the user, and the
+        # MAP's stretch factor is what a resize grows.
+        if not self._fitted:
+            self._fitted = self._fit_list()
+
+    def _fit_list(self):
+        """Give the location list exactly the room its own rows need, and the map ALL the rest.
+
+        THE RIGHT COLUMN IS NOT A HALF-AND-HALF SPLIT, which is what a `QSplitter` with equal
+        stretch factors gives - and the user asked for the point of it instead: "the map section
+        should be directly below the last line in the list, so we can fit a taller map if needed".
+        So the slider is put on the list's own content height (`DataTable.content_height`, header and
+        frame included) every time the CONTENT changes, and the map takes the remainder.
+
+        Called from `select` for that reason, and returns whether it could: before the widget is
+        laid out there is no column height to divide, so what `_build` set stands.
+        """
+        span = (self.right_split.height()
+                - self.right_split.handleWidth() * (self.right_split.count() - 1))
+        # THE MAP'S OWN FLOOR IS THE LIMIT on how much the list may take (240x180, see `ZoneMap`):
+        # a species with more locations than the column can show scrolls its own list instead of
+        # squeezing the map out of existence.
+        room = span - self.map.minimumHeight()
+        if room <= 0:
+            return False
+        want = max(1, min(self.locations.content_height(), room))
+        self.right_split.setSizes([want, max(1, span - want)])
+        return True
 
     def _apply_zoom(self):
         """Put the grid's COLUMNS and CELLS at `self.zoom`.
@@ -384,9 +455,7 @@ class DatabaseTab(QWidget):
         """Change the size of every dex icon, and REMEMBER it.
 
         The scale is part of the app's own state, like the window's position: it is a user decision
-        (`state.Prefs`, written on the spot), not a constant to re-edit and restart for. The other
-        tab that draws these icons is told through `zoomChanged`, because it composes its own - one
-        scale for the whole window is the point of the knob.
+        (`state.Prefs`, written on the spot), not a constant to re-edit and restart for.
         """
         zoom = clamp_zoom(zoom)
         if zoom == self.zoom:
@@ -395,7 +464,6 @@ class DatabaseTab(QWidget):
         self.prefs.set(ICON_ZOOM_KEY, zoom)
         self._apply_zoom()
         self.apply_states()        # the icons themselves, at the new size
-        self.zoomChanged.emit(zoom)
 
     def _build_header(self):
         """The column names, each over its own group of stage columns."""
@@ -534,27 +602,28 @@ class DatabaseTab(QWidget):
         self._elide_labels()
 
     def select(self, mon):
-        """List where that Coromon can be CAPTURED, in the footer.
+        """List where that Coromon can be CAPTURED, in the right column's list.
 
-        POTENTIAL IS NOT A FACTOR, which is the point of the footer being the whole story: the three
-        category columns are three pictures of ONE species, and a species' wild locations do not
-        depend on the category you happened to catch it in. So the same Coromon lists the same
-        places whichever of its three cells was clicked.
+        POTENTIAL IS NOT A FACTOR, which is what makes that list the whole story: the three category
+        columns are three pictures of ONE species, and a species' wild locations do not depend on the
+        category you happened to catch it in. So the same Coromon lists the same places whichever of
+        its three cells was clicked - and a crimsonite cell lists the places that spawn the FORM,
+        because `dex.where` is asked for `mon.uid, mon.skin` and the form is a Coromon of its own.
 
-        The list is the Coromon tab's (`dex.where`, most likely first, then sorted here by area) with
-        the same fields - area, the zone's own name, level range and encounter share - and each row
-        carries its Zone, so `show_location` can draw it and `_jump` can hand it to the first tab. A
-        species you cannot meet in the grass says so instead, and the list is emptied rather than
-        left showing the previous Coromon's - which also clears the map, because `set_rows` tells
-        the selection there is nothing to show.
+        The rows come from `dex.where` (most likely first, then sorted here by area) and each carries
+        its Zone, so `show_location` can draw it and `_jump` can hand it to the first tab. A species
+        you cannot meet in the grass says so instead, and the list is emptied rather than left
+        showing the previous Coromon's - which also clears the map, because `set_rows` tells the
+        selection there is nothing to show.
         """
         found = dex.where(mon.uid, mon.skin)
         if not found:
-            self.footer.setText("%s: no wild encounters - an evolution, a starter or a gift"
-                                % mon.name)
+            self.head.setText("%s: no wild encounters - an evolution, a starter or a gift"
+                              % mon.name)
             self.locations.set_rows([])
+            self._fit_list()
             return
-        self.footer.setText("%s   %d location(s)" % (mon.name, len(found)))
+        self.head.setText("%s   %d location(s)" % (mon.name, len(found)))
         self.locations.set_rows([{
             "area": mapnames.area(zone.map_file),
             "zone": zone.name,
@@ -562,9 +631,13 @@ class DatabaseTab(QWidget):
             "share": "%.1f%%" % share,
             PAYLOAD: zone,
         } for zone, low, high, share, _battles in found])
+        # THE LIST'S HEIGHT FOLLOWS ITS CONTENT, so the map is as tall as what is left - see
+        # `_fit_list`. After a row count change this re-fits even if the slider was dragged, because
+        # "directly below the last line" is the point of the column.
+        self._fit_list()
 
     def show_location(self, zone):
-        """Draw that location in the footer's map half - what PICKING A ROW does.
+        """Draw that location on the map below the list - what PICKING A ROW does.
 
         Selecting is enough here, unlike the first tab's map, because this map is right there: the
         selection moves, the picture follows, and nothing is lost by looking at every row in turn.
