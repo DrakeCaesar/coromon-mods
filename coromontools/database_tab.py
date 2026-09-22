@@ -56,7 +56,8 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEd
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from . import icons
-from .config import (ICON_ZOOM, STATE_CAUGHT, STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
+from .config import (ICON_ZOOM, ICON_ZOOM_KEY, ICON_ZOOM_MAX, ICON_ZOOM_MIN, STATE_CAUGHT,
+                     STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
 from .text import pretty
@@ -68,6 +69,10 @@ except ImportError:                                    # pragma: no cover - repo
 
 # The game's own categories, in the game's own order, with the names the game gives them.
 CATEGORIES = (("A", "Standard"), ("B", "Potent"), ("C", "Perfect"))
+
+# The preferences key the icon scale is kept under, and how wide the two buttons that change it
+# are - small on purpose: they sit in the corner of a row that is already tight (see `_elide_labels`).
+ZOOM_BUTTON_WIDTH = 22
 
 # What the footer's own heading says before anything has been picked.
 HINT = "Click a Coromon, then one of its locations, to see the area on the map."
@@ -133,10 +138,23 @@ def line_stages(lines):
     return max([len(stages) for _family, stages in lines] or [1])
 
 
+def clamp_zoom(zoom):
+    """`zoom` as a whole number inside `config.ICON_ZOOM_MIN`..`ICON_ZOOM_MAX`.
+
+    THE SAVED VALUE IS CLAMPED ON THE WAY IN, not trusted: an old settings file, or one edited by
+    hand, can hold a 0 or a 40, and a 0 would divide the whole grid's geometry by nothing.
+    """
+    try:
+        return max(ICON_ZOOM_MIN, min(ICON_ZOOM_MAX, int(zoom)))
+    except (TypeError, ValueError):
+        return ICON_ZOOM
+
+
 class DatabaseTab(QWidget):
     """The database: a row per evolutionary line, a column group per potential category."""
 
     zoneChosen = Signal(object)      # a Zone the map should show - the Coromon tab's own signal
+    zoomChanged = Signal(int)        # the icon scale, for the other tab that draws dex icons
 
     def __init__(self, prefs, parent=None):
         super().__init__(parent)
@@ -149,6 +167,7 @@ class DatabaseTab(QWidget):
         self.saved = None                # ... and its timestamp, as the game wrote it
         self.slots = 0                   # how many slots record a dex at all
         self.error = None
+        self.zoom = clamp_zoom(prefs.get(ICON_ZOOM_KEY, ICON_ZOOM))
         self._counts_text = ""           # the tally as it was composed, before any eliding
         self._report_text = ""           # ... and the save report, likewise
         self.top_row = None              # the find row, kept for `_elide_labels`
@@ -196,6 +215,29 @@ class DatabaseTab(QWidget):
         self.reload_button.setToolTip("read the save again - the newest slot that records a dex")
         self.reload_button.clicked.connect(self.reload_save)
         top.addWidget(self.reload_button)
+        # THE ICON SCALE, in the corner past the button: two small buttons and nothing else, because
+        # the number is visible in the icons themselves. The value is the app's own state, kept in
+        # the preferences like the window's position (see `set_zoom`), so it survives a restart.
+        # THE PLAIN CHARACTERS, on the user's word: a typographic minus (U+2212) centres better but
+        # is not the character anybody expects to see on a "minus" button.
+        self.zoom_out = QPushButton("-")
+        self.zoom_in = QPushButton("+")
+        for button, tip, delta in ((self.zoom_out, "smaller Coromon icons", -1),
+                                   (self.zoom_in, "bigger Coromon icons", 1)):
+            # AS TALL AS THE BUTTON BESIDE THEM, and only as wide as a "+" needs: zeroing the theme's
+            # padding (below) takes the height down to the glyph's own 14 px, so the height is taken
+            # from the Reload button's own hint rather than guessed.
+            button.setFixedSize(ZOOM_BUTTON_WIDTH, self.reload_button.sizeHint().height())
+            # THE THEME PADS A BUTTON 12 px A SIDE, which is wider than these two buttons are: Qt
+            # then has no content rect left and draws an EMPTY button - the user's screenshot shows
+            # two blank squares where the - and + should be (22 px wide against a 38 px size hint).
+            # Zeroing the padding is what lets a button this small carry a glyph at all; the rest of
+            # the theme's button style (fill, border, hover) still applies, because a widget's own
+            # stylesheet only outranks it for the properties it names.
+            button.setStyleSheet("padding: 0;")
+            button.setToolTip(tip)
+            button.clicked.connect(lambda *_, step=delta: self.set_zoom(self.zoom + step))
+            top.addWidget(button)
         self.top_row = top
         outer.addLayout(top)
 
@@ -216,11 +258,6 @@ class DatabaseTab(QWidget):
         self.gap = 1
         self.stride = self.stages + self.gap
         self.columns = len(CATEGORIES) * self.stride
-        for column in range(self.columns):
-            if column % self.stride < self.stages:
-                self.grid.setColumnMinimumWidth(column, icons.icon_size(ICON_ZOOM)[0] + GRID_AIR)
-            else:
-                self.grid.setColumnMinimumWidth(column, GROUP_GAP)
         self.grid.setColumnStretch(self.columns, 1)
         self.scroll.setWidget(self.holder)
         outer.addWidget(self.scroll, 1)
@@ -260,6 +297,7 @@ class DatabaseTab(QWidget):
 
         self._build_header()
         self._build_cells()
+        self._apply_zoom()       # the columns and the cells, at the saved scale
 
     def _elide_labels(self):
         """Fit the tally and the save report to the room they were given, with an ellipsis.
@@ -297,6 +335,40 @@ class DatabaseTab(QWidget):
         super().resizeEvent(event)
         self._elide_labels()
 
+    def _apply_zoom(self):
+        """Put the grid's COLUMNS and CELLS at `self.zoom`.
+
+        They have to move together: a cell is a fixed-size label sitting in a fixed-width column,
+        so a new scale means resizing both. There is nothing to rebuild - the widgets stay, only
+        their sizes change - but there are two places to keep in step, which is why they are done
+        in one function, called by `_build` (after the cells exist) and by `set_zoom`.
+        """
+        size = icons.icon_size(self.zoom)
+        for column in range(self.columns):
+            if column % self.stride < self.stages:
+                self.grid.setColumnMinimumWidth(column, size[0] + GRID_AIR)
+            else:
+                self.grid.setColumnMinimumWidth(column, GROUP_GAP)
+        for picture, _caption in self.cells.values():
+            picture.setFixedSize(QSize(size[0], size[1]))
+
+    def set_zoom(self, zoom):
+        """Change the size of every dex icon, and REMEMBER it.
+
+        The scale is part of the app's own state, like the window's position: it is a user decision
+        (`state.Prefs`, written on the spot), not a constant to re-edit and restart for. The other
+        tab that draws these icons is told through `zoomChanged`, because it composes its own - one
+        scale for the whole window is the point of the knob.
+        """
+        zoom = clamp_zoom(zoom)
+        if zoom == self.zoom:
+            return
+        self.zoom = zoom
+        self.prefs.set(ICON_ZOOM_KEY, zoom)
+        self._apply_zoom()
+        self.apply_states()        # the icons themselves, at the new size
+        self.zoomChanged.emit(zoom)
+
     def _build_header(self):
         """The three column names, each over its own group of stage columns."""
         for index, (_category, label) in enumerate(CATEGORIES):
@@ -317,8 +389,11 @@ class DatabaseTab(QWidget):
         return rule
 
     def _build_cells(self):
-        """One cell per (line, category, stage), created once and filled by `apply_states`."""
-        size = icons.icon_size(ICON_ZOOM)
+        """One cell per (line, category, stage), created once and filled by `apply_states`.
+
+        The icons' size is NOT set here - `_apply_zoom` does that for every cell at once, which is
+        also what a scale change goes through.
+        """
         for index, (_family, stages) in enumerate(self.lines):
             row = 2 + index * 2
             for cat_index in range(len(CATEGORIES)):
@@ -330,7 +405,6 @@ class DatabaseTab(QWidget):
                     box.setSpacing(1)
 
                     picture = QLabel()
-                    picture.setFixedSize(QSize(size[0], size[1]))
                     picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     box.addWidget(picture, 0, Qt.AlignmentFlag.AlignHCenter)
 
@@ -529,7 +603,7 @@ class DatabaseTab(QWidget):
                     # species you have never met its own black frame and "?" - see
                     # `config.STATES`, where every one of those values is written down with the
                     # line of the game's code it came from.
-                    pixmap = icons.icon_pixmap(mon, ICON_ZOOM, category,
+                    pixmap = icons.icon_pixmap(mon, self.zoom, category,
                                                caught=(state == STATE_CAUGHT), state=state)
                     if state in tally[category]:
                         tally[category][state] += 1

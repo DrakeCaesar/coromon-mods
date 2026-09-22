@@ -290,6 +290,44 @@ def main():
     window.tabs.setCurrentIndex(2)
     pump(app, 3)
 
+    # THE -/+ BUTTONS in the corner: the icon scale is the app's own state (like the window's
+    # position, and one scale for the whole window), and it resizes the grid it is pressed on.
+    start = database.zoom
+    size = database.cells[(0, 0, 0)][0].size()
+    database.zoom_in.click()
+    pump(app, 5)
+    check("+ makes every icon bigger, on both tabs, and remembers it",
+          database.zoom == start + 1 and coromon.zoom == database.zoom
+          and database.cells[(0, 0, 0)][0].size() != size
+          and prefs.get(config.ICON_ZOOM_KEY) == database.zoom,
+          "zoom %d -> %d, cell %s -> %s" % (start, database.zoom, size,
+                                            database.cells[(0, 0, 0)][0].size()))
+    database.zoom_out.click()
+    pump(app, 5)
+    check("- puts it back", database.zoom == start and coromon.zoom == start,
+          "%d, cell %s" % (database.zoom, database.cells[(0, 0, 0)][0].size()))
+    for _ in range(config.ICON_ZOOM_MIN + config.ICON_ZOOM_MAX):
+        database.zoom_out.click()
+    pump(app, 3)
+    check("the scale stops at the bottom", database.zoom == config.ICON_ZOOM_MIN, database.zoom)
+    for _ in range(20):
+        database.zoom_in.click()
+    pump(app, 3)
+    check("the scale stops at the top", database.zoom == config.ICON_ZOOM_MAX, database.zoom)
+    for _ in range(database.zoom - start):
+        database.zoom_out.click()
+    pump(app, 3)
+
+    # THE -/+ BUTTONS MUST ACTUALLY SHOW THEIR GLYPH: the theme pads a button 12 px a side, and on a
+    # 22 px button that leaves no content rect at all, so Qt draws an EMPTY square - which is exactly
+    # what the user's screenshot showed. Counting the colours in the button's own grab catches it:
+    # fill + border is 2 colours, and any glyph on top adds more.
+    for label, button in (("-", database.zoom_out), ("+", database.zoom_in)):
+        grab = button.grab().toImage()
+        ink = len({grab.pixelColor(x, y).getRgb()
+                   for y in range(grab.height()) for x in range(grab.width())})
+        check("the %s zoom button draws its glyph" % label, ink > 2, "%d colour(s)" % ink)
+
     report, tally = database.saved_label.text(), database.counts.text()
     database.reload_button.click()
     pump(app, 5)

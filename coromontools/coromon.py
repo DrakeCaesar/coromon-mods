@@ -41,6 +41,7 @@ class CoromonTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.monsters = dex.monsters()
+        self.zoom = ICON_ZOOM      # the window hands over the saved scale - see `set_zoom`
         self.rows = {}               # uid -> the list item, for filtering
         self.pick = {}               # uid -> Species
         self.zone_of_row = {}        # row index -> Zone
@@ -76,11 +77,15 @@ class CoromonTab(QWidget):
         self.list = QListWidget()
         # `icons.icon_size`, not `dex.CELL * ICON_ZOOM`: the composed icon carries the game's own
         # entry plate and any badge overhang, so the cell it is drawn in is that much bigger.
-        width, height = icons.icon_size(ICON_ZOOM)
-        self.list.setIconSize(QSize(width, height))
+        self._size_list()
         self.list.currentItemChanged.connect(lambda *_: self._show_locations())
         box.addWidget(self.list, 1)
         return panel
+
+    def _size_list(self):
+        """Point the list's row height at the current icon scale."""
+        width, height = icons.icon_size(self.zoom)
+        self.list.setIconSize(QSize(width, height))
 
     def _build_locations(self):
         panel = QWidget()
@@ -113,7 +118,7 @@ class CoromonTab(QWidget):
             label = mon.name
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, mon.uid)
-            pixmap = icons.icon_pixmap(mon, ICON_ZOOM)
+            pixmap = icons.icon_pixmap(mon, self.zoom)
             if pixmap is not None:
                 # no icon at all for a Coromon the atlas does not list: the row is then text,
                 # which is what it was in the Tk version too - see icons.icon_image
@@ -127,6 +132,24 @@ class CoromonTab(QWidget):
             self.list.setCurrentRow(0)
         else:
             self._show_locations()
+
+    def set_zoom(self, zoom):
+        """Draw the list's icons at that scale, and remember it.
+
+        The Database tab owns the -/+ buttons (its grid is where the size is visible), so this is
+        the half of that knob that lives here: the same `config.ICON_ZOOM_KEY` in the same `Prefs`,
+        one scale for the whole window. Called before the list is first filled and it is simply the
+        scale `fill` will use; called after, it re-points the icons it already made.
+        """
+        zoom = int(zoom)
+        if zoom == self.zoom:
+            return
+        self.zoom = zoom
+        self._size_list()
+        for uid, item in self.rows.items():
+            pixmap = icons.icon_pixmap(self.pick[uid], self.zoom)
+            if pixmap is not None:
+                item.setIcon(pixmap)
 
     def apply_filter(self):
         """Hide rows that do not match, rather than rebuilding the list on each keystroke.

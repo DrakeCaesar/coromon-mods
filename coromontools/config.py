@@ -125,7 +125,19 @@ ICON_NUMBERS = True
 # that size the type frame, the sprite and the caught badge are all legible without squinting.
 # It is also what the grid's column widths and the list's icon size are computed from, so this one
 # number decides how big every dex icon in the window is.
+# THIS IS THE DEFAULT, NOT THE SETTING: the Database tab has a pair of small -/+ buttons for it and
+# the choice is kept in the app's own preferences ("icon_zoom"), like the window's position - see
+# `DatabaseTab.set_zoom`, and `ICON_ZOOM_MIN`/`ICON_ZOOM_MAX` below for how far it goes.
 ICON_ZOOM = 5
+
+# How far the -/+ buttons go. 1 would be a 24 px icon (the size the game itself draws, and too
+# small to read a bird from a bat), and past 8 a single grid column is wider than the window.
+ICON_ZOOM_MIN = 2
+ICON_ZOOM_MAX = 8
+
+# The preference the icon scale is kept under - the app's own state, like the window's position,
+# because it is a user decision rather than a constant to re-edit and restart for.
+ICON_ZOOM_KEY = "icon_zoom"
 
 # A map is fitted to the pane, but never blown up past this: a small map filling a maximised
 # window is all block, and the patches stop being readable.

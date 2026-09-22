@@ -77,6 +77,10 @@ class MainWindow(QMainWindow):
         self.grind.onTopToggled.connect(self.set_on_top)
         self.coromon.zoneChosen.connect(self.show_zone_on_map)
         self.database.zoneChosen.connect(self.show_zone_on_map)
+        # ONE ICON SCALE FOR THE WINDOW: the Database tab's -/+ buttons change it, the Coromon tab's
+        # list follows, and both start from the saved value (see `DatabaseTab.set_zoom`).
+        self.coromon.set_zoom(self.database.zoom)
+        self.database.zoomChanged.connect(self.coromon.set_zoom)
         self.tabs.currentChanged.connect(self._tab_changed)
 
         saved = prefs.get("tab")
