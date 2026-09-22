@@ -30,32 +30,42 @@ class ZoneMap(QWidget):
     the map JSON and have to be turned into horizontal runs, and a resize is many repaints, so
     doing it per paint would make dragging the window edge stutter. Painting then only scales
     and fills rectangles.
+
+    `empty` is the headline for having no zone at all, and it is a parameter because TWO tabs draw
+    this map now: the first tab's map belongs to its ranking ("pick a zone on the first tab" would
+    be nonsense inside the Database tab, which is the tab it was said on).
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, empty="pick a zone on the first tab"):
         super().__init__(parent)
+        self.empty = empty
         self.setMinimumSize(240, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.zone = None
-        self.headline = "pick a zone on the first tab"
+        self.headline = empty
         self.legend = []      # [(letter, colour, is_selected)] for the tab to display
         self._plan = None
 
     # ------------------------------------------------------------------ input
     def set_zone(self, zone):
-        """Point the map at a zone. Also sets `headline` and `legend` for the tab to show."""
+        """Point the map at a zone. Also sets `headline` and `legend` for the tab to show.
+
+        RETURNS whether it had a map to draw. A caller that shows `headline` as a caption can use
+        that to show it only when the map could not answer - "no map file for X", "X is not marked
+        on the map of Y" - instead of captioning every map with a line of coordinates.
+        """
         self.zone = zone
         self._plan = None
         self.legend = []
         if zone is None:
-            self.headline = "pick a zone on the first tab"
+            self.headline = self.empty
             self.update()
-            return
+            return False
         data = ez.zone_map(zone.map_file)
         if data is None:
             self.headline = "no map file found for %s" % zone.map_file
             self.update()
-            return
+            return False
         m, layers, zones = data
         # the zones this map actually marks: the ranking can name one the map file has no marker
         # for, and saying so is better than drawing an empty frame
@@ -66,12 +76,13 @@ class ZoneMap(QWidget):
                              % (zone.name, pretty(zone.map_file),
                                 ", ".join(sorted(drawn)) or "no zones"))
             self.update()
-            return
+            return False
         self._plan = self._plan_map(m, layers, drawn, zone)
         self.headline = self._describe(zone, entry)
         self.legend = [(name.rsplit("_", 1)[-1], ez.colour_for(name), name == zone.name)
                        for name in sorted(drawn)]
         self.update()
+        return True
 
     # ------------------------------------------------------------------ planning
     def _plan_map(self, m, layers, drawn, zone):

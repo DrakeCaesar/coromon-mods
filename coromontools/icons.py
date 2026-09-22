@@ -151,32 +151,32 @@ def _numbered(icon, number, zoom, colour):
 
 
 def avatar_size():
-    """The sprite's own canvas, in TEXELS: the 24 texel cell plus `config.ICON_PAD` all round.
+    """The sprite's own canvas, in TEXELS: the 24 texel cell plus `config.ICON_PAD`.
 
     THE PAD IS THE FIX FOR CLIPPED SPRITES, and it has to be part of the canvas the sprite is
     composed on, not just of the finished icon - the sprite is drawn 3 texels up and left of the
     cell (see `config.ICON_NUDGE`), so a 24 texel buffer loses exactly that much off a Coromon big
-    enough to reach the corner. Composed on this canvas instead, the sprite has room on every side
-    - its art spans at most the cell's own 24 texels - and nothing is cut.
+    enough to reach the corner. Composed on this canvas instead, the sprite has room on the side it
+    overhangs - its art spans at most the cell's own 24 texels - and nothing is cut.
     """
-    return (dex.CELL + 2 * ICON_PAD[0], dex.CELL + 2 * ICON_PAD[1])
+    return (dex.CELL + ICON_PAD[0], dex.CELL + ICON_PAD[1])
 
 
 def icon_size(zoom=1):
     """The size a composed icon comes out at, including the badge and number overhangs, in pixels.
 
-    The canvas is the 24 texel cell, plus `config.ICON_PAD` on every side (the room a nudged
-    sprite needs - see `avatar_size`), plus whatever `config.ICON_BADGE_SHIFT` pushes the badge PAST
-    its top-right corner - so an overhanging badge is DRAWN rather than cut off. Callers that
-    place an icon (the tabs) ask for this instead of computing `dex.CELL * zoom` themselves, or a
-    cell sized for the old canvas clips both the sprite and the badge again.
+    The canvas is the 24 texel cell, plus `config.ICON_PAD` on the side a nudged sprite hangs over,
+    plus whatever `config.ICON_BADGE_SHIFT` pushes the badge PAST its top-right corner - so an
+    overhanging sprite and badge are DRAWN rather than cut off. Callers that place an icon (the
+    tabs) ask for this instead of computing `dex.CELL * zoom` themselves, or a cell sized for the
+    old canvas clips both the sprite and the badge again.
 
     The NUMBER needs no room of its own any more: anchored to the plate it reaches 1 texel past
     the cell's right edge and stays inside it vertically (see `_numbered`), and the badge's 2
     texels of overhang already cover that.
     """
-    return ((dex.CELL + 2 * ICON_PAD[0] + max(0, ICON_BADGE_SHIFT[0])) * zoom,
-            (dex.CELL + 2 * ICON_PAD[1] + max(0, ICON_BADGE_SHIFT[1])) * zoom)
+    return ((dex.CELL + ICON_PAD[0] + max(0, ICON_BADGE_SHIFT[0])) * zoom,
+            (dex.CELL + ICON_PAD[1] + max(0, ICON_BADGE_SHIFT[1])) * zoom)
 
 
 def plate(zoom, discovered=True):

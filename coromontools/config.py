@@ -31,7 +31,8 @@ XP_MARGIN = 3
 # whose frame is at 4, 7 - 4 = 3 texels up and left IS this nudge.
 ICON_NUDGE = (-3, -3)
 
-# HOW MUCH SLACK THE CANVAS GIVES THE SPRITE BEYOND THE CELL, in TEXELS, on EVERY side.
+# HOW MUCH SLACK THE CANVAS GIVES THE SPRITE BEYOND THE CELL, in TEXELS, on the side the sprite
+# actually hangs over - the top and left, for a negative nudge.
 # A negative nudge hangs the sprite off the cell's top-left corner, and the canvas used to be the
 # cell exactly, so that corner was CUT OFF - which is what showed up on the larger Coromon: measured
 # across the shipped sheet, the art reaches within 1 to 2 texels of the cell's top-left corner for
@@ -39,9 +40,11 @@ ICON_NUDGE = (-3, -3)
 # and never touched the edge. The game never meets the clip because there the sprite IS the
 # container; here the frame lives in a cell that is smaller than the offset needs, so the canvas
 # gets slack instead of the sprite losing pixels.
-# PADDED ON ALL FOUR SIDES, not only where the sprite overhangs: the icons are laid out centred in
-# their grid cells, so slack on one side alone would slide every icon off its own caption. Equal
-# padding leaves the plate exactly where it was relative to the canvas centre.
+# THE SLACK IS ON ONE SIDE ONLY, and that is not an accident: it is the overhang, so it is on the
+# side the overhang is. Padding all four sides (what this did first) keeps the composition centred
+# in the canvas but adds 3 texels of empty canvas to EVERY icon - 9 columns x 15 px of air nothing
+# draws in, which is most of why the grid did not fit the window. The content does not move: the
+# sprite is still at the cell's own offset inside it, so this only takes away room nobody used.
 ICON_PAD = (abs(ICON_NUDGE[0]), abs(ICON_NUDGE[1]))
 
 # Where the CAUGHT badge sits, in TEXELS added to the icon's own top-right corner. Texels, not

@@ -39,19 +39,27 @@ means re-reading a save, not switching a filter, so there is no cheaper update t
 the save again and refills the same cells (`reload_save`), which is the whole update path there is.
 THE SAVE IS READ WHEN THE TAB IS FIRST SHOWN, not when the window is built, and again only when
 the button is pressed - so a save made while the window is open is picked up by pressing it.
+WHERE THE SAVE CAME FROM is reported on the top row, immediately LEFT of the button that re-reads
+it, and the FOOTER is for the picked Coromon: `select` puts its wild locations there as the same
+sortable list the Coromon tab shows, and picking a row (a DOUBLE click, as in that tab) shows the
+area on the map. Potential is not a factor in that - the three category columns are three copies of
+one species, and it can only be captured where it can be captured.
+THE TOP ROW IS ALWAYS ONE LINE. Nothing on it wraps: what does not fit is ELIDED (see
+`_elide_labels`), because a wrapped row is two lines and a clipped row loses letters mid-word.
 """
 
 import time
 
 import dex
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from . import icons
 from .config import (ICON_ZOOM, STATE_CAUGHT, STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
+from .mapview import ZoneMap
+from .table import PAYLOAD, Column, DataTable
 from .text import pretty
-from .widgets import note
 
 try:
     import savefile
@@ -61,10 +69,63 @@ except ImportError:                                    # pragma: no cover - repo
 # The game's own categories, in the game's own order, with the names the game gives them.
 CATEGORIES = (("A", "Standard"), ("B", "Potent"), ("C", "Perfect"))
 
-NOTES = ("One row per evolutionary line, left to right in its evolution order, with the three "
-         "potential categories side by side - so a line is complete in a column when every icon "
-         "there carries the caught badge. Caught comes from your save's own dex record, and a "
-         "Coromon counts as caught in the category you actually caught it in.")
+# What the footer's own heading says before anything has been picked.
+HINT = "Click a Coromon, then one of its locations, to see the area on the map."
+
+# AND HERE IS THAT MAP: the first tab's own widget (`ZoneMap`), in the right half of the footer.
+# Its own choice of words for having nothing to draw - the first tab's default would tell this tab
+# to go and look at the first tab.
+MAP_EMPTY = "pick one of its locations"
+
+# HOW TALL THE FOOTER'S MAP IS, in pixels - THE KNOB FOR "A BIGGER MAP". `ZoneMap` picks the scale
+# that fits the room it is given (`min(width / map_tiles_w, height / map_tiles_h)`, never below 1:1
+# and never above `config.MAP_MAX_SCALE`), so for anything but a very wide map the HEIGHT it gets is
+# exactly how big the map comes out. Its own floor is 180; the user: "make the footer taller so we
+# can fit a bigger map". The location list beside it grows with it, which is how the 14-location
+# Coromon fit without scrolling.
+FOOTER_MAP_HEIGHT = 300
+
+# THE LOCATION LIST IS THE COROMON TAB'S, columns and all: it is the same question ("where can I
+# catch this one?"), asked from the grid instead of from the list, so it gets the same answers in
+# the same shape - and a row carries its Zone (`PAYLOAD`) so picking one can show it on the map.
+LOCATION_COLUMNS = (
+    Column("area", "Area", 165, "w"),
+    Column("zone", "Zone", 165, "w"),
+    Column("levels", "levels", 85, "e"),
+    Column("share", "share", 65, "e"),
+)
+
+# HOW WIDE THE SEARCH FIELD IS ALLOWED TO GET. It used to stretch across the whole row, which was
+# fine while it had the row to itself - but the tally, the save report and the Reload button all
+# belong on that row too (the user: "make the search bar shorter, so we can fit the save info to the
+# left of the load save button instead, so it's compact"), so it is capped - and the cap is about
+# 25 characters, which is all a filter needs: every pixel the field does not take is a pixel the
+# tally and the save report keep.
+SEARCH_WIDTH = 170
+# ... and how narrow it may be squeezed before the window refuses to shrink further. Without a
+# floor the field collapses to a sliver on a narrow window; with one, what gives instead is the two
+# text labels beside it, which ELIDE rather than wrap (see `_elide_labels`).
+SEARCH_MIN_WIDTH = 120
+
+# What separates the three category tallies - a dot and a single space, not the four spaces this
+# used to be: the same information 15 characters narrower reads as three columns still, because
+# the dot is the visible break the eye needs ("reduce the gap between columns there").
+TALLY_GAP = " \u00b7 "
+
+# AND THE SAME IDEA IN THE GRID: the width of the spacer COLUMN between the three category groups.
+# The column has to exist (see `_build` - without it the three lists drift to three different
+# pitches), but it does not have to be wide: with the grid's own spacing either side, this leaves
+# the gaps between the groups twice the gaps inside them, which is as much as the eye needs ("reduce
+# the gap between the groups of 3 coromon in an evolutionary line so it's all more compact
+# horizontally"). The category columns themselves keep their width - they are sized to the icon.
+GROUP_GAP = 8
+
+# HOW MUCH AIR EACH GRID COLUMN KEEPS AROUND ITS ICON, in pixels, on top of the icon's own width.
+# A column's minimum width is the icon plus this, so it is what separates two neighbouring Coromon
+# along with the grid's 5 px spacing - and it was 16, which is 24 px of air between two icons. The
+# icons are 160 px wide and the captions under them are about 70, so this is padding, not room
+# anything needs: less of it is what makes the whole grid narrower.
+GRID_AIR = 8
 
 
 def line_stages(lines):
@@ -74,6 +135,8 @@ def line_stages(lines):
 
 class DatabaseTab(QWidget):
     """The database: a row per evolutionary line, a column group per potential category."""
+
+    zoneChosen = Signal(object)      # a Zone the map should show - the Coromon tab's own signal
 
     def __init__(self, prefs, parent=None):
         super().__init__(parent)
@@ -86,7 +149,11 @@ class DatabaseTab(QWidget):
         self.saved = None                # ... and its timestamp, as the game wrote it
         self.slots = 0                   # how many slots record a dex at all
         self.error = None
+        self._counts_text = ""           # the tally as it was composed, before any eliding
+        self._report_text = ""           # ... and the save report, likewise
+        self.top_row = None              # the find row, kept for `_elide_labels`
         self.cells = {}                  # (line index, category index, stage) -> (icon, caption)
+        self.click_target = {}           # a cell widget or one of its labels -> Species
         self.rules = {}                  # line index -> the rule drawn under it
         self._built = False
         self._build()
@@ -96,21 +163,40 @@ class DatabaseTab(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 6)
 
+        # ONE LINE: find the Coromon, how the record stands, the save it came from, and the button
+        # that reads it again - in that order, so the report sits immediately LEFT of the button and
+        # nothing needs a line of its own.
+        #
+        # THE TWO TEXT LABELS ARE THE ELASTIC ONES, and neither wraps: their size policy is Ignored
+        # so they may be narrower than their text, they share the row's spare width in proportion to
+        # how much text each carries, and whatever does not fit is elided (`_elide_labels`). Wrapping
+        # is what the row did before and it made two lines out of it; clipping would cut a letter in
+        # half. Their share is also why there is no stretch of its own here - the labels fill it.
         top = QHBoxLayout()
         top.addWidget(QLabel("find"))
         self.search = QLineEdit()
         self.search.setToolTip("hide lines whose Coromon do not match")
         self.search.textChanged.connect(self._filter)
-        top.addWidget(self.search, 1)
+        self.search.setMaximumWidth(SEARCH_WIDTH)
+        self.search.setMinimumWidth(SEARCH_MIN_WIDTH)
+        top.addWidget(self.search)
         self.counts = QLabel("")
-        top.addWidget(self.counts)
+        self.counts.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        top.addWidget(self.counts, 1)
+        # WHICH SAVE, right where it is read, and right-aligned so at a wide window it sits against
+        # the button rather than floating in the middle of its half of the row.
+        self.saved_label = QLabel("")
+        self.saved_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.saved_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self.saved_label, 1)
         # READ THE SAVE AGAIN. The tab reads it when it is first shown and never again on its own,
         # so this is how a save made while the window is open gets in - and it is also the way to
-        # check which slot the tab is showing, which the status line then says out loud.
+        # check which slot the tab is showing, which the report beside it then says out loud.
         self.reload_button = QPushButton("Reload save")
         self.reload_button.setToolTip("read the save again - the newest slot that records a dex")
         self.reload_button.clicked.connect(self.reload_save)
         top.addWidget(self.reload_button)
+        self.top_row = top
         outer.addLayout(top)
 
         self.scroll = QScrollArea()
@@ -118,7 +204,10 @@ class DatabaseTab(QWidget):
         self.holder = QWidget()
         self.grid = QGridLayout(self.holder)
         self.grid.setContentsMargins(6, 6, 6, 6)
-        self.grid.setHorizontalSpacing(8)
+        # COMPACT ON PURPOSE: the spacing between two neighbouring columns, on top of whatever slack
+        # each column already has around its icon - which is `GRID_AIR` in `_build_cells`, not 16 as
+        # it was. Between the category groups the spacer column adds `GROUP_GAP` on top of this.
+        self.grid.setHorizontalSpacing(5)
         self.grid.setVerticalSpacing(2)
         # ONE SPACER COLUMN BETWEEN THE GROUPS, plus a trailing one that takes the slack. Without
         # them the grid hands the window's spare width to the columns unevenly and the three lists
@@ -129,20 +218,84 @@ class DatabaseTab(QWidget):
         self.columns = len(CATEGORIES) * self.stride
         for column in range(self.columns):
             if column % self.stride < self.stages:
-                self.grid.setColumnMinimumWidth(column, icons.icon_size(ICON_ZOOM)[0] + 16)
+                self.grid.setColumnMinimumWidth(column, icons.icon_size(ICON_ZOOM)[0] + GRID_AIR)
             else:
-                self.grid.setColumnMinimumWidth(column, 18)
+                self.grid.setColumnMinimumWidth(column, GROUP_GAP)
         self.grid.setColumnStretch(self.columns, 1)
         self.scroll.setWidget(self.holder)
         outer.addWidget(self.scroll, 1)
 
-        self.status = QLabel("")
-        self.status.setWordWrap(True)
-        outer.addWidget(self.status)
-        outer.addWidget(note(NOTES, wrap=1000))
+        # THE FOOTER IS THE LOCATION LIST ON THE LEFT AND THE MAP ON THE RIGHT, which is what the
+        # user meant by "show the map on the right with the area": the area is drawn HERE, in the
+        # footer, not by jumping to the first tab - so picking a row costs nothing and can be done
+        # for every row in turn. The footer's height is what the map needs (it will not go below
+        # 240x180); the list fills it, which comes to about nine of its rows.
+        # No prose down here any more - the user: "remove all that useless text in the footer".
+        self.footer = QLabel(HINT)
+        self.footer.setWordWrap(True)
+        outer.addWidget(self.footer)
+
+        self.locations = DataTable(LOCATION_COLUMNS, sort_key="area")
+        self.locations.selectionChangedTo.connect(self.show_location)
+        self.locations.doubleClicked.connect(lambda *_: self._jump())
+
+        right = QVBoxLayout()
+        right.setContentsMargins(8, 0, 0, 0)
+        self.map_head = QLabel("")
+        self.map_head.setWordWrap(True)
+        right.addWidget(self.map_head)
+        self.legend_row = QWidget()
+        self.legend_box = QHBoxLayout(self.legend_row)
+        self.legend_box.setContentsMargins(0, 0, 0, 0)
+        right.addWidget(self.legend_row)
+        self.map = ZoneMap(empty=MAP_EMPTY)
+        self.map.setMinimumHeight(FOOTER_MAP_HEIGHT)
+        right.addWidget(self.map, 1)
+
+        footer = QHBoxLayout()
+        footer.addWidget(self.locations, 1)
+        footer.addLayout(right, 1)
+        outer.addLayout(footer)
+        self.show_location(None)      # the empty map says what to do, from the start
 
         self._build_header()
         self._build_cells()
+
+    def _elide_labels(self):
+        """Fit the tally and the save report to the room they were given, with an ellipsis.
+
+        THE TOP ROW IS ONE LINE BY CONSTRUCTION (see `_build`): the two text labels are Ignored by
+        the layout, so their width comes from the row rather than from their own text, and this is
+        what puts a shortened version of each in them. Nothing wraps and nothing is cut mid-letter -
+        and nothing is lost either, because the whole text goes in the label's tooltip.
+        """
+        if self.top_row is None:
+            return
+        pairs = ((self.counts, self._counts_text), (self.saved_label, self._report_text))
+        # THE SHARE OF THE ROW COMES FIRST. The stretch factors decide how the row's spare width is
+        # split, so they have to be settled before anything is measured against the result - and the
+        # layout has to be let run, or the labels are measured at the width they had during the last
+        # pass and the elided text comes out shorter than the room it actually has. Eliding does not
+        # feed back into any of it: an Ignored size policy means a label's width comes from the row,
+        # not from the text this function just shortened.
+        for label, text in pairs:
+            index = self.top_row.indexOf(label)
+            if index >= 0:
+                self.top_row.setStretch(index, max(1, len(text) // 8))
+        self.layout().activate()
+        for label, text in pairs:
+            metrics = label.fontMetrics()
+            shown = metrics.elidedText(text, Qt.TextElideMode.ElideRight,
+                                       max(0, label.width() - 2))
+            label.setText(shown)
+            # THE TOOLTIP IS THE WAY BACK TO THE WHOLE TEXT, and only worth having when something
+            # was actually cut - a tooltip repeating what is already on screen is noise.
+            label.setToolTip(text if shown != text else "")
+
+    def resizeEvent(self, event):
+        """Re-fit the top row: the room its labels have changed, so what they say has to."""
+        super().resizeEvent(event)
+        self._elide_labels()
 
     def _build_header(self):
         """The three column names, each over its own group of stage columns."""
@@ -189,6 +342,14 @@ class DatabaseTab(QWidget):
                     caption.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
                     box.addWidget(caption)
 
+                    # A CLICK PICKS IT, and the hand cursor says so: a QLabel has no selection state
+                    # to use instead, so this is the tab's own picking (see `eventFilter`). The cell,
+                    # the icon and the caption all count as the same target.
+                    for widget in (cell, picture, caption):
+                        widget.installEventFilter(self)
+                        widget.setCursor(Qt.CursorShape.PointingHandCursor)
+                        self.click_target[widget] = mon
+
                     self.grid.addWidget(cell, row, column)
                     self.cells[(index, cat_index, stage)] = (picture, caption)
             # A rule under each line, so 51 rows of nine icons stay readable as rows.
@@ -214,7 +375,7 @@ class DatabaseTab(QWidget):
                 # THE NEWEST SLOT THAT RECORDS A COROMON, which is what `monster_record` has always
                 # picked - the autosave counts as a slot like any other, so if the newest thing the
                 # game wrote is the autosave, that is what this reads. The slot and its time are
-                # kept so the status line can say which one it was instead of leaving it a guess.
+                # kept so the top-right label can say which one it was instead of leaving it a guess.
                 found = savefile.dex_slots()
                 self.slots = len(found)
                 if found:
@@ -228,15 +389,99 @@ class DatabaseTab(QWidget):
 
         known = {mon.uid for _family, stages in self.lines for mon in stages}
         stray = sorted(u for u in set(self.owned) | set(self.seen) if u not in known)
-        parts = ["save: %s" % (self.error or self.slot)]
+        # Terse on purpose: this corner says which slot the record came from and when, and nothing
+        # else - the grid below already shows what is in it (and its tally is in the find row).
+        # Terse on purpose: this corner says which slot the record came from and when, and nothing
+        # else - the grid below already shows what is in it (and its tally is in the find row).
+        # "newest of 2" is the answer to "does it read the most recent slot", so it stays; the
+        # word "saved" and "slots" do not pay for their width.
+        report = ["save: %s" % (self.error or self.slot)]
         if self.saved:
-            parts[0] += "  - the newest of %d slot(s) with a dex record, saved %s" % (
+            report[0] += " \u00b7 newest of %d \u00b7 %s" % (
                 self.slots, time.strftime("%Y-%m-%d %H:%M", time.localtime(self.saved)))
         if stray:
-            parts.append("%d recorded Coromon are not in the dex: %s"
-                         % (len(stray), ", ".join(stray[:6])))
-        parts.append("%d evolutionary lines, %d Coromon." % (len(self.lines), len(known)))
-        self.status.setText("  ".join(parts))
+            report.append("\u00b7 %d recorded Coromon are not in the dex: %s"
+                          % (len(stray), ", ".join(stray[:6])))
+        self._report_text = "   ".join(report)
+        self._elide_labels()
+
+    def select(self, mon):
+        """List where that Coromon can be CAPTURED, in the footer.
+
+        POTENTIAL IS NOT A FACTOR, which is the point of the footer being the whole story: the three
+        category columns are three pictures of ONE species, and a species' wild locations do not
+        depend on the category you happened to catch it in. So the same Coromon lists the same
+        places whichever of its three cells was clicked.
+
+        The list is the Coromon tab's (`dex.where`, most likely first, then sorted here by area) with
+        the same fields - area, the zone's own name, level range and encounter share - and each row
+        carries its Zone, so `show_location` can draw it and `_jump` can hand it to the first tab. A
+        species you cannot meet in the grass says so instead, and the list is emptied rather than
+        left showing the previous Coromon's - which also clears the map, because `set_rows` tells
+        the selection there is nothing to show.
+        """
+        found = dex.where(mon.uid)
+        if not found:
+            self.footer.setText("%s: no wild encounters - an evolution, a starter or a gift"
+                                % mon.name)
+            self.locations.set_rows([])
+            return
+        self.footer.setText("%s   %d location(s)" % (mon.name, len(found)))
+        self.locations.set_rows([{
+            "area": pretty(zone.map_file),
+            "zone": zone.name,
+            "levels": "L%s-%s" % (low, high),
+            "share": "%.1f%%" % share,
+            PAYLOAD: zone,
+        } for zone, low, high, share, _battles in found])
+
+    def show_location(self, zone):
+        """Draw that location in the footer's map half - what PICKING A ROW does.
+
+        Selecting is enough here, unlike the first tab's map, because this map is right there: the
+        selection moves, the picture follows, and nothing is lost by looking at every row in turn.
+        The legend comes from the map's own plan (it is the widget that knows which patches and
+        which colours it drew, and which zone is the solid one).
+
+        NO CAPTION WHEN THE MAP ANSWERS: the list beside it already names the area and the zone, so
+        the map's own line - "7 patch(es), 238 tiles at (59,35), ..." - is only worth showing when
+        the map could NOT answer, which is what `set_zone` returning False means ("no map file",
+        "not marked on the map of...", or nothing picked yet).
+        """
+        drew = self.map.set_zone(zone)
+        self.map_head.setText("" if drew else self.map.headline)
+        self.map_head.setVisible(not drew)
+        while self.legend_box.count():
+            item = self.legend_box.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for (letter, colour, selected) in self.map.legend:
+            chip = QLabel(letter)
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chip.setFixedWidth(22)
+            # the selected zone is the solid one - the same rule the map draws by
+            chip.setStyleSheet("background: %s; color: #ffffff; border: %s;"
+                               % (colour, "1px solid #ffffff" if selected else "none"))
+            self.legend_box.addWidget(chip)
+        self.legend_box.addStretch(1)
+
+    def _jump(self):
+        """Hand the double-clicked location to the first tab, where the grinder can use it.
+
+        The map above already answers "where is it", so this is the step beyond it: DOUBLE CLICK
+        means "take me there", exactly as in the Coromon tab (see `zoneChosen`).
+        """
+        zone = self.locations.current_payload()
+        if zone is not None:
+            self.zoneChosen.emit(zone)
+
+    def eventFilter(self, obj, event):
+        """A click on a cell picks its Coromon for the footer (`select`)."""
+        if event.type() == QEvent.Type.MouseButtonPress and obj in self.click_target:
+            self.select(self.click_target[obj])
+            return True      # handled: the labels would ignore it, and it would come back to us
+        return super().eventFilter(obj, event)
 
     def reload_save(self):
         """The Reload save button: read the save again and refill every cell from it.
@@ -304,9 +549,10 @@ class DatabaseTab(QWidget):
                         label, stage + 1, len(stages))
                     picture.setToolTip(tip)
                     caption.setToolTip(tip)
-        self.counts.setText("    ".join(
+        self._counts_text = TALLY_GAP.join(
             "%s %d caught / %d seen" % (label, tally[category]["caught"], tally[category]["seen"])
-            for category, label in CATEGORIES))
+            for category, label in CATEGORIES)
+        self._elide_labels()
 
     def _filter(self, _text=None):
         """Hide whole LINES that do not match: a row is the unit here, not a Coromon.

@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
 
         self.grind.onTopToggled.connect(self.set_on_top)
         self.coromon.zoneChosen.connect(self.show_zone_on_map)
+        self.database.zoneChosen.connect(self.show_zone_on_map)
         self.tabs.currentChanged.connect(self._tab_changed)
 
         saved = prefs.get("tab")
@@ -99,7 +100,11 @@ class MainWindow(QMainWindow):
             self.show()
 
     def show_zone_on_map(self, zone):
-        """Show a location picked on the Coromon tab: the first tab, with that zone selected."""
+        """Show a location picked in another tab: the first tab, with that zone selected.
+
+        Both tabs that list wild locations emit this - the Coromon tab's list and the Database tab's
+        footer - so one handler serves both and they cannot drift apart.
+        """
         self.tabs.setCurrentIndex(0)
         self.grind.show_zone_from_elsewhere(zone)
 

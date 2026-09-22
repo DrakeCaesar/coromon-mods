@@ -74,7 +74,10 @@ class CoromonTab(QWidget):
         box.addLayout(top)
 
         self.list = QListWidget()
-        # `icons.icon_size`, not `dex.CELL * ICON_ZOOM`: the composed icon carries the game's own\n        # entry plate and any badge overhang, so the cell it is drawn in is that much bigger.\n        width, height = icons.icon_size(ICON_ZOOM)\n        self.list.setIconSize(QSize(width, height))
+        # `icons.icon_size`, not `dex.CELL * ICON_ZOOM`: the composed icon carries the game's own
+        # entry plate and any badge overhang, so the cell it is drawn in is that much bigger.
+        width, height = icons.icon_size(ICON_ZOOM)
+        self.list.setIconSize(QSize(width, height))
         self.list.currentItemChanged.connect(lambda *_: self._show_locations())
         box.addWidget(self.list, 1)
         return panel

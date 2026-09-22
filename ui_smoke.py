@@ -13,6 +13,7 @@ settings would quietly rewrite them, which is exactly what the first version of 
 """
 
 import os
+import re
 import sys
 
 # offscreen unless the geometry check was asked for, and this has to be decided BEFORE the
@@ -23,6 +24,7 @@ if "--geometry" not in sys.argv:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtCore import QSettings, QSize, Qt                    # noqa: E402
+from PySide6.QtTest import QTest                                  # noqa: E402
 from PySide6.QtWidgets import QApplication                  # noqa: E402
 
 import encounters                                           # noqa: E402
@@ -170,8 +172,9 @@ def main():
     # The dex number is drawn with the GAME's font, read out of resource.car at runtime - so this
     # is the check that the reading still works (see `coromontools/font.py`).
     check("the game's number font reads", font.available())
-    # ... and that an icon still comes out at the size the tabs lay out for.
-    check("icon canvas is the cell plus the badge overhang",
+    # ... and that an icon still comes out at the size the tabs lay out for - the cell, the side the
+    # sprite overhangs and the badge, which is what `icon_size` adds up.
+    check("icon canvas is the cell plus the overhangs the tabs size for",
           icons.icon_pixmap(coromon.monsters[0], config.ICON_ZOOM).size() ==
           QSize(*icons.icon_size(config.ICON_ZOOM)),
           "%s" % (icons.icon_size(config.ICON_ZOOM),))
@@ -222,20 +225,77 @@ def main():
     pump(app, 5)
     database = window.database
     if database.error is None:
-        # WHICH slot is stated rather than implied: it is the newest that records a dex, and the
-        # autosave is a slot like any other, so "newest" is only useful written down with its time.
-        check("the database read the newest slot and says so",
-              bool(database.slot) and "newest of" in database.status.text()
-              and "saved" in database.status.text(),
-              database.status.text())
+        # WHICH slot is stated rather than implied: it is the newest that records a dex and the
+        # autosave is a slot like any other, so "newest of 2" plus the timestamp IS the answer.
+        # ELIDED TEXT IS STILL THERE in the tooltip - see `_elide_labels` - which is where this asks
+        # when the test's own rendering is too narrow for the whole report.
+        report = database.saved_label.toolTip() or database.saved_label.text()
+        check("the save report names the newest slot and when it was saved",
+              bool(database.slot) and "newest of" in report
+              and re.search(r"\d{4}-\d\d-\d\d \d\d:\d\d", report) is not None,
+              report)
     else:
         print("note database tab could not read the save: %s" % database.error)
-    status, tally = database.status.text(), database.counts.text()
+    check("the footer says nothing about the save", "save:" not in database.footer.text(),
+          database.footer.text()[:60])
+    # ONE COMPACT LINE: the search field is capped rather than stretching, and the save report sits
+    # on the same line as the button that re-reads the file, immediately to its left. A wrapped row
+    # would show up here as a label taller than the button.
+    button, report = database.reload_button.geometry(), database.saved_label.geometry()
+    row = [database.search, database.counts, database.saved_label, database.reload_button]
+    heights = [widget.geometry().height() for widget in row]
+    check("the search field is capped, not stretched",
+          database.search.maximumWidth() < 300, database.search.maximumWidth())
+    check("the top row is a single line", max(heights) - min(heights) <= 8, heights)
+    check("the save report is on the button's row, to its left",
+          report.right() <= button.left() and abs(report.center().y() - button.center().y()) <= 20,
+          "report %s, button %s" % (report, button))
+    check("the three tallies are split by a dot, not a wide gap",
+          (database.counts.toolTip() or database.counts.text()).count(" \u00b7 ") == 2,
+          database.counts.toolTip() or database.counts.text())
+
+    # THE FOOTER LISTS WHERE A COROMON CAN BE CAPTURED, and potential is not a factor: the three
+    # category columns are three pictures of ONE species, so a click in any of them must list the
+    # same places - the same areas, zones, levels and shares the Coromon tab's table shows.
+    buzz = [key for key, (_pic, caption) in database.cells.items() if caption.text() == "Buzzlet"]
+    answers = []
+    for key in buzz:
+        QTest.mouseClick(database.cells[key][0], Qt.MouseButton.LeftButton)
+        pump(app, 2)
+        answers.append((database.footer.text(),
+                        tuple((row["area"], row["zone"], row["levels"], row["share"])
+                              for row in database.locations.model_.rows)))
+    check("Buzzlet has a cell in each category column", len(buzz) == 3, len(buzz))
+    check("a click lists where it can be captured, whatever the category",
+          len(set(answers)) == 1 and answers[0][0].startswith("Buzzlet")
+          and ("Harbor", "HARBOR_A", "L7-12", "44.4%") in answers[0][1],
+          "%s -> %s" % (answers[0][0], answers[0][1][:2]))
+
+    # THE MAP IS IN THE FOOTER, beside the list: picking a row draws that area there, without
+    # leaving the tab - which is what "the map in the right half of the footer" means.
+    database.locations.selectRow(1)
+    pump(app, 3)
+    picked = database.locations.current_payload()
+    check("picking a row draws that area in the footer's map",
+          picked is not None and database.map.zone is picked
+          and not database.map_head.isVisible(),
+          "%s | %r" % (getattr(picked, "name", None), database.map_head.text()))
+    # ... and a DOUBLE click is the step beyond it: hand that area to the first tab, which is where
+    # the grinder can use it (the Coromon tab's own gesture, through the same signal and handler).
+    database._jump()
+    pump(app, 3)
+    check("a double-clicked location opens on the first tab's map",
+          window.tabs.currentIndex() == 0 and grind.map.zone is picked,
+          "%s vs %s" % (getattr(grind.map.zone, "name", None), getattr(picked, "name", None)))
+    window.tabs.setCurrentIndex(2)
+    pump(app, 3)
+
+    report, tally = database.saved_label.text(), database.counts.text()
     database.reload_button.click()
     pump(app, 5)
     check("Reload save re-reads the same record",
-          database.status.text() == status and database.counts.text() == tally,
-          "%s" % database.status.text())
+          database.saved_label.text() == report and database.counts.text() == tally,
+          "%s" % database.saved_label.text())
 
     # ---------------------------------------------------------------- skills tab
     window.tabs.setCurrentIndex(2)
