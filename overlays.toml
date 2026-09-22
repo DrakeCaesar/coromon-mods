@@ -5,16 +5,37 @@
 # There are no command line options; everything comes from here. A run makes the game match
 # this file - it tears down whatever was installed last time and installs what is enabled
 # below - so setting `enabled` to false and running again is how you remove a feature.
+#
+# WHILE overlays.py IS RUNNING, SAVING THIS FILE IS ENOUGH. The features already installed are
+# torn down - their listeners, the functions they wrapped, their timers and the objects they
+# drew - and rebuilt to match what is written here, with no restart and no re-attach. So
+# flipping one `enabled` at a time is how to find out what each feature actually costs.
+# A file that will not parse is reported and the running install is left alone.
+#
+# overlays.py waits for the game if it is not running yet, and re-attaches by itself when
+# the game is closed and started again - it re-reads this file for each new session, so an
+# edit made while the game is down is picked up by the next launch.
 
 # the process to attach to - it is waited for, so it need not be running
 process = "coromon.exe"
-# map the gamepad's triggers to the zoom keys (the triggers reach the game nowhere else -
-# they are analogue and Solar2D emits no event for them)
+# master switch for every feature below. Set it false and run to attach the tool with NOTHING
+# installed: the session stays, its Frida hooks stay, the features do not. That is the only way to
+# tell what the script itself costs from what the features cost - and it is the measurement to
+# make when frame rate is short. The per-feature `enabled` flags are left alone, so setting this
+# back to true restores exactly the run that was there before
+features_enabled = true
+# map the gamepad's triggers to the zoom keys (the triggers reach the game nowhere else - they are
+# analogue and Solar2D emits no event for them)
 gamepad_zoom = true
 # how far a trigger must be pulled before it counts as pressed, in percent
 gamepad_trigger_percent = 35
 # how often a trigger that stays pulled repeats, so holding it keeps zooming
 gamepad_repeat_ms = 220
+
+[guard]
+# stop `groupHelper.setObjectContainer` crashing the game when it is handed a container that has
+# no insert, and record what it was
+enabled = true
 
 [potential]
 # install the battle Potential readout (screen overlay)
@@ -31,11 +52,11 @@ show_all_items = true
 labels = true
 # label font: "small" is outline_8, "big" is outline_10_bold   (one of: big, small)
 font = "small"
-# frames to keep re-reading the map after a location change; ends early once the marker set
-# is stable
+# frames to keep re-reading the map after a location change; ends early once the marker set is
+# stable
 settle_frames = 30
-# identical reads of the new map required before its markers are drawn; the game has
-# already-collected objects spawned for the first frames
+# identical reads of the new map required before its markers are drawn; the game has already-
+# collected objects spawned for the first frames
 settle_stable_reads = 3
 
 [squad]
@@ -45,35 +66,49 @@ enabled = true
 font = "level"
 # extra pixels between the level number and the Potential under it
 offset_y = 0
-# line up with the level number: "left" starts under its L, "centre" balances on it   (one of: left, centre)
+# line up with the level number: "left" starts under its L, "centre" balances on it   (one of:
+# left, centre)
 align = "left"
 # colour the Potential by tier: white standard, green potent, gold perfect
 tier_colours = true
 
-[zoom]
-# Consecutive still frames after a location change before the zoom comes
-# back. The new map is not positioned in one frame, so the zoom is held off
-# until the game stops moving it. 4 (the old hard-coded value) left the new
-# location at the default zoom for ~4-8 frames; 1 is the first frame it stops.
-# Raise to 2 if a location ever appears with the map offset.
-settle_stable_frames = 4
-settle_max_frames = 90
-# install the overworld zoom
+[loadouts]
+# draw the loadout chips above the Coromon list in the pause menu
 enabled = true
-# install already zoomed out, to this many screen pixels per texture pixel; 0 is the game's own scale (no zoom)
-pixels = 0
-# keys that zoom out one stop
-key_out = ["-", "minus", "["]
-# keys that zoom in one stop
-key_in = ["+", "=", "plus", "]"]
-# keys that go back to the game's own scale
-key_reset = ["0"]
-# keep the game's own hitboxes out of the zoom: display:isColliding builds them from unscaled world-unit boxes, so without this the Mescher Realm dark souls, the dart traps and the Swurmy minigames reach 1/k further away when you zoom out
-fix_collision_reach = true
-# keep the visible-area circle on the player: the game offsets its mask by MTE.getConstrainedDistanceOfCamera, a world-unit distance spent as content pixels, so without this the hole drifts by (1-k) x clamped - which is zero mid-map and grows as you approach an edge
-fix_light_circle = true
-# one-shot repair: put the camera back on the player if an older build displaced it. Set it true, run once, then set it back to false.
-recenter = false
+# how many loadout slots to offer, one chip each
+slots = 6
+# chip font: "small" is outline_8, "level" is outline_10_bold   (one of: level, small)
+font = "small"
+# pixels between my chip row and the top of the Coromon list
+offset_y = 14
+# the chips' height in game units (x4 on a 1920-wide window)
+chip_height = 22
+# draw the saved Coromon's database icons under each slot's buttons
+icons = true
+# the tallest those icons may be, in game units. They are also limited by the gap above the
+# Coromon list (offset_y - 3), because that gap is where they are drawn, so raising offset_y is
+# what makes them bigger
+icon_size = 14
+# the sprite variant used when a Coromon's potential category cannot be read. Each Coromon is
+# drawn in its OWN category (A standard, B potent, C perfect), because those are different sprites
+# in the database, so this is only a fallback
+icon_fallback_category = "A"
+# draw each icon in its type frame, the coloured border the database shows
+icon_frames = true
+# draw a neutral (grey) type frame in every icon position of a slot that holds nothing, so the
+# row reads as one grid of frames rather than a row with holes in it
+empty_frames = true
+# what an empty icon position is tinted with - the game's own darkened factor, which
+# is half (every TYPE_<X>_DARK colour in classes.constants.colors is 0.5 x its bright
+# one). 1, 1, 1 leaves the neutral frame as it is drawn
+empty_frame_tint = [0.5, 0.5, 0.5]
+# ask before SAVE replaces a slot that already holds a group
+confirm_overwrite = true
+# how long the result message stays up, in seconds
+toast_seconds = 3
+# where the slots are kept. Written into the game's own documents folder - the absolute path is
+# printed by `python overlays.py --status`
+store = "loadouts.txt"
 
 [steptimer]
 # show the Potentiflator / Traitformator step countdown
@@ -84,12 +119,61 @@ corner = "top-left"
 margin_x = 8
 # gap from the screen edge, in content units, vertically
 margin_y = 8
-# distance between the two lines, in content units. Measured: the glyphs are 8 units tall, so the visible gap is spacing - 8, and 9 gives 5 px. Below 8.5 the lines overlap. Only worth changing if you want them further apart.
+# distance between the two lines, in content units. Measured: the glyphs are 8 units tall, so the
+# visible gap is spacing - 8, and 9 gives 5 px. Below 8.5 the lines overlap. Only worth changing
+# if you want them further apart.
 spacing = 9
 # what a finished countdown reads, as in "Traitformator: ready"
 ready_text = "ready"
-# also show the Potentiflator result. The game decides it the moment the Coromon is handed over, so it reads out before the 1000 steps are walked - a roll you do not want then costs a reload instead of the whole walk
+# also show the Potentiflator result. The game decides it the moment the Coromon is handed over,
+# so it reads out before the 1000 steps are walked - a roll you do not want then costs a reload
+# instead of the whole walk
 show_potential = true
+
+[autoroll]
+# reroll the Potentiflator automatically: fire the reload whenever a handover decides a potential
+# other than TARGET. ON by default, because the roll loop is the point of the reload button. It is
+# also safe to leave on: it can only ever act on a handover that has ALREADY been made, since it
+# needs a parked deposit with a decided result to exist before it does anything at all. It needs
+# the reload feature installed, and it needs something outside to press the confirm key - see
+# autoroll.py. With the reload feature off the loop stops and reports why rather than retrying,
+# and it stops for good once it hits the target.
+enabled = true
+
+[zoom]
+# install the overworld zoom
+enabled = true
+# install already zoomed out, to this many screen pixels per texture pixel; 0 is the game's own
+# scale (no zoom)
+pixels = 0
+# keys that zoom out one stop
+key_out = ["-", "minus", "["]
+# keys that zoom in one stop
+key_in = ["+", "=", "plus", "]"]
+# keys that go back to the game's own scale
+key_reset = ["0"]
+# keep the game's own hitboxes out of the zoom: display:isColliding builds them from unscaled
+# world-unit boxes, so without this the Mescher Realm dark souls, the dart traps and the Swurmy
+# minigames reach 1/k further away when you zoom out
+fix_collision_reach = true
+# keep the visible-area circle on the player: the game offsets its mask by
+# MTE.getConstrainedDistanceOfCamera, a world-unit distance spent as content pixels, so without
+# this the hole drifts by (1-k) x clamped - which is zero mid-map and grows as you approach an
+# edge
+fix_light_circle = true
+# consecutive still frames after a location change before the zoom comes back. The new map is not
+# positioned in one frame and the game's writes while doing it are absolute, so the zoom is held
+# off until the map has stopped being moved. 4 was a safety margin that left the new location at
+# the default zoom for roughly 4-8 frames (~70-140 ms); 1 applies it on the first frame the game
+# stops moving the map, which is as close to instant as the hold-off can get. If a location ever
+# comes up with the map offset, raise this.
+settle_stable_frames = 4
+# hard cap on the hold-off, in frames, so a node that never stops being moved cannot leave the
+# zoom off forever
+settle_max_frames = 90
+# one-shot repair: put the camera back on the player if an older build displaced it. Set it true,
+# run once, then set it back to false.
+recenter = false
 
 [sprint]
 # add a button that swaps the two running modes
@@ -104,6 +188,15 @@ enabled = true
 key = ["leftJoystickButton"]
 # start in mode 2 (run by default) rather than the game's own mode 1
 start_running = false
+
+[reload]
+# press a button to put the save back, for the Potentiflator loop
+enabled = true
+# what triggers it. The stick clicks arrive as names, not numbers - `rightJoystickButton` is the
+# right stick pressed in, `leftJoystickButton` the left. The game maps neither, so nothing else
+# reacts to the press.
+key = ["rightJoystickButton"]
+
 [gold]
 # show the real gold total instead of the game's 9,999,999 cap, in the top bar, the dialogs and
 # the Rogue readout
@@ -112,8 +205,8 @@ enabled = true
 # uncapped getter. Turn this off to leave the game's counter untouched and only fix the dialogs
 # and the Rogue readout
 fix_counter = true
-# thousands separator for the counter. "space" (the default, 17 597 722) won on sight over
-# "apostrophe" (17'597'722). Also: "period", "comma", "none". Anything else is used literally -
+# thousands separator for the counter. "space" (the default, 22 491 622) won on sight over
+# "apostrophe" (22'491'622). Also: "period", "comma", "none". Anything else is used literally -
 # but it must be a character the font actually has: U+00A0 renders as an error glyph and makes the
 # counter blink, because the text object stores something other than what was written. The
 # grouping has to be drawn by us - the game formats its counter as %07d
@@ -139,6 +232,11 @@ font = "outline_8"
 # where to put the countdown against the icon's bottom edge, in content units. 0 sits it flush
 # under the icon and a negative number lifts it up into the icon
 offset_y = -2
-# how far down the screen, in content units, the markers are looked for. The quick-item row is
-# in the top strip; narrow this if a marker somewhere it should not be is picked up
+# how far down the screen, in content units, the markers are looked for. The quick-item row is in
+# the top strip; narrow this if a marker somewhere it should not be is picked up
 strip = 60
+
+[fog]
+# hide the darkness/fog effect on the maps that draw it (electric cave, the electric power tower,
+# the mescher realm, the developer home)
+enabled = true
