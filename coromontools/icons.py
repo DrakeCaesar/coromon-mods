@@ -90,10 +90,17 @@ def icon_image(mon, category=STANDARD, zoom=1, state=STATE_CAUGHT):
 
     None is a real answer, not a failure: the titans and a few others have no dex entry in the
     atlas and no idle strip either, and their row is simply text.
+    THE SKIN WINS OVER THE CATEGORY: a crimsonite form is the same UID drawn from another atlas cell
+    (`<uid>_crimsonite`), filed exactly where a potential category is - which is why one argument
+    covers both (see `dex.crimsonite_forms`) - and the two forms must not share a cache entry.
     """
-    key = (mon.uid, category, zoom, state)
+    key = (mon.uid, mon.skin, category, zoom, state)
     if key not in _ICONS:
-        _ICONS[key] = _compose(mon, category, zoom, state) or _from_strip(mon.uid, category, zoom)
+        # THE SKIN RIDES ALONG into the fallback too: an atlas without the game's own sprite order
+        # would otherwise draw a crimsonite form as the ordinary Coromon (`strip_frame` tries its
+        # variant first, and "A" is a variant that exists).
+        variant = mon.skin or category
+        _ICONS[key] = _compose(mon, category, zoom, state) or _from_strip(mon.uid, variant, zoom)
     return _ICONS[key]
 
 
@@ -112,7 +119,7 @@ def icon_pixmap(mon, zoom=1, category=STANDARD, caught=False, number=None, state
     Coromon leaves `state` at `caught`, which is the full-colour icon.
     """
     number = ICON_NUMBERS if number is None else number
-    key = (mon.uid, category, zoom, caught, bool(number), state)
+    key = (mon.uid, mon.skin, category, zoom, caught, bool(number), state)
     if key not in _PIXMAPS:
         image = icon_image(mon, category, zoom, state)
         if image is not None and number and mon.number:
@@ -335,7 +342,7 @@ def _compose(mon, category, zoom, state=STATE_CAUGHT):
     pad the composition itself is unchanged - the plate is not one texel further from the frame
     than it was.
     """
-    layout = dex.icon_layout(mon.uid, category, zoom)
+    layout = dex.icon_layout(mon.uid, mon.skin or category, zoom)
     sheet = atlas()
     if layout is None or sheet.isNull():
         return None

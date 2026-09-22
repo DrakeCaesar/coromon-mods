@@ -12,10 +12,19 @@ The shape of a zone, verbatim:
     {"mapFile": "amishRoute", "name": "AMISHROUTE_A", "stepsUntilSeenAllEncounters": 100,
      "encounters": [
         {"name": "Encounter 3", "stepsWithEncounter": 1,
-         "monsters": [{"monsterUID": "NORMAL_BEE_1", "minLevel": 3, "maxLevel": 6}, ...]},
+         "monsters": [{"monsterUID": "NORMAL_BEE_1", "minLevel": 3, "maxLevel": 6,
+                       "crimsonite": false}, ...]},
         ...]}
 
 An encounter holding two or three monsters is a double/triple battle, not a split rate.
+
+CRIMSONITE SPAWNS. Every monster slot carries a `crimsonite` flag, and a slot with it set is a
+DIFFERENT Coromon: same UID, but its crimsonite sprite and type, with its own skills (the game has a
+whole `battle.skills.crimsonite` family and a `crimsoniteAura` battle rule) and its own catch
+milestones (`MonsterSpriteSkinMilestone.CATCH_CRIMSONITE_ELECTRIC_FIREFLY` - "Catch a Coromon from
+the [type.crimsonite] [monster ELECTRIC_FIREFLY_1] line"). Those flags are read into
+`Zone.crimsonite`, kept apart from `Zone.monsters` so neither form's share is counted with the
+other's - 11 Coromon spawn this way, across six lines, all in the water areas.
 
 THE SHARES. A species' share of a zone is the sum of the `stepsWithEncounter` weights of the
 encounters holding it, divided by the sum of all the weights in that zone.
@@ -75,7 +84,8 @@ class Zone:
         self.species = species
         total = sum(e.get("stepsWithEncounter", 0) for e in raw.get("encounters", [])) or 1
         self.weight_total = total
-        self.monsters = {}
+        self.monsters = {}          # uid -> rec, the ORDINARY spawns
+        self.crimsonite = {}        # uid -> rec, the crimsonite form of a species
         self.battles = 1
         for enc in raw.get("encounters", []):
             weight = enc.get("stepsWithEncounter", 0)
@@ -83,7 +93,14 @@ class Zone:
             self.battles = max(self.battles, len(party))
             for mon in party:
                 uid = mon.get("monsterUID")
-                rec = self.monsters.setdefault(
+                # A CRIMSONITE SLOT IS A DIFFERENT COROMON, not more of the ordinary one. Every
+                # monster slot carries the flag, and the SAME uid can spawn both ways in the same
+                # zone - so counting the two together both overstates the ordinary form's share and
+                # loses where the crimsonite one comes from. The DENOMINATOR does not change: a
+                # crimsonite encounter is one of the zone's encounters like any other, and both
+                # shares are still read against the whole table.
+                form = self.crimsonite if mon.get("crimsonite") else self.monsters
+                rec = form.setdefault(
                     uid, {"share": 0.0, "min": 10 ** 6, "max": 0, "battles": 1}
                 )
                 rec["share"] += 100.0 * weight / total
@@ -97,18 +114,42 @@ class Zone:
 
     @property
     def average_level(self):
-        """Expected level per encounter, weighted by share - the grind ranking."""
-        return sum(r["share"] / 100.0 * (r["min"] + r["max"]) / 2.0 for r in self.monsters.values())
+        """Expected level per encounter, weighted by share - the grind ranking.
+
+        BOTH FORMS COUNT: a crimsonite encounter is an encounter like any other, so it belongs in
+        the expectation - the two dicts together are the zone's 100%. The split is about telling
+        two Coromon apart as species (see `slots`), not about what you meet while walking.
+        """
+        return sum(r["share"] / 100.0 * (r["min"] + r["max"]) / 2.0
+                   for r in list(self.monsters.values()) + list(self.crimsonite.values()))
+
+    def slots(self):
+        """Every spawn in the zone, as `{"name", "crimsonite", "share", "min", "max", ...}`.
+
+        A crimsonite slot is named the way the game names it - "Crimsonite <species>", the string
+        its own catch milestone prints - because it is a Coromon of its own. Nothing is merged:
+        both the ordinary and the crimsonite form of one species can appear here, each with the
+        share it really has.
+        """
+        out = [dict(rec, name=self.species.get(uid, uid), crimsonite=False)
+               for uid, rec in self.monsters.items()]
+        out += [dict(rec, name="Crimsonite " + self.species.get(uid, uid), crimsonite=True)
+                for uid, rec in self.crimsonite.items()]
+        return out
 
     def listing(self, min_share=0.0):
-        rows = []
-        for uid, rec in sorted(self.monsters.items(), key=lambda kv: -kv[1]["share"]):
-            if rec["share"] < min_share:
-                continue
+        """Every spawn as a text row, most common first (see `slots`)."""
+        rows = [r for r in sorted(self.slots(), key=lambda r: -r["share"])
+                if r["share"] >= min_share]
+        width = max([14] + [len(r["name"]) + 1 for r in rows])
+        out = []
+        for rec in rows:
             tag = {1: "", 2: "  double", 3: "  triple"}.get(rec["battles"], "")
-            rows.append("%-14s L%-3s-%-3s %5.1f%%%s" % (
-                self.species.get(uid, uid), rec["min"], rec["max"], rec["share"], tag))
-        return rows
+            if rec["crimsonite"]:
+                tag += "  crimsonite"
+            out.append("%-*s L%-3s-%-3s %5.1f%%%s" % (
+                width, rec["name"], rec["min"], rec["max"], rec["share"], tag))
+        return out
 
 
 def all_zones(zones, species):

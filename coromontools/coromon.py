@@ -4,6 +4,11 @@ The order is the game's own `number`, not the order of the data file: the wiki, 
 and any "where do I find #87" answer all use that number, so sorting by it is the point rather
 than reading the JSON as it comes.
 
+CRIMSONITE FORMS ARE IN THIS LIST, each immediately after the species it is a form of - the same
+number, the same family, a different Coromon (see `dex.crimsonite_forms`). They are what the game
+spawns in some areas instead of the ordinary Coromon, in their own places, so "where can I catch a
+crimsonite Firefly" is a question this list has to answer like any other.
+
 The list is built the first time the tab is opened rather than at startup, and unlike the Tk
 version there is no cost left to defer: icons are composed in memory by Qt (`icons.py`) instead
 of being cut into 117 files on disk, so the first open is one atlas decode.
@@ -22,8 +27,9 @@ from .text import pretty
 from .widgets import note
 
 NOTES = ("Wild encounters only - evolutions, starters and gift Coromon have no locations. "
-         "Shares are the zone's own encounter weights. Double-click a location to show it on "
-         "the map.")
+         "Shares are the zone's own encounter weights. A crimsonite form is a Coromon of its "
+         "own, listed after the species it is a form of, with the places that spawn IT. "
+         "Double-click a location to show it on the map.")
 
 COLUMNS = (
     Column("area", "Area", 165, "w"),
@@ -40,7 +46,11 @@ class CoromonTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.monsters = dex.monsters()
+        # THE CRIMSONITE FORMS ARE IN THIS LIST (not in the Database grid, which is the game's own
+        # dex and has no such entries): they are separate Coromon with their own encounters, and
+        # this is the tab that answers "where do I catch this one". They arrive beside the species
+        # they are a form of, sharing its dex number - see `dex.crimsonite_forms`.
+        self.monsters = dex.monsters(with_crimsonite=True)
         self.zoom = ICON_ZOOM      # the window hands over the saved scale - see `set_zoom`
         self.rows = {}               # uid -> the list item, for filtering
         self.pick = {}               # uid -> Species
@@ -114,18 +124,23 @@ class CoromonTab(QWidget):
         for mon in self.monsters:
             # THE NAME ONLY: the dex number is drawn INSIDE the icon (in the game's own font - see
             # `icons.icon_pixmap`), so the row label no longer repeats it. A Coromon with no dex
-            # number (the titans) is now just its name, rather than a "#-- " prefix.
+            # number (the titans) is now just its name, rather than a "#-- " prefix. A crimsonite
+            # form is named for what it is - "Crimsonite Firefly", the game's own phrasing
+            # (`[type.crimsonite] [monster ...]` in its catch milestones).
             label = mon.name
             item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, mon.uid)
+            # THE ROW IS KEYED BY `mon.key`, not by the UID: a crimsonite form shares its UID with
+            # the species it is a form of, so keying by UID would make the two rows overwrite each
+            # other in `rows` and `pick`.
+            item.setData(Qt.ItemDataRole.UserRole, mon.key)
             pixmap = icons.icon_pixmap(mon, self.zoom)
             if pixmap is not None:
                 # no icon at all for a Coromon the atlas does not list: the row is then text,
                 # which is what it was in the Tk version too - see icons.icon_image
                 item.setIcon(pixmap)
             self.list.addItem(item)
-            self.rows[mon.uid] = item
-            self.pick[mon.uid] = mon
+            self.rows[mon.key] = item
+            self.pick[mon.key] = mon
         # QListWidget has no "fill without emitting", so the selection is set once at the end
         self.apply_filter()
         if self.list.count():
@@ -146,8 +161,8 @@ class CoromonTab(QWidget):
             return
         self.zoom = zoom
         self._size_list()
-        for uid, item in self.rows.items():
-            pixmap = icons.icon_pixmap(self.pick[uid], self.zoom)
+        for key, item in self.rows.items():
+            pixmap = icons.icon_pixmap(self.pick[key], self.zoom)
             if pixmap is not None:
                 item.setIcon(pixmap)
 
@@ -160,10 +175,10 @@ class CoromonTab(QWidget):
         needle = self.search.text().strip().lower()
         number = needle.lstrip("#")
         shown = 0
-        for uid, item in self.rows.items():
-            mon = self.pick.get(uid)
+        for key, item in self.rows.items():
+            mon = self.pick.get(key)
             match = (not needle or needle in item.text().lower()
-                     or needle in (uid or "").lower()
+                     or needle in (key or "").lower()
                      or (number and mon is not None and mon.number
                          and number in str(mon.number)))
             item.setHidden(not match)
@@ -182,7 +197,7 @@ class CoromonTab(QWidget):
             self.head.setText("")
             self.locations.set_rows([])
             return
-        found = dex.where(mon.uid)
+        found = dex.where(mon.uid, mon.skin)
         self.head.setText("%s   %s   %d location(s)%s" % (
             mon.name, mon.family or "-", len(found),
             "" if found else "   - no wild encounters: an evolution, a starter or a gift"))

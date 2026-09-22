@@ -14,7 +14,10 @@ The three caveats about the numbers, all of them also in `encounters.py`:
 * whether the game draws proportionally to those weights is NOT verified - treat the shares as
   relative weights;
 * the monster data carries no XP yield and no level curve, so the ranking is by monster level,
-  not by XP per battle.
+  not by XP per battle;
+* a crimsonite spawn is a Coromon of its own, listed under its own name with the share that slot
+  really has. One zone can spawn both the ordinary and the crimsonite form of a species, and
+  their shares are counted apart - together they are the zone's 100% (see `Zone.slots`).
 """
 
 from PySide6.QtCore import Qt, Signal
@@ -52,17 +55,14 @@ COLUMNS = (
 
 
 def zone_rows(zone, min_share=0.0):
-    """The species of a zone, most common first."""
-    rows = []
-    for uid, rec in sorted(zone.monsters.items(), key=lambda kv: -kv[1]["share"]):
-        if rec["share"] < min_share:
-            continue
-        rows.append({
-            "name": zone.species.get(uid, uid),
-            "min": rec["min"], "max": rec["max"], "share": rec["share"],
-            "battles": rec["battles"],
-        })
-    return rows
+    """The spawns of a zone, most common first.
+
+    A crimsonite form is in here like every other spawn, under its own name ("Crimsonite
+    <species>") and with its own share - see `Zone.slots`. It is what the zone really spawns
+    there, so it belongs in the pane you read before walking to a spot.
+    """
+    return [row for row in sorted(zone.slots(), key=lambda rec: -rec["share"])
+            if row["share"] >= min_share]
 
 
 def rank(zones, level, min_share=0.0, only_xp=True):
@@ -74,7 +74,7 @@ def rank(zones, level, min_share=0.0, only_xp=True):
     """
     picked = []
     for zone in zones:
-        top = max((row["max"] for row in zone.monsters.values()), default=0)
+        top = max((row["max"] for row in zone.slots()), default=0)
         if only_xp and level and top < level - XP_MARGIN:
             continue
         picked.append(zone)
@@ -358,8 +358,9 @@ class GrindTab(QWidget):
         flags = []
         if zone.water:
             flags.append("water")
-        top = max((rec["max"] for rec in zone.monsters.values()), default=0)
-        bottom = min((rec["min"] for rec in zone.monsters.values()), default=0)
+        spawns = zone.slots()
+        top = max((rec["max"] for rec in spawns), default=0)
+        bottom = min((rec["min"] for rec in spawns), default=0)
         if top - bottom >= SCALES_SPAN:
             flags.append("scales")
         if any(row["battles"] >= 2 for row in species):
@@ -378,8 +379,8 @@ class GrindTab(QWidget):
                     "left, or press \"What I've visited\".")
         else:
             best = max(reachable, key=lambda zone: max(
-                (rec["max"] for rec in zone.monsters.values()), default=0))
-            top = max((rec["max"] for rec in best.monsters.values()), default=0)
+                (rec["max"] for rec in zone.slots()), default=0))
+            top = max((rec["max"] for rec in best.slots()), default=0)
             text = ("No zone here still gives XP at squad level %d.\n\nThe highest monster in "
                     "the ticked areas is L%d, in %s (%s). Untick \"still gives XP\" to rank "
                     "them anyway, or reach further areas."
@@ -401,10 +402,14 @@ class GrindTab(QWidget):
     def _species_text(self, zone):
         lines = ["%s  (%s)%s" % (zone.name, pretty(zone.map_file),
                                  "   water" if zone.water else ""), ""]
-        for row in zone_rows(zone, self.min_share_value()):
+        rows = zone_rows(zone, self.min_share_value())
+        width = max([14] + [len(row["name"]) + 1 for row in rows])
+        for row in rows:
             tag = {1: "", 2: "   double battle", 3: "   triple battle"}.get(row["battles"], "")
-            lines.append("  %-14s L%-3s-%-3s  %5.1f%%%s" % (
-                row["name"], row["min"], row["max"], row["share"], tag))
+            if row.get("crimsonite"):
+                tag += "   crimsonite"
+            lines.append("  %-*s L%-3s-%-3s  %5.1f%%%s" % (
+                width, row["name"], row["min"], row["max"], row["share"], tag))
         return "\n".join(lines)
 
     def _show_map_head(self):

@@ -130,6 +130,11 @@ def selftest():
     print("skills:", len(skill_list), "in", len(skills.types(skill_list)), "types")
     species = dex.monsters()
     print("dex entries:", len(species), "in", len(dex.lines()), "evolutionary lines")
+    # Not dex entries - the game has none for them - but Coromon the window lists and the map can
+    # point at, so the reading of them is worth a line here: see `dex.crimsonite_forms`.
+    forms = dex.crimsonite_forms()
+    print("crimsonite forms:", len(forms), "in", len({m.family for m in forms}), "lines,",
+          sum(len(dex.where(m.uid, m.skin)) for m in forms), "encounters between them")
     # The Database tab's own numbers, without opening the tab: what the save records per category.
     try:
         import savefile

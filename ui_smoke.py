@@ -158,6 +158,46 @@ def main():
     grind.search.setText("")
     pump(app)
 
+    # CRIMSONITE SPAWNS ARE IN THE LISTINGS. The encounter data marks a slot as the crimsonite form
+    # (`encounters.Zone.crimsonite`), and that form is a Coromon of its own - so a zone that spawns
+    # one says so, under the name the game gives it and with the share that slot really has. Its
+    # share is counted APART from the ordinary form's but the two still add up to the zone's 100%,
+    # which is why the expected level per encounter - the one number the ranking is sorted by -
+    # counts both: you meet a crimsonite while walking like anything else.
+    mixed_zone = next((z for z in all_zones if z.crimsonite), None)
+    check("a zone spawns a crimsonite form", mixed_zone is not None,
+          getattr(mixed_zone, "name", None))
+    if mixed_zone is not None:
+        keep_zone, keep_share = grind.selected_zone, grind.min_share.value()
+        # the split loses nothing and merges nothing: one slot in the game's table is one form
+        raw_pairs = {(m.get("monsterUID"), bool(m.get("crimsonite")))
+                     for e in mixed_zone.raw["encounters"] for m in e.get("monsters", [])}
+        check("every slot in the zone's table becomes one of the two forms, nothing merged",
+              len(raw_pairs) == len(mixed_zone.monsters) + len(mixed_zone.crimsonite),
+              "%d slot(s) -> %d ordinary + %d crimsonite"
+              % (len(raw_pairs), len(mixed_zone.monsters), len(mixed_zone.crimsonite)))
+        ordinary_level = sum(r["share"] / 100.0 * (r["min"] + r["max"]) / 2.0
+                             for r in mixed_zone.monsters.values())
+        check("the expected level counts both forms",
+              abs(mixed_zone.average_level -
+                  sum(r["share"] / 100.0 * (r["min"] + r["max"]) / 2.0
+                      for r in mixed_zone.slots())) < 1e-9
+              and mixed_zone.average_level > ordinary_level,
+              "%.2f (%.2f without the crimsonite slots)"
+              % (mixed_zone.average_level, ordinary_level))
+        grind.min_share.setValue(0)
+        grind.show_zone(mixed_zone)
+        pump(app)
+        names = ["Crimsonite " + mixed_zone.species.get(uid, uid)
+                 for uid in mixed_zone.crimsonite]
+        text = grind.species.toPlainText()
+        check("the zone's species pane names the crimsonite form",
+              all(name in text for name in names)
+              and text.count("crimsonite") >= len(names), names)
+        grind.show_zone(keep_zone)
+        grind.min_share.setValue(keep_share)
+        pump(app)
+
     # ---------------------------------------------------------------- coromon tab
     window.tabs.setCurrentIndex(1)
     pump(app, 5)
@@ -195,10 +235,34 @@ def main():
           tail == ["Fusebox", "Voltgar", "Illuginn", "Sart", "Hozai", "Vørst", "Chalchiu"],
           tail)
 
+    # CRIMSONITE FORMS ARE COROMON OF THEIR OWN: a row beside the species they are a form of, with
+    # the encounters their crimsonite slots spawn them in - which are NOT the ordinary form's places,
+    # because the encounter data says which slot is which (`encounters.Zone.crimsonite`).
+    plain = next((m for m in coromon.monsters
+                  if m.uid == "ELECTRIC_FIREFLY_1" and not m.skin), None)
+    form = next((m for m in coromon.monsters
+                 if m.uid == "ELECTRIC_FIREFLY_1" and m.skin), None)
+    check("a crimsonite form is its own Coromon in the list",
+          plain is not None and form is not None and form.key != plain.key
+          and form.name.startswith("Crimsonite "),
+          "%s / %s" % (getattr(plain, "name", None), getattr(form, "name", None)))
+    if form is not None and plain is not None:
+        coromon.list.setCurrentItem(coromon.rows[form.key])
+        pump(app)
+        rows = coromon.locations.model_.rows
+        check("... with its own encounters, not the ordinary form's",
+              bool(rows) and all(row["zone"].startswith("WATER") for row in rows),
+              [row["zone"] for row in rows])
+        form_icon = icons.icon_pixmap(form, config.ICON_ZOOM)
+        plain_icon = icons.icon_pixmap(plain, config.ICON_ZOOM)
+        check("... and its own crimsonite sprite",
+              form_icon is not None and plain_icon is not None
+              and form_icon.toImage() != plain_icon.toImage(), form.name)
+
     buzzlet = next((mon for mon in coromon.monsters if mon.name == "Buzzlet"), None)
     check("Buzzlet is in the dex", buzzlet is not None)
     if buzzlet is not None:
-        coromon.list.setCurrentItem(coromon.rows[buzzlet.uid])
+        coromon.list.setCurrentItem(coromon.rows[buzzlet.key])
         pump(app)
         check("Buzzlet has locations", coromon.locations.model_.rowCount() > 0,
               coromon.locations.model_.rowCount())

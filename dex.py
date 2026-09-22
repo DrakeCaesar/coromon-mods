@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """dex.py - every Coromon in dex order, where each one appears, and its icon.
 
-THREE THINGS, from three places the game already ships:
+THREE THINGS, from three places the game already ships - plus the crimsonite forms, which are a
+fourth reading of the same two files:
 
   * THE LIST AND ITS ORDER - `data/json/monsters.json`, 139 entries of which 131 carry a `number`
     (the in-game dex id) - and 110 of those are the real dex, because the rest are 900+
@@ -17,6 +18,12 @@ THREE THINGS, from three places the game already ships:
     of square frames, so the first frame IS the icon and needs no art decoding. The variant letter
     is the skin (A/B/C) and one of them is always present; `gold` and other event skins are not
     used here because a dex list wants the ordinary one.
+  * AND THE CRIMSONITE FORMS - the same species in the form some encounters spawn instead (see
+    `crimsonite_forms`, and `encounters.Zone.crimsonite` for the flags). Eleven Coromon, six lines,
+    every one of them in the water areas; they are a different sprite (`<UID>_crimsonite`), a
+    different type container and their own catch milestones, so they are carried here as Coromon of
+    their own - beside the species in the window's list, with their own locations - while
+    `lines()` keeps the database grid to the game's own dex entries.
 
 `write_icons()` CARVES THEM OUT as PNG files, one per Coromon, named `<number>_<UID>.png`. It uses
 Tk's own PNG support rather than Pillow - Tk reads a PNG photo image, copies a sub-rectangle with
@@ -124,7 +131,15 @@ def icon_dir():
 
 
 def icon_name(mon, zoom=1):
+    """The file name for that Coromon's cut icon - the FORM included, when it has one.
+
+    `mon.key`'s rule in a file name: a crimsonite form shares its UID and its dex number with the
+    species it is a form of, so without the skin the two would be the same file and one would
+    overwrite the other.
+    """
     base = "%03d_%s" % (mon.number, mon.uid) if mon.number else mon.uid
+    if mon.skin:
+        base += "_%s" % mon.skin
     return base + ("" if zoom == 1 else "_x%d" % zoom) + ".png"
 
 
@@ -142,23 +157,34 @@ def _png_size(path):
 
 
 class Species:
-    def __init__(self, raw):
+    def __init__(self, raw, skin=None, name=None):
         self.number = raw.get("number")
         self.uid = raw.get("UID")
-        self.name = raw.get("name") or raw.get("UID")
+        self.name = name or raw.get("name") or raw.get("UID")
         self.family = raw.get("monsterFamilyUID")
         self.stats = raw.get("baseStats") or {}
+        self.skin = skin             # None for the ordinary Coromon; CRIMSONITE for that form
         self.raw = raw
 
+    @property
+    def key(self):
+        """A unique id for THIS entry: the UID, plus the form when there is one.
+
+        TWO COROMON SHARE A UID - a species and its crimsonite form (see `crimsonite_forms`) - so
+        anything that keys a widget, a row or a lookup by Coromon must key it by `key`, not by `uid`.
+        """
+        return "%s#%s" % (self.uid, self.skin) if self.skin else self.uid
+
     def __repr__(self):
-        return "<%s #%s %s>" % (self.uid, self.number, self.name)
+        return "<%s #%s %s%s>" % (self.uid, self.number, self.name,
+                                   " (%s)" % self.skin if self.skin else "")
 
     @property
     def total(self):
         return sum(self.stats.values()) if self.stats else 0
 
 
-def monsters(include_unused=False):
+def monsters(include_unused=False, with_crimsonite=False):
     """Every Coromon, in dex order: numbered first, then the ones with no dex number.
 
     TWO GROUPS IN THIS FILE ARE NOT THE GAME, and both are easy to list by accident:
@@ -169,13 +195,22 @@ def monsters(include_unused=False):
         `UNUSED_UIDS` - which leaves the six titans and Fusebox as the entries with no dex number.
         They ARE in the game, so they are kept, and they get their order from the game's own dex
         screen: see `unnumbered_order()`, the one place that order is written down.
+
+    `with_crimsonite` adds the crimsonite forms (`crimsonite_forms`) each immediately after the
+    species it is a form of - the same number, the same family, a different Coromon - which is what
+    the window's Coromon list shows. `lines()` does NOT ask for them: the database grid is the
+    game's own dex, which has no crimsonite entries (see `crimsonite_forms`).
     """
     raw = json.load(open(MONSTERS, encoding="utf-8"))
     keep = [m for m in raw if include_unused or not _unused(m)]
     out = [Species(m) for m in keep]
+    if with_crimsonite:
+        out += crimsonite_forms()
     rank = _ranks()
-    out.sort(key=lambda s: (s.number is None, s.number or 0, rank.get(s.uid, len(rank)),
-                            s.name or ""))
+    # `bool(s.skin)` keeps a form AFTER its own species: they share a number, and by name alone
+    # "Crimsonite Firefly" would sort before "Firefly".
+    out.sort(key=lambda s: (s.number is None, s.number or 0, bool(s.skin),
+                            rank.get(s.uid, len(rank)), s.name or ""))
     return out
 
 
@@ -491,7 +526,13 @@ def families():
 
 
 def primary_type(mon):
-    """The Coromon's type, or "grey" - which is the container the game itself falls back to."""
+    """The Coromon's type, or "grey" - which is the container the game itself falls back to.
+
+    A CRIMSONITE FORM IS ITS OWN TYPE, not the family's: the game draws it in
+    `typeContainers/crimsonite.png` whenever `app:usesCrimsoniteAsType()` says so.
+    """
+    if mon.skin == CRIMSONITE and os.path.exists(os.path.join(CONTAINERS, "%s.png" % CRIMSONITE)):
+        return CRIMSONITE
     fam = families().get(mon.family or "") or {}
     kind = fam.get("primaryType") or "grey"
     return kind if os.path.exists(os.path.join(CONTAINERS, "%s.png" % kind)) else "grey"
@@ -516,8 +557,63 @@ def avatar_cell(uid, variant=VARIANT):
 _WHERE = None
 
 
+# The skin name a crimsonite form is filed under, in the atlas (`<UID>_crimsonite`) and in the type
+# containers (`typeContainers/crimsonite.png`). The atlas also has a `<UID>_crimsoniteAndTendrils`
+# skin; the game's own catch milestones say `[type.crimsonite]`, so that is the one to use.
+CRIMSONITE = "crimsonite"
+
+
+_FORM_CACHE = None
+
+
+def crimsonite_forms():
+    """The crimsonite forms of the Coromon that have one - as SEPARATE Coromon, not a tint.
+
+    WHAT A CRIMSONITE IS. Some encounters carry `crimsonite: true` on their monsters (11 Coromon,
+    across six lines, every one of them in the water areas - see `encounters.Zone.crimsonite`).
+    Those are the same species in its crimsonite form: a different sprite (`<UID>_crimsonite` in the
+    atlas), its own type container (`useCrimsoniteAsType` in `MonsterAvatar`), its own skills (the
+    game ships a whole `battle.skills.crimsonite` family - SHADOW REND, CORRUPT - plus a
+    `crimsoniteAura` battle rule and a crimsonite weather effect) and its own catch milestones,
+    one per line: `MonsterSpriteSkinMilestone` holds `CATCH_CRIMSONITE_ELECTRIC_FIREFLY`, whose text
+    is "Catch a Coromon from the [type.crimsonite] [monster ELECTRIC_FIREFLY_1] line". Those six
+    milestones name exactly the six lines the encounter data has crimsonite spawns for, so the two
+    readings check each other.
+
+    WHY THEY ARE COROMON HERE: they are caught as themselves - a crimsonite Firefly is not a
+    Firefly you own - and they are what the user asked for: "in some areas special crimsonite
+    coromon spawn, those need to be integrated too as a separate coromon with their own
+    encounters". `where(uid, CRIMSONITE)` is exactly those encounters.
+
+    NOT IN THE DEX GRID: the game's own database has no crimsonite entries - a catch milestone is
+    not a dex entry - and the grid's three column groups are the potenital categories, which a
+    crimsonite form does not have. So `lines()` leaves them out, and this is what the window's
+    Coromon list adds beside each species.
+    """
+    global _FORM_CACHE
+    if _FORM_CACHE is None:
+        raw = json.load(open(MONSTERS, encoding="utf-8"))
+        by_uid = {m.get("UID"): m for m in raw}
+        order = {mon.uid: position for position, mon in enumerate(monsters())}
+        out = []
+        for uid, skin in all_where():
+            if skin != CRIMSONITE or uid not in by_uid:
+                continue
+            base = by_uid[uid]
+            out.append(Species(base, skin=CRIMSONITE,
+                               name="Crimsonite %s" % (base.get("name") or uid)))
+        out.sort(key=lambda s: order.get(s.uid, len(order)))    # beside the species it is a form of
+        _FORM_CACHE = out
+    return list(_FORM_CACHE)
+
+
 def all_where():
-    """{uid: [(zone, min, max, share, battles)]} for every Coromon at once, built once.
+    """{(uid, skin): [(zone, min, max, share, battles)]} for every Coromon at once, built once.
+
+    THE KEY CARRIES THE FORM, because the same UID is two different Coromon: `skin` is None for the
+    ordinary one and `CRIMSONITE` for that form, and the encounter data says which slot is which.
+    Counting them together (which this did before crimsonite was read) both overstated the ordinary
+    form's share and lost the only place the crimsonite one appears.
 
     One pass over the zones rather than one per Coromon: `where()` used to re-read the encounter
     file for each call, which a list of 110 rows would do 110 times.
@@ -530,23 +626,25 @@ def all_where():
     zones, species = encounters.load()
     index = {}
     for zone in encounters.all_zones(zones, species):
-        for uid, row in zone.monsters.items():
-            index.setdefault(uid, []).append(
-                (zone, row["min"], row["max"], row["share"], row.get("battles", 1)))
-    for uid in index:
-        index[uid].sort(key=lambda h: (-h[3], h[0].average_level))
+        for skin, group in ((None, zone.monsters), (CRIMSONITE, zone.crimsonite)):
+            for uid, row in group.items():
+                index.setdefault((uid, skin), []).append(
+                    (zone, row["min"], row["max"], row["share"], row.get("battles", 1)))
+    for key in index:
+        index[key].sort(key=lambda h: (-h[3], h[0].average_level))
     _WHERE = index
     return index
 
 
-def where(uid):
+def where(uid, skin=None):
     """[(zone, min level, max level, share %, battles)] for one Coromon, best share first.
 
-    Read from the same zone objects the grind tab ranks, so the two cannot disagree. Empty means no
-    wild encounters - an evolution, a starter, a gift - and callers should say that rather than
-    show a blank.
+    `skin` is `CRIMSONITE` for that form of it (see `crimsonite_forms`) and None for the ordinary
+    Coromon. Read from the same zone objects the grind tab ranks, so the two cannot disagree. Empty
+    means no wild encounters - an evolution, a starter, a gift, a scripted crimsonite battle - and
+    callers should say that rather than show a blank.
     """
-    return all_where().get(uid, [])
+    return all_where().get((uid, skin), [])
 
 
 # THE EXPLICIT EXPORT, a different thing from the cache above: `--icons` writes a folder you asked
@@ -571,9 +669,13 @@ def ensure_icons(zoom=1):
 
     Needs a Tk interpreter to draw with. With none it returns {} and the caller falls back to
     composing icons one at a time, which is what build_icon is for.
+
+    THE CRIMSONITE FORMS ARE CUT TOO, and keyed by `mon.key` rather than by UID: they are Coromon
+    the window shows, so an icon set that skipped them would be half a set - and they share a UID
+    with the species they are a form of, so a uid-keyed dict would drop one of the two.
     """
     out = {}
-    for mon in monsters():
+    for mon in monsters(with_crimsonite=True):
         path = icon_path(mon, zoom)
         if not os.path.exists(path):
             if _sheets() is None:
@@ -583,7 +685,7 @@ def ensure_icons(zoom=1):
                 continue
             os.makedirs(os.path.dirname(path), exist_ok=True)
             icon.write(path, format="png")
-        out[mon.uid] = path
+        out[mon.key] = path
     return out
 
 
@@ -604,7 +706,7 @@ def write_icons(outdir, zoom=1):
         style = "dex icons (type container + atlas avatar)" if avatar_cell(
             monsters()[0].uid) else "plain sprites (no atlas order - run car_extract.py)"
         written, missing = [], []
-        for mon in monsters():
+        for mon in monsters(with_crimsonite=True):
             try:
                 icon = build_icon(mon, zoom=zoom)
             except tk.TclError as exc:
@@ -613,8 +715,7 @@ def write_icons(outdir, zoom=1):
             if icon is None:
                 missing.append((mon, "no avatar in the atlas and no idle strip"))
                 continue
-            name = "%03d_%s.png" % (mon.number, mon.uid) if mon.number else "%s.png" % mon.uid
-            out = os.path.join(outdir, name)
+            out = os.path.join(outdir, icon_name(mon, zoom))
             icon.write(out, format="png")
             written.append(out)
     finally:
@@ -636,20 +737,24 @@ def main(argv):
         return 0
     if "--where" in argv:
         needle = argv[argv.index("--where") + 1].lower()
-        for mon in monsters():
+        for mon in monsters(with_crimsonite=True):
             if needle in mon.name.lower() or needle in (mon.uid or "").lower():
-                print("#%s %s (%s)" % (mon.number, mon.name, mon.uid))
-                for zone, lo, hi, share, battles in where(mon.uid):
+                print("#%s %s (%s)" % (mon.number, mon.name, mon.key))
+                for zone, lo, hi, share, battles in where(mon.uid, mon.skin):
                     print("   %-22s %-22s L%-3s-%-3s %5.1f%%%s" % (
                         zone.map_file, zone.name, lo, hi, share,
                         "   x%d battles" % battles if battles > 1 else ""))
         return 0
 
     mons = monsters()
+    forms = crimsonite_forms()
     no_icon = [m for m in mons if strip_frame(m.uid) is None]
     numbered = [m for m in mons if m.number is not None]
     print("%d Coromon: #%s..#%s, then %d with no dex number (titans and the like)" % (
         len(mons), numbered[0].number, numbered[-1].number, len(mons) - len(numbered)))
+    print("crimsonite forms        : %d, across %d line(s), %d of them with encounters" % (
+        len(forms), len({m.family for m in forms}),
+        sum(1 for m in forms if where(m.uid, m.skin))))
     try:
         have_atlas = sum(1 for m in mons if avatar_cell(m.uid))
         print("dex frames in the atlas : %d" % have_atlas)
@@ -658,7 +763,7 @@ def main(argv):
     print("with a sprite sheet     : %d" % (len(mons) - len(no_icon)))
     if no_icon:
         print("   no sprite for        : %s" % ", ".join(m.uid for m in no_icon[:8]))
-    wild = [m for m in mons if where(m.uid)]
+    wild = [m for m in mons if where(m.uid, m.skin)]
     print("with a location  : %d  (the rest are evolutions, starters, gifts - no wild encounters)"
           % len(wild))
     print("(skipped %d unused 900+ slots)"

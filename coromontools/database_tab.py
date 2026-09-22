@@ -494,7 +494,7 @@ class DatabaseTab(QWidget):
         left showing the previous Coromon's - which also clears the map, because `set_rows` tells
         the selection there is nothing to show.
         """
-        found = dex.where(mon.uid)
+        found = dex.where(mon.uid, mon.skin)
         if not found:
             self.footer.setText("%s: no wild encounters - an evolution, a starter or a gift"
                                 % mon.name)
