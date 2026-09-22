@@ -2403,13 +2403,21 @@ do
         end
         if isList and f.container == nil then f.container = container end
         if isList then
+          -- KEPT FRESH, NOT SET ONCE - and that is a fix, not tidiness. The pause menu builds a NEW
+          -- screen every time it is opened, and the old screen's parent becomes nil. With
+          -- `f.screen = f.screen or container.parent` the first screen was kept forever, so from
+          -- the second visit onwards `f.screen.parent` was nil, which the check at the end of this
+          -- function reads as "the screen went" - and it closed the modal on the very next tick.
+          -- That is the bug the player reported as "the click that opened the dialog also dismissed
+          -- it": the dialog is a stage child and lives exactly one tick. `refreshCards` wanted this
+          -- too - it asks the screen to rebuild its list, and a dead screen never answered.
+          if type(container.parent) == 'table' then f.screen = container.parent end
           local bar = f.bars[container]
           if bar == nil then
             local ok, built = pcall(buildRow, container, row)
             if ok and built then
               bar = built
               f.bars[container] = bar
-              f.screen = f.screen or container.parent
             end
           end
           if bar then
@@ -2437,8 +2445,10 @@ do
       end
     end
     -- And the modal goes with the screen rather than staying over whatever comes next: it is a
-    -- stage child, so nothing else would remove it.
-    if f.overlay ~= nil and (f.screen == nil or f.screen.parent == nil) then closeOverlay() end
+    -- stage child, so nothing else would remove it. ONLY A SCREEN WE KNOW ABOUT COUNTS: a nil
+    -- `f.screen` means no list has been seen yet, which is not evidence that the screen went away,
+    -- and treating it as such closed the dialog one tick after it opened.
+    if f.overlay ~= nil and f.screen ~= nil and f.screen.parent == nil then closeOverlay() end
   end
 
   local function kill()
