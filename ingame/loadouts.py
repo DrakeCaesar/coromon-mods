@@ -1481,25 +1481,63 @@ do
     local g = display.newGroup()
     keepOnTop(g)
 
-    local w, h = 300, 116
     local vw = tonumber(display.contentWidth) or 512
     local vh = tonumber(display.contentHeight) or 288
-    local bw, bh = 92, 30                 -- what the buttons ARE for the press, art included
-    local by = h / 2 - 30                 -- their centreline, in the group's own coordinates
-    local yesX, noX = -54, 54
+    local padX, padY = 12, 9              -- panel edge to its contents
+    local bw, bh, bgap = 64, 20, 14       -- the buttons, and what the press reads them as
     local x0, y0 = -vw / 2 - 20, -vh / 2 - 20
     local dialogBox = {}
+
+    -- THE PANEL IS MEASURED FROM WHAT GOES IN IT rather than fixed. 300x116 was mostly empty space
+    -- around two short lines, and the buttons (92x30) were sized for the longest word that could
+    -- have been in them. Here the text objects are made first and the panel is sized to hold them
+    -- and the button row, so the box fits the words and not the other way round.
+    local function measure(obj, fw, fh)
+      local a, b = nil, nil
+      pcall(function() a, b = tonumber(obj.width), tonumber(obj.height) end)
+      return a or fw, b or fh
+    end
 
     -- The pictures. Every one of them is marked non-hit-testable, so none of them can answer a
     -- press, and none of them is registered either - the press is taken from the Runtime listener.
     untouchable(rect(g, x0, y0, vw + 40, vh + 40, { 0, 0, 0, 0.35 }))
-    untouchable(rect(g, -w / 2, -h / 2, w, h, COL.panel))
-    untouchable(text(g, FONT, line, -w / 2 + 14, -h / 2 + 18, COL.text))
-    untouchable(text(g, FONT, question, -w / 2 + 14, -h / 2 + 36, COL.dark))
+    local panel = rect(g, 0, 0, 40, 20, COL.panel)
+    untouchable(panel)
+    local l1 = text(g, FONT, line, 0, 0, COL.text)
+    local l2 = text(g, FONT, question, 0, 0, COL.dark)
+    untouchable(l1)
+    untouchable(l2)
+
+    local w1, h1 = measure(l1, 120, 15)
+    local w2, h2 = measure(l2, 120, 15)
+    local rowW = bw * 2 + bgap
+    local w = math.max(w1, w2, rowW) + padX * 2
+    local h = padY * 2 + h1 + 3 + h2 + 9 + bh
+    -- The buttons' centreline, and their two centres. The press geometry handed to `openInput` is
+    -- built from these same numbers, so the drawn button and the pressable button cannot drift.
+    local by = h / 2 - padY - bh / 2
+    local yesX, noX = -(bw + bgap) / 2, (bw + bgap) / 2
+
+    pcall(function()
+      panel.x, panel.y = -w / 2, -h / 2
+      panel.width, panel.height = w, h
+      l1.x, l1.y = -w / 2 + padX, -h / 2 + padY
+      l2.x, l2.y = -w / 2 + padX, -h / 2 + padY + h1 + 3
+    end)
+
     for _, s in ipairs({ { yesX, 'yes', COL.active }, { noX, 'no', COL.load } }) do
       local box = rect(g, s[1] - bw / 2, by - bh / 2, bw, bh, s[3])
       untouchable(box)
-      untouchable(text(g, FONT, s[2], s[1] - 12, by - 6, COL.text))
+      local lab = text(g, FONT, s[2], 0, 0, COL.text)
+      untouchable(lab)
+      -- CENTRED IN ITS OWN BUTTON, MEASURED. It used to be placed at `centre - 12, by - 6`, which is
+      -- right for one particular three-letter word in one particular font and visibly off-centre for
+      -- the other - and the box of an outline font is not its ink, so a guessed offset cannot be
+      -- right for both. Same rule the chip labels follow: centre the BOX, and the ink follows.
+      pcall(function()
+        local lw, lh = measure(lab, 20, 15)
+        lab.x, lab.y = s[1] - lw / 2, by - lh / 2
+      end)
       dialogBox[s[2]] = box
     end
 
