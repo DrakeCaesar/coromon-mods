@@ -35,13 +35,18 @@ WHERE THE DATA COMES FROM: the save's own dex record, `stats.MONSTERS_OWNED` and
 
 ONE PASS, BUILT ONCE. Every cell is created a single time and then filled: a state change here
 means re-reading a save, not switching a filter, so there is no cheaper update to design for - and
-3 x 3 x 52 cells is not a grid to rebuild on a keystroke.
+3 x 3 x 51 cells is not a grid to rebuild on a keystroke. That is what RELOAD SAVE is for: it reads
+the save again and refills the same cells (`reload_save`), which is the whole update path there is.
+THE SAVE IS READ WHEN THE TAB IS FIRST SHOWN, not when the window is built, and again only when
+the button is pressed - so a save made while the window is open is picked up by pressing it.
 """
+
+import time
 
 import dex
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QScrollArea,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from . import icons
 from .config import (ICON_ZOOM, STATE_CAUGHT, STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
@@ -77,7 +82,9 @@ class DatabaseTab(QWidget):
         self.stages = line_stages(self.lines)
         self.owned = {}                  # uid -> {category: True}
         self.seen = {}
-        self.slot = None
+        self.slot = None                 # the save slot the record came from (the game's key)
+        self.saved = None                # ... and its timestamp, as the game wrote it
+        self.slots = 0                   # how many slots record a dex at all
         self.error = None
         self.cells = {}                  # (line index, category index, stage) -> (icon, caption)
         self.rules = {}                  # line index -> the rule drawn under it
@@ -97,6 +104,13 @@ class DatabaseTab(QWidget):
         top.addWidget(self.search, 1)
         self.counts = QLabel("")
         top.addWidget(self.counts)
+        # READ THE SAVE AGAIN. The tab reads it when it is first shown and never again on its own,
+        # so this is how a save made while the window is open gets in - and it is also the way to
+        # check which slot the tab is showing, which the status line then says out loud.
+        self.reload_button = QPushButton("Reload save")
+        self.reload_button.setToolTip("read the save again - the newest slot that records a dex")
+        self.reload_button.clicked.connect(self.reload_save)
+        top.addWidget(self.reload_button)
         outer.addLayout(top)
 
         self.scroll = QScrollArea()
@@ -197,7 +211,17 @@ class DatabaseTab(QWidget):
             self.error = "savefile.py is missing"
         else:
             try:
-                self.slot, self.owned, self.seen = savefile.monster_record()
+                # THE NEWEST SLOT THAT RECORDS A COROMON, which is what `monster_record` has always
+                # picked - the autosave counts as a slot like any other, so if the newest thing the
+                # game wrote is the autosave, that is what this reads. The slot and its time are
+                # kept so the status line can say which one it was instead of leaving it a guess.
+                found = savefile.dex_slots()
+                self.slots = len(found)
+                if found:
+                    self.saved, self.slot, self.owned, self.seen = found[0]
+                else:
+                    self.saved = None
+                    self.slot, self.owned, self.seen = savefile.monster_record()
                 self.error = None
             except Exception as exc:                   # noqa: BLE001 - reported, not hidden
                 self.error = "%s: %s" % (type(exc).__name__, exc)
@@ -205,11 +229,26 @@ class DatabaseTab(QWidget):
         known = {mon.uid for _family, stages in self.lines for mon in stages}
         stray = sorted(u for u in set(self.owned) | set(self.seen) if u not in known)
         parts = ["save: %s" % (self.error or self.slot)]
+        if self.saved:
+            parts[0] += "  - the newest of %d slot(s) with a dex record, saved %s" % (
+                self.slots, time.strftime("%Y-%m-%d %H:%M", time.localtime(self.saved)))
         if stray:
             parts.append("%d recorded Coromon are not in the dex: %s"
                          % (len(stray), ", ".join(stray[:6])))
         parts.append("%d evolutionary lines, %d Coromon." % (len(self.lines), len(known)))
         self.status.setText("  ".join(parts))
+
+    def reload_save(self):
+        """The Reload save button: read the save again and refill every cell from it.
+
+        NOTHING IS REBUILT - the cells, their sizes and the scroll position all stay, and only the
+        pixmaps and captions change (`apply_states`) - because the grid is the same grid whatever
+        the save says. `_built` is set so that showing the tab again does not read the file a third
+        time on top of this.
+        """
+        self._built = True
+        self.reload()
+        self.apply_states()
 
     def state_of(self, mon, category):
         """Which of the game's four dex states this Coromon is in, in that potential category.

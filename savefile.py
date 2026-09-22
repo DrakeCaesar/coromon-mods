@@ -176,24 +176,38 @@ def _record_in(obj, name):
     return {}
 
 
+def dex_slots():
+    """[(when, slot key, owned, seen), ...] for every slot that records either, NEWEST FIRST.
+
+    A SLOT WITH NO DEX RECORD IS LEFT OUT, not returned empty: an empty or just-started slot would
+    otherwise be the "newest" and hide the one that is actually being played. `when` is the
+    `metadata.dateTime` the game wrote next to the payload - a plain Unix timestamp of the local
+    clock, so `time.localtime` renders it as the moment the game saved.
+    """
+    out = []
+    for when, key, obj in _read_rows():
+        owned = _record_in(obj, OWNED_KEY)
+        seen = _record_in(obj, SEEN_KEY)
+        if owned or seen:
+            out.append((when, key, owned, seen))
+    return out
+
+
 def monster_record():
-    """(slot name, owned, seen) for the most recent slot that records either.
+    """(slot name, owned, seen) for the most recent slot that records either - see `dex_slots`.
 
     Both are {coromon uid: {category: True}}; see the module docstring. Measured on a real save:
     `MONSTERS_OWNED` held 53 UIDs and `MONSTERS_SEEN` 115 of the 117 dex entries (every owned one
     of them also seen), which is the "seen / caught" the database screen counts for itself.
     """
-    newest = None
-    for _, key, obj in _read_rows():
-        owned = _record_in(obj, OWNED_KEY)
-        seen = _record_in(obj, SEEN_KEY)
-        if owned or seen:
-            return key, owned, seen
-        if newest is None:
-            newest = (key, {}, {})
-    if newest is None:
+    slots = dex_slots()
+    if slots:
+        _when, key, owned, seen = slots[0]
+        return key, owned, seen
+    rows = _read_rows()                  # decoded, but nothing in it records a Coromon yet
+    if not rows:
         raise ValueError("no save slot could be decoded - the keystream may be from another machine")
-    return newest
+    return rows[0][1], {}, {}
 
 
 def categories(uid, record):

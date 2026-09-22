@@ -215,6 +215,28 @@ def main():
     coromon.search.setText("")
     pump(app)
 
+    # ---------------------------------------------------------------- database tab
+    # The tab reads the save when it is first SHOWN and never on its own again, so the Reload
+    # button is the only way a save made while the window is open gets in - both paths, then.
+    window.tabs.setCurrentIndex(2)
+    pump(app, 5)
+    database = window.database
+    if database.error is None:
+        # WHICH slot is stated rather than implied: it is the newest that records a dex, and the
+        # autosave is a slot like any other, so "newest" is only useful written down with its time.
+        check("the database read the newest slot and says so",
+              bool(database.slot) and "newest of" in database.status.text()
+              and "saved" in database.status.text(),
+              database.status.text())
+    else:
+        print("note database tab could not read the save: %s" % database.error)
+    status, tally = database.status.text(), database.counts.text()
+    database.reload_button.click()
+    pump(app, 5)
+    check("Reload save re-reads the same record",
+          database.status.text() == status and database.counts.text() == tally,
+          "%s" % database.status.text())
+
     # ---------------------------------------------------------------- skills tab
     window.tabs.setCurrentIndex(2)
     pump(app, 3)
