@@ -1328,6 +1328,13 @@ do
   -- `f.pressed` makes a press count only if its own `began` was seen, so the press that OPENED the
   -- modal - whose `began` went to the chip - can never be read back as an answer to it.
   --
+  -- TWO DEFENCES, because position alone was not enough. The position test (a press must START
+  -- inside the panel) catches a click-through whenever the engine says where the press started. The
+  -- TIME guard in `openInput` catches it when the engine says nothing about position at all, or when
+  -- a split/replayed sequence arrives with coordinates that happen to be inside the panel: nothing is
+  -- answered in the first 300 ms the dialog is up. Reported twice by the player as "the prompt is
+  -- dismissed immediately", once after an overlay reload.
+  --
   -- THE CARDS ARE MUTED while this listener is up, because the engine still delivers the press to
   -- them and the owner still acts on it: that is what stops the click that opens the modal from
   -- counting as a click on a Coromon as well.
@@ -1341,6 +1348,33 @@ do
   -- =====================================================================
   local function openInput(g, geo)
     closeInput()
+
+    -- A PRESS THAT ARRIVES TOO SOON AFTER THE DIALOG APPEARS IS THE CLICK THAT OPENED IT, however
+    -- the engine split, repeated or replayed that click into touch sequences. This is the SECOND
+    -- line of defence and the one that does not care what the event says: the position test below
+    -- needs a press that STARTS inside the panel to fail, and it cannot fail at all for an event
+    -- that carries no coordinates - where the old code had to assume the press was good, which is
+    -- exactly the assumption that let the opening click answer the dialog it had just opened.
+    --
+    -- 300 ms is far longer than a repeated sequence of one click (those arrive within a few ms) and
+    -- far shorter than reaching for a button. When the engine is old enough not to answer
+    -- `system.getTimer` the guard disables itself rather than blocking presses.
+    local GUARD_MS = 300
+    local openedMs = 0
+    pcall(function() openedMs = tonumber(system.getTimer()) or 0 end)
+    -- What the guard saw, for `--status`: "ignored" here means the dialog was protected, not stuck.
+    local function tooSoon()
+      if openedMs <= 0 then return false end
+      local now = 0
+      pcall(function() now = tonumber(system.getTimer()) or 0 end)
+      if now <= 0 then return false end
+      local dt = now - openedMs
+      if dt < GUARD_MS then
+        f.last = string.format('confirm: press %d ms after opening -> ignored', dt)
+        return true
+      end
+      return false
+    end
 
     -- A press, in the dialog's own coordinates. `xStart`/`yStart` are the CONTENT coordinates of
     -- the press (measured: a press at content 200,180 arrives as x=1000 y=900 with xStart=200), so
@@ -1370,10 +1404,13 @@ do
       -- the dialog may answer: a click-through from the button underneath can never be one, however
       -- the engine splits or repeats the sequence.
       if phase == 'began' then
+        -- THE OPENING CLICK ITSELF, whatever it claims about where it started.
+        if tooSoon() then f.pressed = nil return end
         local x, y = localPoint(event)
         if x == nil then
           -- No start coordinates to judge by: fall back to the old behaviour rather than refuse
-          -- presses outright, which would leave the dialog unanswerable.
+          -- presses outright, which would leave the dialog unanswerable. The time guard above has
+          -- already rejected the only press this could have been wrong about.
           f.pressed = true
           return
         end
@@ -1394,6 +1431,9 @@ do
       end
       if phase ~= 'ended' or not f.pressed then return end
       f.pressed = nil
+      -- ...and a press that ENDS too soon is the tail of that same click: a sequence split in two,
+      -- or an `ended` that reached a freshly installed listener. See `tooSoon` above.
+      if tooSoon() then return end
       -- CONTENT coordinates of the press, per the measurement above.
       local cx = tonumber(event.xStart) or tonumber(event.x)
       local cy = tonumber(event.yStart) or tonumber(event.y)
