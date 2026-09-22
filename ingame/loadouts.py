@@ -113,13 +113,6 @@ COLOURS = {
     "load": (0.22, 0.24, 0.28),
     "save": (0.30, 0.22, 0.20),
     "clear": (0.25, 0.16, 0.17),     # the lower half of the save button: clear the slot
-    # WHAT AN EMPTY ICON POSITION IS TINTED WITH - the game's own "darkened" factor, which is
-    # exactly half: every `TYPE_<X>_DARK` in `classes.constants.colors` is 0.5 x its bright colour
-    # (read live: TYPE_NORMAL_DARK = 0.25098, 0.29608, 0.27843 against Normal's 0.50196, 0.59216,
-    # 0.55686; TYPE_FIRE_DARK = 0.47647, 0.20196, 0.07255 halves the same way), built by that
-    # module's `darkenedRgbFloat`. Applied to the neutral grey container, this is the database's
-    # "undiscovered" look rather than a bright grey box.
-    "empty_frame_tint": (0.5, 0.5, 0.5),
     "press": (0.55, 0.58, 0.62),
     "panel": (0.11, 0.12, 0.14),
     "dim": (0.0, 0.0, 0.0),
@@ -163,6 +156,17 @@ SETTINGS = [
         ),
     ),
     (
+        "icon_scale",
+        1.0,
+        (
+            "how big to DRAW the icons, as a multiple of what the strip's width allows. 1.0 is the "
+            "fit the layout computes - six icons across a slot, abutting - and anything above it "
+            "makes the icons OVERLAP their neighbours, which is what the value is for: it shows "
+            "the left-to-right drawing order (each icon, frame and creature together, above the "
+            "one to its left). Half steps (1.5, 2.0) keep the art on the pixel grid"
+        ),
+    ),
+    (
         "icon_fallback_category",
         "A",
         (
@@ -182,6 +186,15 @@ SETTINGS = [
         (
             "draw a neutral (grey) type frame in every icon position of a slot that holds nothing, "
             "so the row reads as one grid of frames rather than a row with holes in it"
+        ),
+    ),
+    (
+        "empty_frame_dim",
+        0.5,
+        (
+            "how much an empty icon position is darkened. 0.5 is the game's own factor - every "
+            "TYPE_<X>_DARK colour in classes.constants.colors is half its bright one - and 1 leaves "
+            "the neutral frame undimmed"
         ),
     ),
     (
@@ -451,7 +464,7 @@ end
 -- sprite skin. The data is not the Monster - `getSpriteUID` lives on the data, which is why passing
 -- the instance dies inside getMonsterAvatarFrameIndex (measured) - and the category is REQUIRED:
 -- with none at all that call throws on a nil potential category. Both of the last two are read off
--- the Monster in loadoutIconCell; see the notes there.
+-- the Monster in loadoutAvatar; see the notes there.
 --
 -- The two images go into a cell of the game's own 24x24 units so the caller can scale the whole
 -- icon as one thing. Returns nil rather than throwing when anything is missing; the caller then
@@ -487,28 +500,26 @@ end
 -- Same shape as a real cell - a group anchored at its centre, the frame at +3.5,+3.5, which is the
 -- (24-17)/2 offset that puts the 17x17 frame's box on the 24x24 cell's - so the layout scales and
 -- places it through exactly the same code path as a Coromon's icon and the two cannot drift.
-local function loadoutEmptyFrameCell(parent)
-  local cell = display.newGroup()
-  parent:insert(cell)
-  pcall(function() cell.anchorX, cell.anchorY = 0.5, 0.5 end)
-  local frame = loadoutTypeFrame(cell, nil, 'grey')
-  if type(frame) ~= 'table' then
-    pcall(function() cell:removeSelf() end)
-    return nil
-  end
+-- AN EMPTY POSITION'S FRAME, ON ITS OWN: the same 17x17 container a real icon's frame is, drawn
+-- straight into the strip's FRAME LAYER rather than into a cell that also carries a sprite. The
+-- two layers are what gives the strip its z-order - see rebuildIcons.
+local function loadoutEmptyFrame(parent)
+  local frame = loadoutTypeFrame(parent, nil, 'grey')
+  if type(frame) ~= 'table' then return nil end
   local tint = __C_EMPTY_TINT__
   pcall(function()
     frame.anchorX, frame.anchorY = 0.5, 0.5
-    frame.x, frame.y = 3.5, 3.5
     -- TINTED LIKE THE DATABASE'S UNDISCOVERED COROMON: the grey container is a light grey box, so
     -- multiplying it by the game's own darkened factor is what turns it into the dark, "nothing
     -- here yet" frame instead of a bright plate that reads like a real entry.
     frame:setFillColor(tint[1], tint[2], tint[3])
   end)
-  return cell
+  return frame
 end
 
-local function loadoutIconCell(parent, mon)
+-- A SAVED COROMON'S SPRITE, ON ITS OWN - the other half of what used to be one "cell". It goes
+-- into the strip's AVATAR LAYER, which is inserted above the frame layer.
+local function loadoutAvatar(parent, mon)
   local okD, data = pcall(function() return mon:getMonsterData() end)
   if not okD or type(data) ~= 'table' or type(data.getSpriteUID) ~= 'function' then return nil end
   local ma = _G.MonsterAvatar or package.loaded['classes.interface.MonsterAvatar']
@@ -536,32 +547,16 @@ local function loadoutIconCell(parent, mon)
   local skin
   pcall(function() skin = mon:getSpriteSkinUID() end)
 
-  local cell = display.newGroup()
-  parent:insert(cell)
-  pcall(function() cell.anchorX, cell.anchorY = 0.5, 0.5 end)
-
-  -- The frame first, so it draws under the sprite.
-  local frame = loadoutTypeFrame(cell, mon)
-  if frame then
-    pcall(function()
-      frame.anchorX, frame.anchorY = 0.5, 0.5
-      frame.x, frame.y = 3.5, 3.5
-    end)
-  end
-
   local ok, sprite = pcall(function()
-    return ma:newBorderless(cell, data, category, skin)
+    return ma:newBorderless(parent, data, category, skin)
   end)
-  if not ok or type(sprite) ~= 'table' then
-    pcall(function() cell:removeSelf() end)
-    return nil
-  end
+  if not ok or type(sprite) ~= 'table' then return nil end
   pcall(function()
     sprite.anchorX, sprite.anchorY = 0.5, 0.5
     sprite.x, sprite.y = 0, 0
-    if sprite.parent ~= cell then cell:insert(sprite) end
+    if sprite.parent ~= parent then parent:insert(sprite) end
   end)
-  return cell
+  return sprite
 end
 
 -- The container the Coromon list's OWN rows live in, asked of the screen itself rather than guessed:
@@ -887,7 +882,7 @@ end
 """.replace("__STORE__", _lua_string(cfg["store"])).replace(
         "__ICON_CATEGORY__", _lua_string(str(cfg["icon_fallback_category"]))
     ).replace("__ICON_FRAMES__", "true" if cfg["icon_frames"] else "false").replace(
-        "__C_EMPTY_TINT__", _lua_colour("empty_frame_tint")
+        "__C_EMPTY_TINT__", _lua_dim(float(cfg["empty_frame_dim"]))
     )
 
 
@@ -899,6 +894,20 @@ def _lua_string(value):
 def _lua_colour(name):
     r, g, b = COLOURS[name]
     return "{ %s, %s, %s }" % (r, g, b)
+
+
+def _lua_dim(value):
+    """A grey triple for a single 0..1 dimming factor the player sets.
+
+    Kept as a SETTING rather than a colour: the config reader only knows the names in SETTINGS, so
+    a hand-added `empty_frame_tint` in overlays.toml was rejected with "not a setting - ignored"
+    (seen in the install output) and never reached the code.
+    """
+    if value < 0:
+        value = 0.0
+    if value > 1:
+        value = 1.0
+    return "{ %s, %s, %s }" % (value, value, value)
 
 
 def section(cfg):
@@ -914,6 +923,7 @@ do
   local CHIP_H = __CHIP_H__
   local ICONS = __ICONS__
   local ICON_SIZE = __ICON_SIZE__
+  local ICON_SCALE = __ICON_SCALE__
   local ICON_FRAMES = __ICON_FRAMES__
   local EMPTY_FRAMES = __EMPTY_FRAMES__
   local CONFIRM = __CONFIRM__
@@ -1331,12 +1341,55 @@ do
   -- =====================================================================
   local function openInput(g, geo)
     closeInput()
+
+    -- A press, in the dialog's own coordinates. `xStart`/`yStart` are the CONTENT coordinates of
+    -- the press (measured: a press at content 200,180 arrives as x=1000 y=900 with xStart=200), so
+    -- the same `contentToLocal` the answer uses converts them.
+    local function localPoint(ev)
+      local cx = tonumber(ev.xStart)
+      local cy = tonumber(ev.yStart)
+      if cx == nil or cy == nil then return nil end
+      local ok, x, y = pcall(function() return g:contentToLocal(cx, cy) end)
+      if not ok or tonumber(x) == nil or tonumber(y) == nil then return nil end
+      return tonumber(x), tonumber(y)
+    end
+
     local function onTouch(event)
       if type(event) ~= 'table' then return end
       if f.overlay ~= g then closeInput() return end
       local phase = event.phase
+
+      -- WHERE THE PRESS STARTED NOW MATTERS AS MUCH AS WHERE IT ENDED, and that is the fix for a
+      -- prompt that was sometimes dismissed the instant it appeared.
+      --
+      -- `f.pressed` alone cannot catch that: it only proves this listener saw a `began`, and one
+      -- physical click can arrive as more than one touch sequence - the click that OPENED the modal
+      -- among them, whose `began` therefore comes AFTER this listener exists. That press is on the
+      -- chip, but the ANSWER is read from the `ended`, and a stray `ended` is all it takes. So the
+      -- `began` is now converted into the dialog's coordinates and only a press that STARTED inside
+      -- the dialog may answer: a click-through from the button underneath can never be one, however
+      -- the engine splits or repeats the sequence.
       if phase == 'began' then
-        f.pressed = true
+        local x, y = localPoint(event)
+        if x == nil then
+          -- No start coordinates to judge by: fall back to the old behaviour rather than refuse
+          -- presses outright, which would leave the dialog unanswerable.
+          f.pressed = true
+          return
+        end
+        local inside = (math.abs(x) <= (tonumber(geo.pw) or 0) / 2 + 6)
+          and (math.abs(y) <= (tonumber(geo.ph) or 0) / 2 + 6)
+        if inside then
+          f.pressed = true
+        else
+          f.pressed = nil
+          f.last = string.format('confirm: press began at %.0f,%.0f (outside) -> ignored', x, y)
+        end
+        return
+      end
+      -- A cancelled press is not an answer, and must not leave `pressed` set for the next one.
+      if phase == 'cancelled' then
+        f.pressed = nil
         return
       end
       if phase ~= 'ended' or not f.pressed then return end
@@ -1421,7 +1474,10 @@ do
         box = dialogBox.no, base = COL.load, lit = litColour(COL.load) },
     })
     -- Set before the input goes on, so a press arriving in the same frame finds a live modal.
-    openInput(g, { bw = bw, bh = bh, by = by, yesX = yesX, noX = noX, slack = 6, thenFn = thenFn })
+    -- `pw`/`ph` are the PANEL's box: a press has to start inside it to count as an answer, which is
+    -- what stops a click-through from the chip underneath dismissing the dialog (see openInput).
+    openInput(g, { bw = bw, bh = bh, by = by, yesX = yesX, noX = noX, slack = 6, thenFn = thenFn,
+      pw = w, ph = h })
     muteCards()
   end
 
@@ -1633,47 +1689,83 @@ do
   --
   -- Declared BEFORE rebuildRow, which calls it: a local referenced above its own declaration is a
   -- global, which is nil at the call.
-  local function rebuildIcons(slot, list)
-    local group = slot.iconGroup
+  --
+  -- EACH ICON IS DRAWN AS A PAIR, IN ASCENDING ORDER, AND THAT ORDER IS THE Z-ORDER: position 1's
+  -- frame, then position 1's Coromon, then position 2's frame, position 2's Coromon, and so on. In a
+  -- group the later child draws over the earlier one, so one icon - its frame AND its sprite - always
+  -- sits above the icon to its left, and a sprite sits above its own frame.
+  --
+  -- IT IS DELIBERATELY NOT "all frames first, then all sprites". That reads well on paper - every
+  -- sprite over every frame - but it puts a LEFT icon's sprite above a RIGHT icon's frame, which is
+  -- exactly backwards for this row: the rule is that an icon wins over everything to its left.
+  -- Frames and sprites really do overlap their neighbours (a frame is drawn +3.5 texels right of its
+  -- own sprite, the game's own cell convention, and a cell is 9.6 units at an 8.8-unit pitch), so
+  -- the order is visible and must stay exactly this: frame i, sprite i, frame i+1, sprite i+1...
+  --
+  -- `slot.frames[i]` and `slot.icons[i]` are PARALLEL ARRAYS INDEXED BY POSITION 1..MAX_ICONS (nil
+  -- where a position holds nothing), which is what lets the layout walk a fixed grid without caring
+  -- what is filled: an empty position has a frame and no sprite, a Coromon that is gone has a dim
+  -- block and no frame (there is no type to show), a real one has both.
+  local function clearGroup(group)
     for i = (group.numChildren or 0), 1, -1 do
       local c = group[i]
       if type(c) == 'table' then pcall(function() c:removeSelf() end) end
     end
-    slot.icons, slot.missing = {}, 0
+  end
+
+  local function rebuildIcons(slot, list)
+    local group = slot.iconGroup
+    clearGroup(group)
+    slot.frames, slot.icons, slot.missing = {}, {}, 0
 
     -- THE REST OF THE GRID IS FILLED WITH EMPTY FRAMES, so every slot draws MAX_ICONS frames
     -- whether it holds six Coromon, three, or none. A group of three then shows three icons and
     -- three neutral frames instead of three icons and a gap, and the row reads as one grid of
     -- frames rather than a ragged line of icons.
     --
-    -- Same cell, and therefore the same code path through the layout, as a real icon - which is why
-    -- this is here rather than a separate strip of placeholders that could drift out of step.
-    -- Without `empty_frames`, or with no art to draw, nothing is padded and the grid simply ends
-    -- where the icons do.
+    -- Same position, and therefore the same code path through the layout, as a real icon - which is
+    -- why this is here rather than a separate strip of placeholders that could drift out of step.
+    -- Only positions that hold nothing get one: a Coromon that is saved but gone keeps its dim
+    -- block, which is a different statement. Without `empty_frames`, or with no art to draw,
+    -- nothing is padded and the grid simply ends where the icons do. The padding APPENDS, which is
+    -- what keeps the order left to right - the empty positions are to the right of the real ones.
     local function pad(from)
       if not EMPTY_FRAMES then return end
-      for _ = from, MAX_ICONS do
-        local empty = loadoutEmptyFrameCell(group)
+      for i = from, MAX_ICONS do
+        local empty = loadoutEmptyFrame(group)
         if not empty then
-          empty = rect(group, 0, 0, 24, 24, COL.empty)
+          empty = rect(group, 0, 0, 17, 17, COL.empty)
           pcall(function() empty.anchorX, empty.anchorY = 0.5, 0.5 end)
         end
-        slot.icons[#slot.icons + 1] = empty
+        slot.frames[i] = empty
       end
     end
 
     for i = 1, math.min(#list, MAX_ICONS) do
       local mon = loadoutFind(list[i].id)
-      local obj = mon and loadoutIconCell(group, mon)
-      if not obj then
-        obj = rect(group, 0, 0, 24, 24, COL.dark)
-        pcall(function() obj.anchorX, obj.anchorY = 0.5, 0.5 end)
+      -- THE FRAME IS CREATED FIRST SO THAT IT IS INSERTED FIRST: it has to end up under the sprite
+      -- of its OWN position. A position whose Coromon is gone has no frame at all - a frame says
+      -- what TYPE the Coromon is, and there is nothing to say it about - so that one is removed
+      -- again below rather than left behind.
+      local frame = mon and loadoutTypeFrame(group, mon)
+      local sprite = mon and loadoutAvatar(group, mon)
+      if sprite then
+        if not frame then
+          frame = rect(group, 0, 0, 17, 17, COL.dark)
+          pcall(function() frame.anchorX, frame.anchorY = 0.5, 0.5 end)
+        end
+        slot.frames[i] = frame
+        slot.icons[i] = sprite
+      else
+        if frame then pcall(function() frame:removeSelf() end) end
+        local block = rect(group, 0, 0, 24, 24, COL.dark)
+        pcall(function() block.anchorX, block.anchorY = 0.5, 0.5 end)
         slot.missing = slot.missing + 1
+        slot.icons[i] = block
       end
-      slot.icons[#slot.icons + 1] = obj
     end
     -- An empty list pads from 1, so a slot that holds nothing needs no case of its own.
-    pad(#slot.icons + 1)
+    pad(math.min(#list, MAX_ICONS) + 1)
   end
 
   local function rebuildRow(bar)
@@ -2020,6 +2112,16 @@ do
       if factor > widest then factor = widest end
       if factor < 1 then factor = 1 end
       bar.iconSize = unit * factor                          -- 9.6 at this screen scale: two pixels
+      -- THE MULTIPLIER GOES IN AFTER THE CLAMPS, on purpose. The clamps are what fit six icons
+      -- across a slot; `icon_scale` is the knob that overrides that fit, so the icons grow past
+      -- their grid and overlap each other. It is a test and a preference knob, not a layout one:
+      -- the SPACING below is still the measured 44 px pitch, so a doubled icon spills half its
+      -- width over each neighbour rather than pushing its neighbours aside.
+      local scaleMult = tonumber(ICON_SCALE) or 1
+      if scaleMult < 0.25 then scaleMult = 0.25 end
+      if scaleMult > 4 then scaleMult = 4 end
+      bar.iconSize = unit * factor * scaleMult
+      bar.iconScale = scaleMult
       bar.iconFactor = factor
       local scale = bar.iconSize / 24
       -- ==================================================================
@@ -2058,18 +2160,36 @@ do
         pcall(function()
           slot.iconGroup.x, slot.iconGroup.y = onGrid(sx), onGrid(CHIP_H + ICON_GAP)
         end)
-        for i, o in ipairs(slot.icons or {}) do
-          pcall(function()
-            o.xScale, o.yScale = scale, scale
-            -- Centres, because the cell's origin is the middle of the avatar - but placed so that
-            -- the FRAME lands where it was asked to (see the ink/pitch note above), which is why
-            -- the first cell's centre is 16 px in and not its own half-width. Cell i is at the
-            -- same place under every chip, filled or empty, because the grid is fixed at
-            -- MAX_ICONS cells rather than being however many icons happen to exist. On the grid,
-            -- because a sprite placed off it is a sprite whose filter reads the next frame.
-            o.x = onGrid(iconFirst + (i - 1) * iconPitch)
-            o.y = onGrid(bar.iconH / 2)
-          end)
+        -- THE FRAMES AND THE SPRITES ARE PLACED BY POSITION, from the two parallel arrays, so the
+        -- grid is the same six cells under every chip whatever it holds. Frame i and sprite i share
+        -- the same centre - the frame is offset by its own +3.5 texels (the game draws the type
+        -- container bottom-right of the sprite), which at this scale is 1.4 units, 7 px, so it is
+        -- re-applied here rather than baked into the builder: the builders no longer know about
+        -- cells, and this is the one place that decides where a position's ink lands. Both go into
+        -- ONE group (see rebuildIcons) - the drawing order is theirs, this is only their geometry.
+        local FRAME_SHIFT = 3.5 * scale
+        for i = 1, MAX_ICONS do
+          local centre = iconFirst + (i - 1) * iconPitch
+          -- Centres, and placed so that the FRAME lands where it was asked to (see the ink/pitch
+          -- note above), which is why the first position's centre is 23 px in and not its own
+          -- half-width. On the grid, because a sprite placed off it is a sprite whose filter
+          -- reads the next frame.
+          local frame = slot.frames and slot.frames[i]
+          if frame then
+            pcall(function()
+              frame.xScale, frame.yScale = scale, scale
+              frame.x = onGrid(centre + FRAME_SHIFT)
+              frame.y = onGrid(bar.iconH / 2 + FRAME_SHIFT)
+            end)
+          end
+          local sprite = slot.icons and slot.icons[i]
+          if sprite then
+            pcall(function()
+              sprite.xScale, sprite.yScale = scale, scale
+              sprite.x = onGrid(centre)
+              sprite.y = onGrid(bar.iconH / 2)
+            end)
+          end
         end
       end
     end
@@ -2114,7 +2234,10 @@ do
       untouchable(sv)
       untouchable(cl)
       -- The icon row is a group of its own, so a slot can be re-iconed without touching the
-      -- buttons - and so the icons are removed with the row when the screen goes.
+      -- buttons - and so the icons are removed with the row when the screen goes. ONE group, not a
+      -- group per icon and not a layer per kind: the children are added as frame, sprite, frame,
+      -- sprite... so an icon and its frame both sit above everything to their left. See
+      -- rebuildIcons, which owns that order.
       local icons = display.newGroup()
       g:insert(icons)
       pcall(function() icons.anchorX, icons.anchorY = 0, 0 end)
@@ -2122,7 +2245,7 @@ do
       local rec = {
         n = n, bg = bg, loadBox = loadBox, saveBox = saveBox, clearBox = clearBox,
         num = num, save = sv, clear = cl,
-        iconGroup = icons, icons = {}, sig = nil,
+        iconGroup = icons, frames = {}, icons = {}, sig = nil,
       }
       bar.slots[n] = rec
       rec.off1 = touchable(loadBox, nil, function() loadSlot(n) end)
@@ -2303,6 +2426,7 @@ end
         .replace("__STORE__", _lua_string(cfg["store"]))
         .replace("__ICONS__", "true" if cfg["icons"] else "false")
         .replace("__ICON_SIZE__", str(int(cfg["icon_size"])))
+        .replace("__ICON_SCALE__", "%g" % float(cfg["icon_scale"]))
         .replace("__ICON_FRAMES__", "true" if cfg["icon_frames"] else "false")
         .replace("__EMPTY_FRAMES__", "true" if cfg["empty_frames"] else "false")
         .replace("__C_EMPTY__", _lua_colour("empty"))

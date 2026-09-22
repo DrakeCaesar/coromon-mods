@@ -89,6 +89,10 @@ icons = true
 # Coromon list (offset_y - 3), because that gap is where they are drawn, so raising offset_y is
 # what makes them bigger
 icon_size = 14
+# how big to DRAW the icons, as a multiple of what the strip's width allows. 1.0 is the fit the
+# layout computes (six icons across a slot, abutting); above that they OVERLAP their neighbours,
+# which is what shows the left-to-right drawing order. Half steps keep the art on the pixel grid.
+icon_scale = 1.0
 # the sprite variant used when a Coromon's potential category cannot be read. Each Coromon is
 # drawn in its OWN category (A standard, B potent, C perfect), because those are different sprites
 # in the database, so this is only a fallback
@@ -98,10 +102,10 @@ icon_frames = true
 # draw a neutral (grey) type frame in every icon position of a slot that holds nothing, so the
 # row reads as one grid of frames rather than a row with holes in it
 empty_frames = true
-# what an empty icon position is tinted with - the game's own darkened factor, which
-# is half (every TYPE_<X>_DARK colour in classes.constants.colors is 0.5 x its bright
-# one). 1, 1, 1 leaves the neutral frame as it is drawn
-empty_frame_tint = [0.5, 0.5, 0.5]
+# how much an empty icon position is darkened. 0.5 is the game's own factor - every
+# TYPE_<X>_DARK colour in classes.constants.colors is half its bright one - and 1
+# leaves the neutral frame undimmed
+empty_frame_dim = 0.5
 # ask before SAVE replaces a slot that already holds a group
 confirm_overwrite = true
 # how long the result message stays up, in seconds
