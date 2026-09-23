@@ -37,6 +37,7 @@ import coromontools.state as state                          # noqa: E402
 from coromontools import MainWindow, font, icons             # noqa: E402
 from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
+from coromontools.table import sort_rows                      # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 from coromontools.widgets import mono_height                # noqa: E402
 
@@ -413,6 +414,51 @@ def main():
           len(set(answers)) == 1 and answers[0][0].startswith("Buzzlet")
           and ("Woodlow Harbor", "HARBOR_A", "L7-12", "44.4%") in answers[0][1],
           "%s -> %s" % (answers[0][0], answers[0][1][:2]))
+
+    # THE LIST OPENS ON THE BIGGEST SHARE FIRST, and on the NUMBER in that column rather than its
+    # text - the user: "by default the list of spawn locations there for a coromon should be ordered
+    # descending by the last column, the percentages by default. I see that right now there is a bug
+    # that they are ordered alphabetically, so descending sorts 9% before 12%".
+    shares = [float(row["share"].rstrip("%")) for row in database.locations.model_.rows]
+    check("the locations open sorted by share, biggest first",
+          shares == sorted(shares, reverse=True), shares)
+    # ... AND IT IS THE DEFAULT FOR EVERY COROMON, which is the check that would actually catch the
+    # regression: it walks the first rows of the grid and insists every list comes up non-increasing.
+    offenders = []
+    for line_index in range(min(8, len(database.lines))):
+        database.select(database.lines[line_index][1][0])
+        pump(app)
+        rows = [float(row["share"].rstrip("%")) for row in database.locations.model_.rows]
+        if rows != sorted(rows, reverse=True):
+            offenders.append(rows)
+    check("... and that is the default for every Coromon, not just the one clicked",
+          not offenders, offenders)
+    # BACK TO BUZZLET, so the two checks below are about the rows the check above measured.
+    QTest.mouseClick(database.cells[buzz[0]][0], Qt.MouseButton.LeftButton)
+    pump(app, 2)
+    # ... and BOTH directions rank them as numbers, which is checked on the helper and not on this
+    # list: every share Buzzlet has is two digits, so a text sort would agree with a numeric one and
+    # the bug would hide. "-" is a status skill's or a hidden zone's empty cell, and the non-numbers
+    # stay last whichever way round the sort is.
+    mixed = [{"share": "9.0%"}, {"share": "12.3%"}, {"share": "100.0%"}, {"share": "-"}]
+    check("... ranked as numbers, not as text, in both directions",
+          [row["share"] for row in sort_rows(mixed, "share", True)]
+          == ["100.0%", "12.3%", "9.0%", "-"]
+          and [row["share"] for row in sort_rows(mixed, "share", False)]
+          == ["9.0%", "12.3%", "100.0%", "-"],
+          [row["share"] for row in sort_rows(mixed, "share", False)])
+    # THE HEADING STILL TOGGLES IT, and the FIRST click is the biggest-first direction (the column's
+    # own `desc_first`, not a guess from the values).
+    database.locations._header_clicked(3)
+    key, desc = database.locations.sort_state
+    rising = [float(row["share"].rstrip("%")) for row in database.locations.model_.rows]
+    check("the share heading toggles to smallest first",
+          key == "share" and desc is False and rising == sorted(rising), rising)
+    database.locations._header_clicked(1)      # a different column, then back to share
+    database.locations._header_clicked(3)
+    key, desc = database.locations.sort_state
+    check("... and the first click on it is the biggest-first one",
+          key == "share" and desc is True, (key, desc))
 
     # THE MAP IS UNDER THE LIST: picking a row draws that area there, without leaving the tab - and
     # that is what the slider between the two halves is for.

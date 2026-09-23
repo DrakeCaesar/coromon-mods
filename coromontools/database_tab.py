@@ -143,7 +143,9 @@ LOCATION_COLUMNS = (
     Column("area", "Area", 165, "w"),
     Column("zone", "Zone", 165, "w"),
     Column("levels", "levels", 85, "e"),
-    Column("share", "share", 65, "e"),
+    # BIGGEST SHARE FIRST on the first click, which is the only reason this column is ever clicked -
+    # the same declaration the ranking's "most common" column carries (see `table.Column`).
+    Column("share", "share", 65, "e", True),
 )
 
 # HOW WIDE THE SEARCH FIELD IS ALLOWED TO GET. It used to stretch across the whole row, which was
@@ -318,7 +320,12 @@ class DatabaseTab(QWidget):
         self.head = QLabel(HINT)
         self.head.setWordWrap(True)
 
-        self.locations = DataTable(LOCATION_COLUMNS, sort_key="area")
+        # THE LIST OPENS ON THE BIGGEST SHARE FIRST, not on the area's name: an area name is a label
+        # and a share is a number to act on, so the order the list comes up in is the answer to "where
+        # is this one most likely" - the user: "by default the list of spawn locations there for a
+        # coromon should be ordered descending by the last column, the percentages by default".
+        # The percentages are ranked as NUMBERS (`table.rank_number`), which is what was wrong before.
+        self.locations = DataTable(LOCATION_COLUMNS, sort_key="share", sort_desc=True)
         self.locations.selectionChangedTo.connect(self.show_location)
         self.locations.doubleClicked.connect(lambda *_: self._jump())
 
@@ -649,7 +656,8 @@ class DatabaseTab(QWidget):
         its three cells was clicked - and a crimsonite cell lists the places that spawn the FORM,
         because `dex.where` is asked for `mon.uid, mon.skin` and the form is a Coromon of its own.
 
-        The rows come from `dex.where` (most likely first, then sorted here by area) and each carries
+        The rows come from `dex.where` (most likely first, then sorted by the table's own default,
+        which is the biggest share first - see `LOCATION_COLUMNS`) and each carries
         its Zone, so `show_location` can draw it and `_jump` can hand it to the first tab. A species
         you cannot meet in the grass says so instead, and the list is emptied rather than left
         showing the previous Coromon's - which also clears the map, because `set_rows` tells the

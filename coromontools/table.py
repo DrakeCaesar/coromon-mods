@@ -46,20 +46,38 @@ class Column:
             | Qt.AlignmentFlag.AlignVCenter
 
 
+def rank_number(text):
+    """The number to rank `text` by, or None when it is not a number - used by `sort_rows`.
+
+    A TRAILING "%" IS A NUMBER TOO, and it has to be said here rather than per column: that is how
+    every share in this window is shown ("9.0%"), and ranking those as text is the bug the user hit -
+    "descending sorts 9% before 12%", because the text "9" sorts above the text "1".
+    """
+    text = str(text).strip()
+    if text.endswith("%"):
+        text = text[:-1].strip()
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
 def sort_rows(rows, key, desc):
     """Rank rows by one column's displayed text, numbers before everything else.
 
     Numbers are compared as numbers and the rest as lowercased text; the two groups are then
     concatenated so the non-numbers are last in both directions. Sorting the numbers as text
-    would put "100" before "95", which is how a ranking of levels stops making sense.
+    would put "100" before "95", which is how a ranking of levels stops making sense - and a
+    percentage is a number too (see `rank_number`).
     """
     numbers, others = [], []
     for row in rows:
         text = row.get(key, "")
-        try:
-            numbers.append((float(text), row))
-        except (TypeError, ValueError):
+        value = rank_number(text)
+        if value is None:
             others.append((str(text).lower(), row))
+        else:
+            numbers.append((value, row))
     numbers.sort(key=lambda pair: pair[0], reverse=desc)
     others.sort(key=lambda pair: pair[0], reverse=desc)
     return [row for _, row in numbers + others]
