@@ -1045,6 +1045,36 @@ def main():
     row_of = {line.split()[0]: line for line in named}
     check("... with every missing kind named on its line's own row",
           all(missing_tab.SHORT[g.kind] in row_of[g.name] for g in sample["missing"]), named[:2])
+
+    # THE RIGHT HALF IS THE MAP, the user: "the right half of the missing tab should also show the map
+    # with the zone highlighted like the other tabs". It is the same `ZoneMap` widget, so the picked
+    # zone is the solid patch here exactly as on the first two tabs, and the caption appears only when
+    # the map could NOT draw the zone (`set_zone` returning False).
+    check("the tab is two columns, the ranking and pane beside the map",
+          miss.split.count() == 2
+          and miss.split.widget(0).findChild(type(miss.table)) is miss.table
+          and miss.split.widget(0).findChild(type(miss.detail)) is miss.detail
+          and miss.split.widget(1).findChild(type(miss.map)) is miss.map,
+          "%d column(s)" % miss.split.count())
+    check("neither column can be dragged shut", not miss.split.childrenCollapsible())
+    check("picking a row draws that zone on the map",
+          miss.map.zone is not None and miss.map.zone.name == sample["zone"].name
+          and not miss.map_head.isVisible(), getattr(miss.map.zone, "name", None))
+    check("... with the legend the map itself planned",
+          miss.legend_box.count() == len(miss.map.legend) + 1 and bool(miss.map.legend),
+          "%d chip(s), %d plan entry(ies)" % (miss.legend_box.count() - 1, len(miss.map.legend)))
+    # BOTH FOLLOW THE ROW, from the one place that knows it - walking a few rows and comparing.
+    mismatched = []
+    for row in miss.rows[:5]:
+        miss.show_zone(row["zone"])
+        if miss.map.zone is not row["zone"]:
+            mismatched.append(row["zone"].name)
+    check("... and the pane and the map are always the same zone", not mismatched, mismatched)
+    miss.table.selectRow(0)
+    pump(app)
+    check("the map is big enough to be worth having",
+          miss.map.minimumWidth() == 240 and miss.map.minimumHeight() == 180
+          and miss.map.width() >= 240, "%dx%d" % (miss.map.width(), miss.map.height()))
     check("... and the kinds in the rank column add up to the groups the model counts",
           all(not r["kinds"] or sum(int(part.split()[-1]) for part in r["kinds"].split("\u00b7"))
               == len(model_row["missing"])

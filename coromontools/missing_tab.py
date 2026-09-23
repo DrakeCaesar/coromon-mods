@@ -23,10 +23,11 @@ import time
 import missing as missing_data                 # the tools-root model (see the module docstring)
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout,
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSplitter, QVBoxLayout,
                                QWidget)
 
 from . import mapnames
+from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
 from .widgets import mono_text, note
 
@@ -57,6 +58,10 @@ COLUMNS = (
 
 # SHORT KIND LABELS, for the rank column and the pane: the full words are in `missing.KIND_NAMES`.
 SHORT = {"A": "standard", "B": "potent", "C": "perfect", "crimsonite": "crimsonite"}
+
+# WHAT THE MAP SAYS WHEN NOTHING IS PICKED, in this tab's own words (the other tabs have their own:
+# "pick a zone on the first tab", "pick one of its locations").
+MAP_EMPTY = "pick a zone above"
 
 RULE = ("A LINE IS COUNTED HERE WHENEVER ANY OF ITS MEMBERS IS MISSING, and it counts once - a line "
         "short of two potential categories is still one slot to go and find. A kind is missing until "
@@ -107,13 +112,50 @@ class MissingTab(QWidget):
         self.table = DataTable(COLUMNS, sort_key="lines", sort_desc=True)
         self.table.selectionChangedTo.connect(self.show_zone)
         self.table.doubleClicked.connect(self._jump)
-        outer.addWidget(self.table, 3)
 
-        outer.addWidget(note(RULE, wrap=900))
-        # NOTHING WRAPS IN THE PANE: the columns are aligned with spaces (see `widgets.mono_text`), and
-        # this pane has the whole window width because the tab has no side columns.
+        # TWO COLUMNS: the ranking and what is left in the picked zone on the left, THE MAP on the
+        # right - the user: "the right half of the missing tab should also show the map with the zone
+        # highlighted like the other tabs". It is the same `ZoneMap` the other two tabs draw, so the
+        # picked zone is the solid patch here exactly as it is there, and the legend under it comes
+        # from the map's own plan.
+        left = QWidget()
+        box = QVBoxLayout(left)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.addWidget(self.table, 3)
+        box.addWidget(note(RULE, wrap=900))
+        # NOTHING WRAPS IN THE PANE: its columns are aligned with spaces (see `widgets.mono_text`).
         self.detail = mono_text(wrap=False)
-        outer.addWidget(self.detail, 2)
+        self.detail.setToolTip("the lines still short in the picked zone, and how likely each is")
+        box.addWidget(self.detail, 2)
+
+        self.split = QSplitter(Qt.Orientation.Horizontal)
+        self.split.addWidget(left)
+        self.split.addWidget(self._build_map())
+        self.split.setStretchFactor(0, 900)
+        self.split.setStretchFactor(1, 500)
+        # THE SAME OPENING RATIO AS THE DATABASE TAB (900:500), so the two tabs split their window the
+        # same way: at the size this window actually runs at (1040x560) the left column comes out about
+        # 660 px, which holds Area, Zone, to catch, of and easiest - the columns the ranking is read
+        # by - and the map still has the 240x180 it will not go under.
+        self.split.setSizes([900, 500])
+        self.split.setChildrenCollapsible(False)
+        outer.addWidget(self.split, 1)
+
+    def _build_map(self):
+        """The map panel: its caption (only when it could not draw) and the legend under it."""
+        panel = QWidget()
+        box = QVBoxLayout(panel)
+        box.setContentsMargins(0, 0, 0, 0)
+        self.map = ZoneMap(empty=MAP_EMPTY)
+        self.map_head = QLabel("")
+        self.map_head.setWordWrap(True)
+        self.legend_row = QWidget()
+        self.legend_box = QHBoxLayout(self.legend_row)
+        self.legend_box.setContentsMargins(0, 0, 0, 0)
+        box.addWidget(self.map_head)
+        box.addWidget(self.legend_row)
+        box.addWidget(self.map, 1)
+        return panel
 
     # ------------------------------------------------------------------ the save
     def showEvent(self, event):
@@ -193,8 +235,32 @@ class MissingTab(QWidget):
 
     # ------------------------------------------------------------------ one zone
     def show_zone(self, zone):
-        """Name the row's groups one by one, most likely first - or say nothing is left in it."""
+        """Point the pane AND the map at the row - or say nothing is left in it.
+
+        BOTH from here, the same way the Database tab's list fills its own two panes below: this is the
+        one place that knows the picked zone, so the picture and the words cannot disagree. NO CAPTION
+        WHEN THE MAP ANSWERS - the selected row already names the area and the zone, so the map's own
+        line ("7 patch(es), 238 tiles at ...") is shown only when it could NOT draw, which is what
+        `set_zone` returning False means. The legend comes from the map's plan.
+        """
         self.detail.setPlainText(self.detail_text(zone))
+        drew = self.map.set_zone(zone)
+        self.map_head.setText("" if drew else self.map.headline)
+        self.map_head.setVisible(not drew)
+        while self.legend_box.count():
+            item = self.legend_box.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for (letter, colour, selected) in self.map.legend:
+            chip = QLabel(letter)
+            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            chip.setFixedWidth(22)
+            # the selected zone is the solid one - the same rule the map draws by
+            chip.setStyleSheet("background: %s; color: #ffffff; border: %s;"
+                               % (colour, "1px solid #ffffff" if selected else "none"))
+            self.legend_box.addWidget(chip)
+        self.legend_box.addStretch(1)
 
     def detail_text(self, zone):
         if zone is None:
