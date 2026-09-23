@@ -38,6 +38,7 @@ from coromontools import MainWindow, font, icons             # noqa: E402
 from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
+from coromontools.widgets import mono_height                # noqa: E402
 
 SMOKE_ORG, SMOKE_APP = "CoromonGrindSmoke", "smoke"
 
@@ -228,25 +229,45 @@ def main():
           and database.split.widget(1) is database.head.parentWidget(),
           "%d child(ren)" % database.split.count())
     check("neither column can be dragged shut", not database.split.childrenCollapsible())
-    check("the right column is the location list OVER the map",
+    check("the right column stacks the list, the species breakdown and the map",
           database.right_split.orientation() == Qt.Orientation.Vertical
-          and database.right_split.count() == 2
+          and database.right_split.count() == 3
           and database.right_split.widget(0) is database.locations
-          and database.right_split.widget(1).isAncestorOf(database.map),
+          and database.right_split.widget(1) is database.species
+          and database.right_split.widget(2).isAncestorOf(database.map),
           "%d child(ren)" % database.right_split.count())
-    # AND THE MAP IS DIRECTLY UNDER THE LIST'S LAST ROW, not half the column: the list gets its own
-    # content height back and the map takes the rest - the user: "the map section should be directly
-    # below the last line in the list, so we can fit a taller map if needed".
+    # THE SPECIES BREAKDOWN IS UNDER THE LIST, and it is the FIRST TAB'S OWN LINES - the user: "when
+    # we pick a location from the list, right under the list it should also show a breakdown of what
+    # else spawns there, same way as the first tab". So it is compared against that tab's pane rather
+    # than against a formatter, because "the same" is the requirement: that tab draws a heading line
+    # and a blank one, this pane draws neither (the selected row above it names the zone).
     database.select(database.lines[0][1][0])
     pump(app, 3)
+    chosen = database.locations.current_payload()
+    keep_share_pct = grind.min_share.value()
+    grind.min_share.setValue(0)        # the two panes are only comparable unfiltered
+    grind.show_zone(chosen)
+    pump(app, 3)
+    first_tab = grind.species.toPlainText().split("\n")[2:]
+    grind.min_share.setValue(keep_share_pct)
+    here = database.species.toPlainText().split("\n")
+    check("picking a location lists what else spawns there, exactly as the first tab does",
+          bool(here) and here == first_tab, "%s vs %s" % (first_tab[:1], here[:1]))
+    check("... with none of it scrolled out of sight",
+          database.species.verticalScrollBar().maximum() == 0,
+          "scroll range %d" % database.species.verticalScrollBar().maximum())
+    # AND THE MAP IS DIRECTLY UNDER THE LAST OF THEM, not half the column: both panes get their own
+    # content height and the map takes the rest - the user: "the map section should be directly below
+    # the last line in the list, so we can fit a taller map if needed".
     sizes = database.right_split.sizes()
-    check("the list is only as tall as its own rows",
-          abs(sizes[0] - database.locations.content_height()) <= 2,
-          "list %d px, %d row(s) want %d"
-          % (sizes[0], database.locations.model_.rowCount(),
-             database.locations.content_height()))
-    check("the map takes the rest of the column", sizes[1] > sizes[0] * 2,
-          "list %d, map %d" % tuple(sizes))
+    check("the list and the breakdown are only as tall as their own content",
+          abs(sizes[0] - database.locations.content_height()) <= 2
+          and abs(sizes[1] - mono_height(database.species, database.species.toPlainText())) <= 2,
+          "list %d/%d px, species %d/%d px"
+          % (sizes[0], database.locations.content_height(), sizes[1],
+             mono_height(database.species, database.species.toPlainText())))
+    check("the map takes the rest of the column", sizes[2] > sizes[0] * 2,
+          "list %d, species %d, map %d" % tuple(sizes))
 
     # ... AND THE GRID IS THE WHOLE DEX: one cell per entry per category, plus one per crimsonite
     # form (which has no dex entry of its own - see `dex.crimsonite_forms`).

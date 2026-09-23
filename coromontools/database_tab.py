@@ -55,20 +55,23 @@ the button is pressed - so a save made while the window is open is picked up by 
 WHERE THE SAVE CAME FROM is reported on the top row, immediately LEFT of the button that re-reads
 it.
 THE LAYOUT IS TWO COLUMNS AND TWO SLIDERS, and there is no footer any more. The grid is the left
-column; the right column is the picked Coromon's LOCATIONS over the MAP that draws the one selected
-- the user: "instead of horizontal split with footer, there are 2 columns, the left one has the
-coromon and the right one has the spawn list in the top and the map in the bottom, put a sliding
-separator between the two sections, no footer needed". The footer was a fixed 300 px of the grid's
-height for an answer that reads better beside the grid it was asked from, and the two halves of the
-right column want very different room on different days - a species with fourteen locations, an
-area with a big map - which is exactly what the slider between them is for.
-THE LIST IS SIZED TO ITS OWN ROWS and the map takes everything below the last of them (`_fit_list`)
-- the user again: "the map section should be directly below the last line in the list, so we can fit
-a taller map if needed". A `QSplitter` with equal stretch factors would put the boundary in the
-middle of the column and leave a hole under a two-row list, so the stretch is on the MAP: a resized
-window grows the map rather than moving a boundary that was dragged by hand.
-`select` fills that list with the picked Coromon's wild locations, the list's own selection draws
-its area on the map below, and a DOUBLE CLICK hands the area to the first tab's ranking.
+column; the right column is the picked Coromon's LOCATIONS, then WHAT ELSE SPAWNS IN THE PICKED
+AREA, then the MAP that draws it - the user: "instead of horizontal split with footer, there are 2
+columns, the left one has the coromon and the right one has the spawn list in the top and the map in
+the bottom, put a sliding separator between the two sections, no footer needed", and then: "when we
+pick a location from the list, right under the list it should also show a breakdown of what else
+spawns there, same way as the first tab". The footer was a fixed 300 px of the grid's height for an
+answer that reads better beside the grid it was asked from, and the three panes want very different
+room on different days - a species with fourteen locations, a zone with fifteen spawns, an area with
+a big map - which is what the sliders are for.
+THE TWO PANES ABOVE THE MAP ARE SIZED TO THEIR OWN CONTENT and the map takes everything below them
+(`_fit_column`) - the user again: "the map section should be directly below the last line in the
+list, so we can fit a taller map if needed". A `QSplitter` with equal stretch factors would put the
+boundaries in the middle of the column and leave a hole under a two-row list, so the stretch is on
+the MAP: a resized window grows the map rather than moving a boundary that was dragged by hand.
+`select` fills the list with the picked Coromon's wild locations, the list's own selection fills the
+species pane and draws that area on the map below, and a DOUBLE CLICK hands the area to the first
+tab's ranking.
 POTENTIAL IS NOT A FACTOR in any of it: the three category columns are three pictures of ONE
 species, and it can only be captured where it can be captured.
 THE TOP ROW IS ALWAYS ONE LINE. Nothing on it wraps: what does not fit is ELIDED (see
@@ -85,9 +88,11 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEd
 from . import icons, mapnames
 from .config import (ICON_ZOOM, ICON_ZOOM_KEY, ICON_ZOOM_MAX, ICON_ZOOM_MIN, STATE_CAUGHT,
                      STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
+from .grind import species_lines
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
 from .text import pretty
+from .widgets import mono_height, mono_text
 
 try:
     import savefile
@@ -129,7 +134,7 @@ MAP_EMPTY = "pick one of its locations"
 # HEIGHTS are only what the first layout pass gets: the list is then given exactly its own content
 # height by `_fit_list`, so the map takes everything below the last row it has.
 GRID_WIDTH, PANEL_WIDTH = 900, 500
-LIST_OPENING, MAP_OPENING = 60, 400
+LIST_OPENING, SPECIES_OPENING, MAP_OPENING = 60, 90, 380
 
 # THE LOCATION LIST'S COLUMNS: where can I catch this one, as the area, the zone's own name, the
 # level range and the encounter share. A row carries its Zone (`PAYLOAD`), which is what lets the
@@ -317,6 +322,16 @@ class DatabaseTab(QWidget):
         self.locations.selectionChangedTo.connect(self.show_location)
         self.locations.doubleClicked.connect(lambda *_: self._jump())
 
+        # AND WHAT ELSE SPAWNS THERE, directly under the rows it belongs to - the user: "when we
+        # pick a location from the list, right under the list it should also show a breakdown of what
+        # else spawns there, same way as the first tab". Same pane, same columns, same formatter
+        # (`grind.species_lines`, imported rather than copied so the two tabs cannot drift).
+        # IT IS WHAT MAKES THE ROW MEAN SOMETHING: the picked Coromon is one line of this list, with
+        # its own share, and the pane shows it against the company it keeps. NOTHING IS FILTERED -
+        # the first tab has a "hide species under %" control and this pane shows the zone as it is.
+        self.species = mono_text(wrap=False)
+        self.species.setToolTip("what the picked area spawns, most common first")
+
         self.map = ZoneMap(empty=MAP_EMPTY)
         # THE MAP'S OWN CAPTION, shown only when the map could NOT draw the zone, and the legend
         # under it - both filled by `show_location`, which is also what empties them again.
@@ -333,17 +348,20 @@ class DatabaseTab(QWidget):
         stack.addWidget(self.legend_row)
         stack.addWidget(self.map, 1)
 
-        # THE SLIDER BETWEEN THE LIST AND THE MAP, so the map can be as tall as the column allows:
-        # the list is given exactly the height of its own rows and the map takes everything below
-        # them (see `_fit_list`). THE STRETCH IS ON THE MAP ALONE, which is what keeps a resize from
-        # moving a boundary the user dragged - extra height grows the map, not the split. The map's
-        # own floor (240x180) is the one size the slider cannot go under.
+        # THE SLIDER BETWEEN THE THREE, so the map can be as tall as the column allows: the list and
+        # the species pane are given exactly the height of their own content and the map takes
+        # everything below them (see `_fit_column`). THE STRETCH IS ON THE MAP ALONE, which is what
+        # keeps a resize from moving a boundary the user dragged - extra height grows the map, not
+        # the rows. The map's own floor (240x180) is the one size it cannot go under.
         self.right_split = QSplitter(Qt.Orientation.Vertical)
+        self.right_split.setChildrenCollapsible(False)
         self.right_split.addWidget(self.locations)
+        self.right_split.addWidget(self.species)
         self.right_split.addWidget(below)
         self.right_split.setStretchFactor(0, 0)
-        self.right_split.setStretchFactor(1, 1)
-        self.right_split.setSizes([LIST_OPENING, MAP_OPENING])
+        self.right_split.setStretchFactor(1, 0)
+        self.right_split.setStretchFactor(2, 1)
+        self.right_split.setSizes([LIST_OPENING, SPECIES_OPENING, MAP_OPENING])
 
         panel = QWidget()
         right = QVBoxLayout(panel)
@@ -404,24 +422,45 @@ class DatabaseTab(QWidget):
         """Re-fit the top row - and the right column's first fit, which needs a size to work with."""
         super().resizeEvent(event)
         self._elide_labels()
-        # ONCE. `_build` runs before the widget has a size to divide, so the content height cannot
+        # ONCE. `_build` runs before the widget has a size to divide, so the content heights cannot
         # be turned into slider sizes there; after this one the sizes belong to the user, and the
         # MAP's stretch factor is what a resize grows.
         if not self._fitted:
-            self._fitted = self._fit_list()
+            self._fitted = self._fit_column()
 
-    def _fit_list(self):
-        """Give the location list exactly the room its own rows need, and the map ALL the rest.
+    def _fit_column(self):
+        """Give the list and the species pane the room their own content needs, and the map ALL the
+        rest.
 
-        THE RIGHT COLUMN IS NOT A HALF-AND-HALF SPLIT, which is what a `QSplitter` with equal
-        stretch factors gives - and the user asked for the point of it instead: "the map section
-        should be directly below the last line in the list, so we can fit a taller map if needed".
-        So the slider is put on the list's own content height (`DataTable.content_height`, header and
-        frame included) every time the CONTENT changes, and the map takes the remainder.
+        THE RIGHT COLUMN IS NOT AN EVEN SPLIT, which is what a `QSplitter` with equal stretch
+        factors gives - the user asked for the point of it instead: "the map section should be
+        directly below the last line in the list, so we can fit a taller map if needed". So both
+        panes above the map are put on their own content height (`DataTable.content_height`,
+        `widgets.mono_height`) every time what they hold changes, and the map takes the remainder.
 
-        Called from `select` for that reason, and returns whether it could: before the widget is
-        laid out there is no column height to divide, so what `_build` set stands.
+        Called from `show_location`, which is what changes both at once - the rows come from the
+        picked Coromon and the species from the picked ROW (see there) - and returns whether it could:
+        before the widget is laid out there is no column height to divide, so what `_build` set
+        stands.
         """
+        span = (self.right_split.height()
+                - self.right_split.handleWidth() * (self.right_split.count() - 1))
+        # THE MAP'S OWN FLOOR IS THE LIMIT on how much the two panes may take (240x180, see
+        # `ZoneMap`): a species list longer than the column can show scrolls its own pane instead of
+        # squeezing the map out of existence.
+        room = span - self.map.minimumHeight()
+        if room <= 0:
+            return False
+        want = [self.locations.content_height(),
+                mono_height(self.species, self.species.toPlainText())]
+        if sum(want) > room:
+            # both keep a share of what there is, so neither is driven to nothing by a long list in
+            # the other (they have their own minimums, and Qt applies them either way)
+            share = room / float(sum(want))
+            want = [int(value * share) for value in want]
+        self.right_split.setSizes(want + [max(1, span - sum(want))])
+        return True
+
         span = (self.right_split.height()
                 - self.right_split.handleWidth() * (self.right_split.count() - 1))
         # THE MAP'S OWN FLOOR IS THE LIMIT on how much the list may take (240x180, see `ZoneMap`):
@@ -621,7 +660,6 @@ class DatabaseTab(QWidget):
             self.head.setText("%s: no wild encounters - an evolution, a starter or a gift"
                               % mon.name)
             self.locations.set_rows([])
-            self._fit_list()
             return
         self.head.setText("%s   %d location(s)" % (mon.name, len(found)))
         self.locations.set_rows([{
@@ -631,13 +669,18 @@ class DatabaseTab(QWidget):
             "share": "%.1f%%" % share,
             PAYLOAD: zone,
         } for zone, low, high, share, _battles in found])
-        # THE LIST'S HEIGHT FOLLOWS ITS CONTENT, so the map is as tall as what is left - see
-        # `_fit_list`. After a row count change this re-fits even if the slider was dragged, because
-        # "directly below the last line" is the point of the column.
-        self._fit_list()
+        # NO FIT CALL HERE: filling the list selects its first row, which runs `show_location` - and
+        # that is where the species pane is filled and the column re-fitted, so both panes are sized
+        # from one place rather than two that could disagree.
 
     def show_location(self, zone):
-        """Draw that location on the map below the list - what PICKING A ROW does.
+        """Draw that location on the map below, and list what else spawns there - what PICKING A ROW
+        does.
+
+        BOTH PANES BELOW THE LIST ARE FILLED FROM HERE, because this is the one place that knows the
+        picked AREA: the species pane describes that area (not the Coromon), so every row in turn can
+        be read against the company its Coromon keeps. It is also the only thing that changes the two
+        panes' heights, which is why the column is re-fitted from here - see the end of this method.
 
         Selecting is enough here, unlike the first tab's map, because this map is right there: the
         selection moves, the picture follows, and nothing is lost by looking at every row in turn.
@@ -649,6 +692,7 @@ class DatabaseTab(QWidget):
         the map could NOT answer, which is what `set_zone` returning False means ("no map file",
         "not marked on the map of...", or nothing picked yet).
         """
+        self.species.setPlainText("\n".join(species_lines(zone)) if zone is not None else "")
         drew = self.map.set_zone(zone)
         self.map_head.setText("" if drew else self.map.headline)
         self.map_head.setVisible(not drew)
@@ -666,12 +710,16 @@ class DatabaseTab(QWidget):
                                % (colour, "1px solid #ffffff" if selected else "none"))
             self.legend_box.addWidget(chip)
         self.legend_box.addStretch(1)
+        # THE COLUMN IS RE-FITTED LAST, once both panes hold what they are going to hold: the list's
+        # rows come from `set_rows` and the species pane's lines were set at the TOP of this method,
+        # so this is the one moment both content heights are current.
+        self._fit_column()
 
     def _jump(self):
         """Hand the double-clicked location to the first tab, where the grinder can use it.
 
         The map above already answers "where is it", so this is the step beyond it: DOUBLE CLICK
-        means "take me there", exactly as in the Coromon tab (see `zoneChosen`).
+        means "take me there", and the ranking it is being handed to is the first tab's.
         """
         zone = self.locations.current_payload()
         if zone is not None:

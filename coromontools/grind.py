@@ -65,6 +65,28 @@ def zone_rows(zone, min_share=0.0):
             if row["share"] >= min_share]
 
 
+def species_lines(zone, min_share=0.0):
+    """One aligned line per spawn of `zone`, most common first - the body of a species pane.
+
+    ONE FORMATTER FOR TWO TABS: this tab draws it under its map and the Database tab under its
+    location list, answering the same question ("what is in this grass?") in the same columns. That
+    is why the alignment is padded with spaces and the panes do NOT wrap.
+
+    The heading belongs to the caller: this tab names the zone and marks a water zone, the Database
+    tab does not, because the selected row directly above the pane already names it.
+    """
+    rows = zone_rows(zone, min_share)
+    width = max([14] + [len(row["name"]) + 1 for row in rows])
+    lines = []
+    for row in rows:
+        tag = {1: "", 2: "   double battle", 3: "   triple battle"}.get(row["battles"], "")
+        if row.get("crimsonite"):
+            tag += "   crimsonite"
+        lines.append("  %-*s L%-3s-%-3s  %5.1f%%%s" % (
+            width, row["name"], row["min"], row["max"], row["share"], tag))
+    return lines
+
+
 def rank(zones, level, min_share=0.0, only_xp=True):
     """Zones worth walking to for a squad of `level`, best first.
 
@@ -402,14 +424,7 @@ class GrindTab(QWidget):
     def _species_text(self, zone):
         lines = ["%s  (%s)%s" % (zone.name, mapnames.area(zone.map_file),
                                  "   water" if zone.water else ""), ""]
-        rows = zone_rows(zone, self.min_share_value())
-        width = max([14] + [len(row["name"]) + 1 for row in rows])
-        for row in rows:
-            tag = {1: "", 2: "   double battle", 3: "   triple battle"}.get(row["battles"], "")
-            if row.get("crimsonite"):
-                tag += "   crimsonite"
-            lines.append("  %-*s L%-3s-%-3s  %5.1f%%%s" % (
-                width, row["name"], row["min"], row["max"], row["share"], tag))
+        lines.extend(species_lines(zone, self.min_share_value()))
         return "\n".join(lines)
 
     def _show_map_head(self):
