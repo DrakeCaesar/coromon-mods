@@ -32,6 +32,7 @@ import skills                                               # noqa: E402
 
 import dex                                                  # noqa: E402
 import items as item_data                                   # noqa: E402
+import missing as missing_data                              # noqa: E402
 import savefile                                             # noqa: E402
 
 import coromontools.state as state                          # noqa: E402
@@ -39,6 +40,7 @@ from coromontools import MainWindow, font, icons, mapnames as mn   # noqa: E402
 from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
 from coromontools.grind import encounter_lines                # noqa: E402
+from coromontools import missing_tab                          # noqa: E402
 from coromontools.table import ICON, sort_rows                # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 from coromontools.widgets import mono_height                # noqa: E402
@@ -93,11 +95,11 @@ def main():
     pump(app)
 
     # ---------------------------------------------------------------- window
-    # THE COROMON TAB IS GONE - the Database tab supersedes it (see `coromontools/__init__.py`) - so
-    # the tabs are the four questions there are, in that order.
+    # THE COROMON TAB IS GONE - the Database tab supersedes it (see `coromontools/__init__.py`) - and
+    # the Missing tab joined the set after the Database one, which it is the companion of.
     titles = [window.tabs.tabText(index).strip() for index in range(window.tabs.count())]
-    check("four tabs, in that order",
-          titles == ["Where to grind", "Database", "Items", "Skills"], titles)
+    check("five tabs, in that order",
+          titles == ["Where to grind", "Database", "Missing", "Items", "Skills"], titles)
     check("window titled", bool(window.windowTitle()), window.windowTitle())
     check("min size kept", window.minimumWidth() == 1040 and window.minimumHeight() == 560)
 
@@ -927,12 +929,119 @@ def main():
           database.saved_label.text() == report and database.counts.text() == tally,
           "%s" % database.saved_label.text())
 
+    # ---------------------------------------------------------------- missing tab
+    # THE DATABASE TAB'S COMPANION: the zones ordered by how many GROUPS are still missing there. The
+    # grouping is the user's own rule - "if we have at least one of the evolutions of the 4 groups
+    # caught it counts as having that kind of coromon already captured, because transition between
+    # evolution levels is trivial ... if we are missing all 3 of a potential level that counts as
+    # missing and if we have one that means caught". Counts that depend on the save are always
+    # RECOMPUTED here rather than remembered, because the save moves under this test.
+    window.tabs.setCurrentIndex(2)
+    pump(app, 6)
+    miss = window.missing
+    # THE SAME RECORD THE DATABASE TAB READ, taken from it rather than read again, so the two tabs are
+    # provably looking at one moment - and every save-dependent number below is recomputed from it.
+    miss_owned, miss_skins = database.owned, database.skins
+    # THE FACTS, not the label text: the Database tab elides its label to fit a row full of controls
+    # ("save: saveslot_…"), so comparing the two strings would test the eliding, not the save.
+    check("the missing tab read the same save as the database",
+          (miss.slot, miss.saved) == (database.slot, database.saved),
+          "missing %s/%s, database %s/%s" % (miss.slot, miss.saved, database.slot, database.saved))
+    check("the ranking opens on the most missing, biggest first",
+          miss.table.sort_state == ("missing", True), miss.table.sort_state)
+    check("... and it lists the zones that can fill something",
+          miss.table.model_.rowCount() > 0, miss.table.model_.rowCount())
+
+    # THE GROUPS THEMSELVES: four per line at most, and a group counts as caught when ANY stage is.
+    lines_now = dex.lines()
+    check("a line makes up to four groups, one per kind",
+          len(miss.groups_) == 3 * len(lines_now) + len({g.family for g in miss.groups_
+                                                         if g.kind == dex.CRIMSONITE}),
+          "%d groups over %d lines" % (len(miss.groups_), len(lines_now)))
+    check("... the crimsonite group only for the lines that have a form",
+          all(g.kind != dex.CRIMSONITE or g.skin == dex.CRIMSONITE for g in miss.groups_)
+          and len({g.family for g in miss.groups_ if g.kind == dex.CRIMSONITE}) > 0)
+    check("... and a group is caught when one stage is, which is the user's rule",
+          all(g.caught == any(g.kind in savefile.categories(mon.uid, miss_owned)
+                              for mon in g.members)
+              for g in miss.groups_ if g.kind != dex.CRIMSONITE),
+          "%d caught of %d" % (sum(1 for g in miss.groups_ if g.caught), len(miss.groups_)))
+    check("... the crimsonite group being the line's skin, not a dex entry",
+          all(g.caught == savefile.has_skin(miss_skins, g.family, dex.CRIMSONITE)
+              for g in miss.groups_ if g.kind == dex.CRIMSONITE))
+    check("the tab's own reading of the save agrees with savefile's",
+          all(missing_data._owns(miss_owned, uid, kind)
+              == (kind in savefile.categories(uid, miss_owned))
+              for uid in list(miss_owned)[:40] for kind in ("A", "B", "C")),
+          "checked %d uid(s)" % min(40, len(miss_owned)))
+
+    # THE ROWS: the count in the "to catch" column is the number of MISSING groups that spawn there,
+    # recomputed from `dex.where` - the whole point of the tab.
+    rows = [r for r in miss.rows if r["missing"]]
+    # A ZONE WITH NOTHING LEFT IS STILL LISTED, sorted to the bottom rather than hidden: it is the
+    # answer to "where is there nothing for me", which is worth having when the ones above it are all
+    # far away. The count is what orders the list.
+    check("the rows that are done sit at the bottom",
+          [bool(r["missing"]) for r in miss.rows]
+          == sorted((bool(r["missing"]) for r in miss.rows), reverse=True),
+          [len(r["missing"]) for r in miss.rows][-4:])
+    check("... sorted by how many are missing, and nothing is missing outside the zone's own groups",
+          [len(r["missing"]) for r in miss.rows]
+          == sorted((len(r["missing"]) for r in miss.rows), reverse=True)
+          and all(set(r["missing"]) <= set(r["groups"]) for r in miss.rows))
+    sample = miss.rows[0]
+    hosted = {uid for uid in sample["zone"].monsters} | set(sample["zone"].crimsonite)
+    families = {missing_data.family_of().get(uid) for uid in hosted}
+    check("... the top row's groups are exactly the missing ones of the lines that spawn there",
+          {g.family for g in sample["missing"]} <= families,
+          "%d missing, lines %s" % (len(sample["missing"]), sorted(f for f in families if f)))
+    zone_names = [r["zone"].name for r in miss.rows]
+    check("... a zone is listed once", len(zone_names) == len(set(zone_names)))
+    check("... every zone in the list really spawns a line a group belongs to",
+          all(any(uid in missing_data.family_of() for uid in list(r["zone"].monsters)
+                  + list(r["zone"].crimsonite)) for r in miss.rows))
+
+    # THE PANE: one line per missing group of the selected zone, most likely first.
+    miss.table.selectRow(0)
+    pump(app, 3)
+    pane = miss.detail.toPlainText()
+    check("the pane names the selected zone and how many groups are missing",
+          sample["zone"].name in pane and "%d of %d groups missing"
+          % (len(sample["missing"]), len(sample["groups"])) in pane, pane.splitlines()[:2])
+    named = [line for line in pane.splitlines() if line.startswith("  ") and line.strip()]
+    check("... with one line per missing group", len(named) == len(sample["missing"]),
+          len(named))
+    check("... each naming its line and its kind",
+          all(any(g.name in line and missing_tab.SHORT[g.kind] in line
+                  for g in sample["missing"]) for line in named))
+    check("... and the kinds in the rank column add up to the count",
+          all(not r["kinds"] or sum(int(part.split()[-1]) for part in r["kinds"].split("\u00b7"))
+              == int(r["missing"]) for r in miss.table.model_.rows),
+          miss.table.model_.rows[0]["kinds"])
+    check("the tab's summary counts the groups the same way",
+          "%d group(s) left in" % sum(1 for g in miss.groups_ if not g.caught)
+          in miss.summary.text(), miss.summary.text())
+    # ... AND A ZONE WITH NOTHING LEFT SAYS SO, rather than an empty pane that reads as a bug.
+    caught_one = next((r for r in miss.rows if not r["missing"]), None)
+    if caught_one is not None:
+        check("a zone with everything caught says so",
+              "already caught" in miss.detail_text(caught_one["zone"]),
+              miss.detail_text(caught_one["zone"]).splitlines()[:2])
+    # the gesture the Database tab has: a double click hands the zone to the first tab
+    handed = []
+    miss.zoneChosen.connect(handed.append)
+    miss._jump(miss.table.model_.index(0, 0))
+    check("double clicking a row hands its zone to the ranking",
+          bool(handed) and getattr(handed[-1], "name", None) == sample["zone"].name,
+          getattr(handed[-1], "name", None))
+    window.tabs.setCurrentIndex(2)
+
     # ---------------------------------------------------------------- items tab
     # THE STATS HERE ARE THE GAME'S OWN, read out of its Lua, because the item JSON has no stat field
     # at all (see `items.py`). So these are the numbers the game charges and rolls with, checked
     # against the Spinner line - which is also where the awkward cases live: Platinum overrides the
     # shake count instead of a modifier, and the Dream Spinner's modifier is conditional.
-    window.tabs.setCurrentIndex(2)
+    window.tabs.setCurrentIndex(3)
     pump(app, 3)
     items_tab = window.items
     check("every item record is listed",
@@ -1016,7 +1125,7 @@ def main():
           % (sum(1 for row in model.rows if row.get(ICON) is None), len(model.rows)))
 
     # ---------------------------------------------------------------- skills tab
-    window.tabs.setCurrentIndex(3)
+    window.tabs.setCurrentIndex(4)
     pump(app, 3)
     skills_tab = window.skills
     # the filters are saved state, so clear them before counting: a run after a filtered one
@@ -1052,7 +1161,7 @@ def main():
           skills_tab.table.model_.rows[-1]["power"])
 
     # ---------------------------------------------------------------- saved state
-    check("tab index saved", prefs.get("tab") == 3, prefs.get("tab"))
+    check("tab index saved", prefs.get("tab") == 4, prefs.get("tab"))
     check("skill filters saved", prefs.get("skill_type") == "poison", prefs.get("skill_type"))
     check("prefs readable back", state.load_prefs().get("skill_type") == "poison")
     check("nothing written to the real settings",

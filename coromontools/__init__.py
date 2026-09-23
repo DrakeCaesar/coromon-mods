@@ -13,8 +13,7 @@ Modules are split by responsibility:
 * ``mapview``    - the zone map, which patch of grass each zone is
 * ``grind``      - the "Where to grind" tab
 * ``database_tab`` - the Database tab: the game's own grid, caught / seen / unknown per potential
-                   category, and where the picked Coromon can be caught
-* ``items_tab``  - the Items tab: every item, with the stats and the sprites the game's Lua holds
+                   category, and where the picked Coromon can be caught * ``missing_tab`` - the Missing tab: the zones that can still fill the dex, most missing groups first* ``items_tab``  - the Items tab: every item, with the stats and the sprites the game's Lua holds
 * ``skills_tab`` - the Skills tab
 
 Run it with the entry script beside this package (``encounters_gui.py``), or
@@ -46,6 +45,7 @@ from .config import ON_TOP_DEFAULT                                     # noqa: E
 from .database_tab import DatabaseTab                                  # noqa: E402
 from .grind import GrindTab, rank, zone_rows                           # noqa: E402
 from .items_tab import ItemsTab                                        # noqa: E402
+from .missing_tab import MissingTab                                    # noqa: E402
 from .skills_tab import SkillsTab                                      # noqa: E402
 from .theme import apply_theme                                         # noqa: E402
 
@@ -63,8 +63,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(MIN_WIDTH, MIN_HEIGHT)
 
-        # FOUR TABS, and they are the four questions: where to grind, what the save records (with
-        # where each Coromon can be caught), what the items are (with the stats only the game's Lua
+        # FIVE TABS, and they are the questions: where to grind, what the save records (with where
+        # each Coromon can be caught), WHAT IS STILL MISSING AND WHERE TO GET IT - the Database tab's
+        # companion, sitting right after it - what the items are (with the stats only the game's Lua
         # has), and what the skills do.
         # The Coromon tab USED to sit between the first two with a flat list of every Coromon and its
         # locations - the user: "get rid of the coromon tab, since the database tab superseeds it". It
@@ -74,10 +75,12 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.grind = GrindTab(zones, prefs)
         self.database = DatabaseTab(prefs)
+        self.missing = MissingTab(prefs)
         self.items = ItemsTab()
         self.skills = SkillsTab(skill_list, prefs)
         self.tabs.addTab(self.grind, "  Where to grind  ")
         self.tabs.addTab(self.database, "  Database  ")
+        self.tabs.addTab(self.missing, "  Missing  ")
         self.tabs.addTab(self.items, "  Items  ")
         self.tabs.addTab(self.skills, "  Skills  ")
         self.setCentralWidget(self.tabs)
@@ -87,6 +90,9 @@ class MainWindow(QMainWindow):
         # it can hand a zone to is the first tab, so the gesture crosses tabs and the window is the
         # one that owns the switch (see `show_zone_on_map`).
         self.database.zoneChosen.connect(self.show_zone_on_map)
+        # ... AND THE SAME GESTURE IN THE MISSING TAB: its whole point is choosing where to go next,
+        # so a double-clicked row goes to the ranking that can show the spot on the map.
+        self.missing.zoneChosen.connect(self.show_zone_on_map)
         self.tabs.currentChanged.connect(self._tab_changed)
 
         saved = prefs.get("tab")
@@ -156,6 +162,10 @@ def selftest():
         lines_hit = {f.family for f in forms if savefile.has_skin(skins, f.family, dex.CRIMSONITE)}
         print("  skin unlocks recorded: %d, crimsonite lines among them: %d of %d"
               % (len(skins), len(lines_hit), len({f.family for f in forms})))
+        # THE MISSING TAB'S OWN NUMBERS, from the same record: the groups that are left and the zones
+        # that can still fill them (see `missing.py`).
+        import missing
+        print("  " + missing.report(owned, skins).replace("\n", "\n  "))
     except Exception as exc:                    # noqa: BLE001 - a missing save is not a crash
         print("  dex record unavailable: %s: %s" % (type(exc).__name__, exc))
     for skill in skills.shown(skill_list, "poison")[:2]:
