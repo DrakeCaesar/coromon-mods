@@ -107,12 +107,16 @@ local function autorollState()
   -- only autoroll.py arms it, because only autoroll.py can press the confirm key. Saying so here is
   -- what keeps "it did nothing" from looking like "it is broken".
   if not f.armed then return 'idle - run autoroll.py to start it' end
-  local s = string.format('rolls=%d %s', f.rolls or 0, tostring(f.state))
+  -- THE AIMED POTENTIAL is on the table rather than in the loop's closure so the driver can set it
+  -- from outside (`python autoroll.py 20`) without re-installing anything; the fallback is the value
+  -- the feature was installed with, for an older copy that has no `target`.
+  local s = string.format('rolls=%d %s aiming for P%s', f.rolls or 0, tostring(f.state),
+    tostring(f.target or __TARGET__))
   if f.hit then s = s .. ' HIT ' .. tostring(f.hit) end
   if f.why then s = s .. ' (' .. tostring(f.why) .. ')' end
   return s
 end
-"""
+""".replace("__TARGET__", str(TARGET))
 
 
 def section(cfg):
@@ -171,6 +175,31 @@ do
   f.arm, f.disarm, f.armed = arm, disarm, false
 
   local TARGET = __TARGET__
+
+  -- THE AIMED POTENTIAL, and the one number that may be changed from OUTSIDE at run time: the driver
+  -- takes an optional argument (`python autoroll.py 20`) and calls setTarget() with it before arming.
+  -- It lives on the feature table rather than in this closure so the driver can reach it without
+  -- re-installing anything - and it survives the loop's own reloads, which matter because the reload
+  -- is what the loop does between rolls. Every reader goes through aim(), so one place decides.
+  f.target = TARGET
+  local function aim()
+    local t = tonumber(f.target)
+    if t == nil then t = TARGET end
+    return t
+  end
+  f.aim = aim
+  -- REFUSES ANYTHING THE GAME COULD NEVER DECIDE, rather than arming a loop that would reload for
+  -- ever: 1..21 is the game's whole potential range. Returns the value it took, or nil plus why - so
+  -- the driver can say which of the two happened instead of silently aiming at something impossible.
+  f.setTarget = function(n)
+    local t = tonumber(n)
+    if t == nil then return nil, 'not a number' end
+    t = math.floor(t)
+    if t < 1 or t > 21 then return nil, 'outside 1..21' end
+    f.target = t
+    return t
+  end
+
   local WALK_AFTER_HIT = __WALK__
   local DIR = __DIR__
 
@@ -356,7 +385,7 @@ do
       return
     end
     f.last = string.format('P%s to P%s', tostring(from), tostring(to))
-    if tonumber(to) == TARGET then
+    if tonumber(to) == aim() then
       -- HIT. Take the roll, then walk its steps so it can actually be collected.
       f.hit = f.last
       f.state = WALK_AFTER_HIT and 'walking' or 'ready'
@@ -401,8 +430,8 @@ end
 
 
 def summary(cfg):
-    return "'autoroll: rerolls a handover deciding anything but P%d, while autoroll.py drives it'" \
-        % TARGET
+    return ("'autoroll: rerolls a handover deciding anything but P%d, while autoroll.py drives it"
+            " (autoroll.py N aims at another potential)'" % TARGET)
 
 
 def status(cfg):

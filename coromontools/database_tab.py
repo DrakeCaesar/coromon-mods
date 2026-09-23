@@ -82,12 +82,13 @@ import time
 
 import dex
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QPushButton, QScrollArea, QSizePolicy, QSplitter, QVBoxLayout,
+                               QWidget)
 
 from . import icons, mapnames
-from .config import (ICON_ZOOM, ICON_ZOOM_KEY, ICON_ZOOM_MAX, ICON_ZOOM_MIN, STATE_CAUGHT,
-                     STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
+from .config import (HIDE_COMPLETE_KEY, ICON_ZOOM, ICON_ZOOM_KEY, ICON_ZOOM_MAX, ICON_ZOOM_MIN,
+                     STATE_CAUGHT, STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
 from .grind import species_lines
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
@@ -248,6 +249,18 @@ class DatabaseTab(QWidget):
         self.search.setMaximumWidth(SEARCH_WIDTH)
         self.search.setMinimumWidth(SEARCH_MIN_WIDTH)
         top.addWidget(self.search)
+        # HIDE THE LINES THAT ARE FINISHED - the user: "add a checkbox next to search bar that would hide
+        # complete rows, where we have caught all variants". A LINE IS COMPLETE when every Coromon in it is
+        # caught in EVERY potential category (see `_complete`); the crimsonite group is not one of them,
+        # because it is a skin unlock rather than a way of catching the same Coromon, so a line with an
+        # orange-form cell still counts as finished. Its state is the app's own, like the icon scale
+        # (`config.HIDE_COMPLETE_KEY`), so it survives a restart instead of being re-ticked every time.
+        self.hide_complete = QCheckBox("hide complete")
+        self.hide_complete.setToolTip("hide the lines whose Coromon are caught in all three "
+                                      "potential categories")
+        self.hide_complete.setChecked(self.prefs.get(HIDE_COMPLETE_KEY, False) is True)
+        self.hide_complete.toggled.connect(self._toggle_complete)
+        top.addWidget(self.hide_complete)
         self.counts = QLabel("")
         self.counts.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         top.addWidget(self.counts, 1)
@@ -847,6 +860,36 @@ class DatabaseTab(QWidget):
             "%s %d caught / %d seen" % (label, tally[category]["caught"], tally[category]["seen"])
             for category, label in CATEGORIES)
         self._elide_labels()
+        # AND THE FILTER IS RE-APPLIED, because completeness is a property of the SAVE rather than of the
+        # grid: a reload can finish a line, and with the checkbox ticked that row has to go away now
+        # instead of at the next keystroke.
+        self._filter()
+
+    def _toggle_complete(self, checked):
+        """Remember the checkbox and re-run the filter, which is what hides or shows the lines.
+
+        SAVED ON THE SPOT, like every other decision this window keeps (`state.Prefs`): the point of the
+        filter is that the tab is being READ that way, and having to tick it again on every start is
+        what makes a filter not worth having.
+        """
+        self.prefs.set(HIDE_COMPLETE_KEY, bool(checked))
+        self._filter()
+
+    def _complete(self, index):
+        """Is every Coromon of that line CAUGHT in every potential category?
+
+        THE THREE POTENTIAL CATEGORIES ARE THE VARIANTS and nothing else is: the crimsonite group is a
+        skin the save unlocks rather than another way of catching the same Coromon (the game has no
+        crimsonite dex entry at all - see `SKIN_GROUP`), so a line whose orange form is still locked
+        can still be complete. With no save - or `savefile` missing - nothing is complete, which is the
+        safe direction: the filter then hides nothing instead of everything.
+        """
+        _family, stages = self.lines[index]
+        for mon in stages:
+            for category, _label in CATEGORIES:
+                if self.state_of(mon, category) != STATE_CAUGHT:
+                    return False
+        return True
 
     def _filter(self, _text=None):
         """Hide whole LINES that do not match: a row is the unit here, not a Coromon.
@@ -858,9 +901,12 @@ class DatabaseTab(QWidget):
         THE SKIN SECTION IS PART OF ITS LINE, so the form's own name is matched too - "crimsonite"
         finds the six lines that have one (the caption there shows the species name, so the form's
         name would otherwise be unfindable).
+        THE CHECKBOX IS THE OTHER HALF of the same question and is applied on top of the needle: a line
+        has to match what is typed AND not be finished (see `_complete`) to stay on screen.
         """
         needle = self.search.text().strip().lower()
         number = needle.lstrip("#")
+        hiding = self.hide_complete.isChecked()
         for index, (_family, stages) in enumerate(self.lines):
             hit = not needle or any(
                 needle in mon.name.lower()
@@ -868,6 +914,8 @@ class DatabaseTab(QWidget):
                 for mon in stages) or any(
                 needle in form.name.lower() for form in
                 (dex.crimsonite_of(mon.uid) for mon in stages) if form is not None)
+            if hit and hiding and self._complete(index):
+                hit = False
             for cat_index in range(GROUPS):
                 for stage in range(self.stages):
                     cell = self.cells.get((index, cat_index, stage))

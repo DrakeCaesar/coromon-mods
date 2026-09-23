@@ -365,6 +365,45 @@ def main():
     database.search.setText("")
     pump(app)
 
+    # THE FINISHED LINES CAN BE HIDDEN, and the checkbox keeps its own state - the user: "add a checkbox
+    # next to search bar that would hide complete rows, where we have caught all variants. its state
+    # needs to persistant". A line is complete when every Coromon in it is caught in all three potential
+    # categories, which is what the tab's own predicate says (`_complete`) - so this checks that the
+    # FILTER respects it, and that what the save says about completeness is what hides the rows.
+    def listed():
+        return {index for index in range(len(database.lines))
+                if any(cell[0].parentWidget().isVisible()
+                       for key, cell in database.cells.items() if key[0] == index)}
+
+    finished = [index for index in range(len(database.lines)) if database._complete(index)]
+    check("nothing is hidden while the box is unticked",
+          listed() == set(range(len(database.lines))),
+          "%d of %d lines visible, %d of them complete"
+          % (len(listed()), len(database.lines), len(finished)))
+    database.hide_complete.setChecked(True)
+    pump(app, 2)
+    hidden = listed()
+    if finished:
+        check("ticking it hides exactly the complete lines",
+              hidden == set(range(len(database.lines))) - set(finished),
+              "%d visible, %d complete" % (len(hidden), len(finished)))
+    else:
+        print("note no line is complete in this save, so the box had nothing to hide")
+    check("the box is remembered",
+          prefs.get(config.HIDE_COMPLETE_KEY) is True
+          and state.load_prefs().get(config.HIDE_COMPLETE_KEY) is True,
+          prefs.get(config.HIDE_COMPLETE_KEY))
+    # ... AND IT IS THE SAVE THAT DECIDES, so reading the record again re-applies it rather than leaving
+    # rows that have just become complete on screen.
+    database.reload_button.click()
+    pump(app, 3)
+    check("a reload keeps the finished lines hidden", listed() == hidden,
+          "%d vs %d visible" % (len(listed()), len(hidden)))
+    database.hide_complete.setChecked(False)
+    pump(app, 2)
+    check("unticking it brings every line back",
+          listed() == set(range(len(database.lines))), len(listed()))
+
     if database.error is None:
         # WHICH slot is stated rather than implied: it is the newest that records a dex and the
         # autosave is a slot like any other, so "newest of 2" plus the timestamp IS the answer.
@@ -383,11 +422,19 @@ def main():
     # on the same line as the button that re-reads the file, immediately to its left. A wrapped row
     # would show up here as a label taller than the button.
     button, report = database.reload_button.geometry(), database.saved_label.geometry()
-    row = [database.search, database.counts, database.saved_label, database.reload_button]
-    heights = [widget.geometry().height() for widget in row]
+    row = [database.search, database.counts, database.saved_label, database.reload_button,
+           database.hide_complete]
     check("the search field is capped, not stretched",
           database.search.maximumWidth() < 300, database.search.maximumWidth())
-    check("the top row is a single line", max(heights) - min(heights) <= 8, heights)
+    # A WRAPPED ROW IS TWO LINES, and that is what this looks for: the widgets' CENTRES on one line, and
+    # nothing taller than a normal control (a wrapped label would be about 48 px). Comparing the heights
+    # instead was fine while the row held only fields and buttons - a checkbox is legitimately 14 px next
+    # to a 24 px field, which is shorter, not wrapped.
+    heights = [widget.geometry().height() for widget in row]
+    centres = [widget.geometry().center().y() for widget in row]
+    check("the top row is a single line",
+          max(centres) - min(centres) <= 8 and max(heights) <= 26,
+          "heights %s, centres %s" % (heights, centres))
     check("the save report is on the button's row, to its left",
           report.right() <= button.left() and abs(report.center().y() - button.center().y()) <= 20,
           "report %s, button %s" % (report, button))

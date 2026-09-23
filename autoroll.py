@@ -45,10 +45,21 @@ A SECOND SESSION. This attaches its own Bridge, exactly as perf_probe.py does, s
 there are two Interceptors on `lua_gettop` and the frame cost roughly doubles. It only evals.
 
 Usage:
-    python autoroll.py
+    python autoroll.py [potential]
 
-The numbers are the constants below - there are no command line options, by design, so there is
-exactly one place to look to find out how fast this presses.
+With NO argument the loop aims at the potential the FEATURE was installed with (`TARGET` in
+`ingame/autoroll.py`, 21 by default). An argument aims at another one:
+
+    python autoroll.py 20      aim for a potent Coromon instead of a perfect one
+
+Either way the target is pushed into the game with `setTarget()` before the loop is armed, so
+nothing is re-installed and nothing is written anywhere - and because every run states its target,
+a run with no argument goes back to the installed one rather than inheriting the last run's. 1..21
+is the game's whole potential range and anything else is refused, because a target the game can
+never decide would reload for ever.
+
+The PRESS timing is still the constants below - by design, so there is exactly one place to look to
+find out how fast this presses.
 """
 
 import os
@@ -103,9 +114,9 @@ if not f.on then return '!the autoroll feature is switched off!' end
 -- `|` between the fields, NOT a space. `last` is written as "P18 to P19", and splitting on
 -- whitespace cut it at the first space - so the console showed the value the Coromon STARTED at
 -- and never the one it was rolled to, which is the entire number this tool exists to show.
-return string.format('rolls=%d|state=%s|last=%s|hit=%s|walk=%s|left=%s|blocked=%s',
+return string.format('rolls=%d|state=%s|last=%s|hit=%s|walk=%s|left=%s|blocked=%s|target=%s',
   f.rolls or 0, tostring(f.state), tostring(f.last), tostring(f.hit),
-  tostring(f.walk), tostring(f.left), tostring(f.blocked))
+  tostring(f.walk), tostring(f.left), tostring(f.blocked), tostring(f.target))
 """
 
 
@@ -134,11 +145,23 @@ if not f.on then return '!the autoroll feature is switched off!' end
 if type(f.arm) ~= 'function' then
   return '!this copy of the feature cannot be armed - restart overlays.py to reinstall it!'
 end
+__AIM__
 local was = tostring(f.state)
 -- ARMING IS WHAT MAKES THE LOOP RUN AT ALL (see ingame/autoroll.py), and it resets the counters on
 -- the way in: a driver arriving means a fresh run.
 f.arm()
 return was
+"""
+
+# THE AIMED POTENTIAL, pushed in before arming so the run's FIRST decision already uses it. Set here
+# rather than by writing overlays.toml because the target is one number for one run: the toml edit
+# would re-install every feature and persist the change, and the user asked for neither. An older
+# copy of the feature has no setTarget - a refusal beats driving a loop aimed at the wrong number.
+AIM_CODE = r"""if type(f.setTarget) ~= 'function' then
+  return '!this copy of the feature cannot be aimed - restart overlays.py to reinstall it!'
+end
+local okT, said = f.setTarget(__TARGET__)
+if not okT then return '!the target was refused by the feature: ' .. tostring(said) .. '!' end
 """
 
 # THE OTHER HALF OF THE PAIR, and the one that matters when this script dies: the loop lives in the
@@ -152,7 +175,7 @@ return 'ok'
 """
 
 
-def arm(b):
+def arm(b, target=None):
     """Take the loop over: allow it to fire reloads, and clear its memory of the last Coromon.
 
     TWO THINGS IN ONE CALL, because both of them mean "this run starts here".
@@ -168,6 +191,11 @@ def arm(b):
       zero. A restarted driver then does nothing whatsoever: its first read says `ready`, and it
       exits having pressed nothing.
 
+    AND, WITH A `target`, A THIRD: the potential to aim for, pushed in BEFORE the arm so the run's
+    first decision already uses it (see AIM_CODE). The caller always supplies one - main passes the
+    installed default when no argument was given - so a leftover value from an earlier run cannot
+    persist invisibly.
+
     WHY THE RESET IS HERE AND NOT IN THE FEATURE. The feature could do it the moment its terminal
     deposit goes away, and in the long run that is the better home for it. What it cannot fix is
     the RACE: the driver's first read may land before the loop's next tick has noticed anything, so
@@ -182,7 +210,15 @@ def arm(b):
 
     Returns the state that was replaced, or an error string prefixed with '!' like read_state.
     """
-    out = (b.eval(ARM_CODE, timeout=15.0) or {}).get("out") or ""
+    # THE SENTINEL IS ALWAYS REPLACED, and with a target ALWAYS SUPPLIED by the caller - including
+    # when no argument was given, where main passes the installed default. Two reasons, and both are
+    # about the value outliving the run: `f.target` lives on the feature table and survives the loop's
+    # own reloads and this process exiting, so a run that set 20 and then a run that set nothing would
+    # silently keep aiming at 20. Saying it every time makes the rule "each run aims at what was asked
+    # or the installed default" true rather than almost-true. (And `__AIM__` left unreplaced would be
+    # a BARE IDENTIFIER on its own line, which is not a statement in Lua: the whole eval would fail.)
+    code = ARM_CODE.replace("__AIM__", AIM_CODE.replace("__TARGET__", str(int(target))))
+    out = (b.eval(code, timeout=15.0) or {}).get("out") or ""
     if out == "":
         return "!no answer from the game!"
     return out
@@ -244,9 +280,9 @@ def report(st, presses):
     feature has fired, how many times Space has been pressed, what the loop is doing, what the last
     decided result was, which direction it is holding, and how many steps the walk still owes.
     """
-    print("rolls=%s presses=%d state=%s last=%s walk=%s left=%s blocked=%s" % (
+    print("rolls=%s presses=%d state=%s last=%s walk=%s left=%s blocked=%s aiming=P%s" % (
         st.get("rolls"), presses, st.get("state"), st.get("last"),
-        st.get("walk"), st.get("left"), st.get("blocked")))
+        st.get("walk"), st.get("left"), st.get("blocked"), st.get("target")))
 
 
 def hold(key, held):
@@ -327,7 +363,51 @@ def pump(b, hwnd):
         time.sleep(POLL_INTERVAL)
 
 
+def installed_target():
+    """The potential the FEATURE was installed with - what a run with no argument aims at.
+
+    Read from `ingame/autoroll.py` rather than repeated here, because that constant is what the
+    installed chunk was built with and the two must not drift. A copy of the feature that cannot be
+    imported is not a reason to refuse to run, hence the fallback.
+    """
+    try:
+        from ingame import autoroll as feature
+        return int(feature.TARGET)
+    except Exception:  # noqa: BLE001 - a missing constant is not worth failing the run over
+        return 21
+
+
+def parse_target(argv):
+    """The optional potential to aim for: `python autoroll.py 20`.
+
+    Returns (target, complaint). No argument means None - "whatever the installed feature is set to" -
+    which is what every run did before this existed, so the plain `python autoroll.py` is unchanged.
+    The range check is not politeness: the feature refuses a target it could never decide, and 1..21
+    is the game's whole potential range, so this is the same rule said one layer earlier where the
+    message can name the argument.
+    """
+    if not argv:
+        return None, None
+    if len(argv) > 1:
+        return None, "at most one argument (the potential to aim for), got %d" % len(argv)
+    try:
+        target = int(argv[0])
+    except ValueError:
+        return None, "%r is not a number" % (argv[0],)
+    if not 1 <= target <= 21:
+        return None, "%d is outside the potential range 1..21" % target
+    return target, None
+
+
 def main():
+    target, complaint = parse_target(sys.argv[1:])
+    if complaint:
+        print("autoroll: %s" % complaint)
+        print("usage: python autoroll.py [potential 1..21]")
+        print("       with no argument, the potential the feature was installed with")
+        return 2
+    # ALWAYS A CONCRETE TARGET, never "nothing": see arm() for why a run must state it.
+    aim = target if target is not None else installed_target()
     hwnd = find_window()
     if hwnd is None:
         print("%s is not running (or has no window)" % PROCESS)
@@ -351,12 +431,13 @@ def main():
         # than that this is the order the messages read in: the loop does nothing at all until this
         # lands (see ingame/autoroll.py), and it may also be sitting in a terminal state left over
         # from the last Coromon - see arm() for why that strands a restarted run.
-        was = arm(b)
+        was = arm(b, aim)
         if was.startswith("!"):
             print(was.strip("!"))
             return 2
         took_over = True
-        print("roll loop armed (was %s)" % was)
+        print("roll loop armed (was %s) - aiming for P%d%s" % (
+            was, aim, " (the installed target)" if target is None else " (from the argument)"))
 
         # WAIT FOR THE FOREGROUND, DO NOT TAKE IT. Nothing may be pressed while the game is behind
         # something else, because keybd_event goes to whatever owns the foreground - and grabbing it

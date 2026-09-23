@@ -139,6 +139,10 @@ ICON_ZOOM_MAX = 8
 # because it is a user decision rather than a constant to re-edit and restart for.
 ICON_ZOOM_KEY = "icon_zoom"
 
+# ... and the one the Database tab's "hide complete" checkbox is kept under, for the same reason: it is
+# how that tab is being read at the time, not something to re-tick on every start.
+HIDE_COMPLETE_KEY = "hide_complete"
+
 # A map is fitted to the pane, but never blown up past this: a small map filling a maximised
 # window is all block, and the patches stop being readable.
 MAP_MAX_SCALE = 8.0
