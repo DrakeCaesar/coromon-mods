@@ -65,26 +65,26 @@ def zone_rows(zone, min_share=0.0):
             if row["share"] >= min_share]
 
 
-def species_lines(zone, min_share=0.0):
-    """One aligned line per spawn of `zone`, most common first - the body of a species pane.
+def encounter_lines(zone, min_share=0.0):
+    """One aligned line per ENCOUNTER of `zone`, most likely first - the body of a spawns pane.
 
-    ONE FORMATTER FOR TWO TABS: this tab draws it under its map and the Database tab under its
-    location list, answering the same question ("what is in this grass?") in the same columns. That
-    is why the alignment is padded with spaces and the panes do NOT wrap.
+    ONE FORMATTER FOR TWO TABS: this tab draws it under its map and the Database tab under its location
+    list, answering the same question ("what is in this grass?") in the same columns - which is why the
+    alignment is padded with spaces and neither pane wraps.
 
-    The heading belongs to the caller: this tab names the zone and marks a water zone, the Database
-    tab does not, because the selected row directly above the pane already names it.
+    THE ROWS ARE ENCOUNTERS, NOT SPECIES, and that is the change the user asked for: a percentage
+    belongs to the fight the game rolls, so a triple battle is ONE line naming its party ("Armadon + 2
+    Armado") at the odds of meeting it. Listing the members separately reported every one of them at
+    the whole group's share and counted a repeated member twice, which is how a zone's shares came out
+    summing past 100%. See `encounters.Zone.encounters`.
+
+    The heading belongs to the caller: this tab names the zone and marks a water zone, the Database tab
+    does not, because the selected row directly above the pane already names it.
     """
-    rows = zone_rows(zone, min_share)
+    rows = [row for row in zone.encounters() if row["share"] >= min_share]
     width = max([14] + [len(row["name"]) + 1 for row in rows])
-    lines = []
-    for row in rows:
-        tag = {1: "", 2: "   double battle", 3: "   triple battle"}.get(row["battles"], "")
-        if row.get("crimsonite"):
-            tag += "   crimsonite"
-        lines.append("  %-*s L%-3s-%-3s  %5.1f%%%s" % (
-            width, row["name"], row["min"], row["max"], row["share"], tag))
-    return lines
+    return ["  %-*s L%-3s-%-3s  %5.1f%%" % (width, row["name"], row["min"], row["max"], row["share"])
+            for row in rows]
 
 
 def rank(zones, level, min_share=0.0, only_xp=True):
@@ -210,7 +210,7 @@ class GrindTab(QWidget):
         self.only_xp.toggled.connect(self._filters_changed)
         controls.addWidget(self.only_xp)
 
-        controls.addWidget(QLabel("hide species under %"))
+        controls.addWidget(QLabel("hide encounters under %"))
         self.min_share = QSpinBox()
         self.min_share.setRange(0, 100)
         self.min_share.setValue(int(float(self.prefs.get("min_share", MIN_SHARE_DEFAULT))))
@@ -424,7 +424,7 @@ class GrindTab(QWidget):
     def _species_text(self, zone):
         lines = ["%s  (%s)%s" % (zone.name, mapnames.area(zone.map_file),
                                  "   water" if zone.water else ""), ""]
-        lines.extend(species_lines(zone, self.min_share_value()))
+        lines.extend(encounter_lines(zone, self.min_share_value()))
         return "\n".join(lines)
 
     def _show_map_head(self):

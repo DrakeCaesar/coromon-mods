@@ -137,6 +137,56 @@ class Zone:
                 for uid, rec in self.crimsonite.items()]
         return out
 
+    def encounters(self):
+        """Every ENCOUNTER the zone can roll - one row per entry, most likely first.
+
+        THE UNIT THE GAME ROLLS, which is why this exists beside `slots`. An entry is one encounter
+        with a party, so its share is the chance of meeting THAT FIGHT, and the party is the answer to
+        "what am I actually up against". The per-species view cannot say either: it counts a species
+        once PER PARTY MEMBER (a `[Skuldra, Skelatops, Skuldra]` triple battle gives Skuldra twice the
+        entry's share - measured, the shares of DESERTROUTE_3_SPECIAL sum to 106.9%), and it reports
+        every member of a group at the whole group's share, which reads as several separate spawns at
+        the same odds. The user, on exactly that: "it says tripple battle, in this case it's Armadon
+        and 2 Armodo, but it doesn't say that, so the percentages are misleading".
+
+        `name` is the COMPOSITION - "Armadon + 2 Armado", duplicates counted, in party order - because
+        that is what the percentage belongs to. `min`/`max` span the whole party, and `members` keeps
+        the per-member detail (`name`, `count`, `min`, `max`, `crimsonite`).
+        """
+        total = self.weight_total or 1
+        out = []
+        for enc in self.raw.get("encounters", []):
+            party = enc.get("monsters", [])
+            if not party:
+                continue
+            seen, order = {}, []
+            for mon in party:
+                key = (mon.get("monsterUID"), bool(mon.get("crimsonite")))
+                if key not in seen:
+                    seen[key] = {"uid": key[0], "crimsonite": key[1], "count": 0,
+                                 "min": 10 ** 6, "max": 0}
+                    order.append(key)
+                rec = seen[key]
+                rec["count"] += 1
+                rec["min"] = min(rec["min"], mon.get("minLevel", 0))
+                rec["max"] = max(rec["max"], mon.get("maxLevel", 0))
+            members = [seen[key] for key in order]
+            for rec in members:
+                name = self.species.get(rec["uid"], rec["uid"])
+                rec["name"] = ("Crimsonite " + name) if rec["crimsonite"] else name
+            out.append({
+                "name": " + ".join("%d %s" % (rec["count"], rec["name"])
+                                    if rec["count"] > 1 else rec["name"]
+                                    for rec in members),
+                "members": members,
+                "share": 100.0 * enc.get("stepsWithEncounter", 0) / total,
+                "min": min(rec["min"] for rec in members),
+                "max": max(rec["max"] for rec in members),
+                "battles": len(party),
+                "crimsonite": all(rec["crimsonite"] for rec in members),
+            })
+        return sorted(out, key=lambda rec: -rec["share"])
+
     def listing(self, min_share=0.0):
         """Every spawn as a text row, most common first (see `slots`)."""
         rows = [r for r in sorted(self.slots(), key=lambda r: -r["share"])

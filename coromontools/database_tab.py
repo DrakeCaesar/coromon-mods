@@ -89,7 +89,7 @@ from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLab
 from . import icons, mapnames
 from .config import (HIDE_COMPLETE_KEY, ICON_ZOOM, ICON_ZOOM_KEY, ICON_ZOOM_MAX, ICON_ZOOM_MIN,
                      STATE_CAUGHT, STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
-from .grind import species_lines
+from .grind import encounter_lines
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
 from .text import pretty
@@ -345,10 +345,11 @@ class DatabaseTab(QWidget):
         # AND WHAT ELSE SPAWNS THERE, directly under the rows it belongs to - the user: "when we
         # pick a location from the list, right under the list it should also show a breakdown of what
         # else spawns there, same way as the first tab". Same pane, same columns, same formatter
-        # (`grind.species_lines`, imported rather than copied so the two tabs cannot drift).
+        # (`grind.encounter_lines`, imported rather than copied so the two tabs cannot drift), and the
+        # same ENCOUNTER-per-line view: a percentage belongs to the fight the game rolls.
         # IT IS WHAT MAKES THE ROW MEAN SOMETHING: the picked Coromon is one line of this list, with
         # its own share, and the pane shows it against the company it keeps. NOTHING IS FILTERED -
-        # the first tab has a "hide species under %" control and this pane shows the zone as it is.
+        # the first tab has a "hide encounters under %" control and this pane shows the zone as it is.
         self.species = mono_text(wrap=False)
         self.species.setToolTip("what the picked area spawns, most common first")
 
@@ -713,7 +714,7 @@ class DatabaseTab(QWidget):
         the map could NOT answer, which is what `set_zone` returning False means ("no map file",
         "not marked on the map of...", or nothing picked yet).
         """
-        self.species.setPlainText("\n".join(species_lines(zone)) if zone is not None else "")
+        self.species.setPlainText("\n".join(encounter_lines(zone)) if zone is not None else "")
         drew = self.map.set_zone(zone)
         self.map_head.setText("" if drew else self.map.headline)
         self.map_head.setVisible(not drew)

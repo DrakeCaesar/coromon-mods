@@ -38,6 +38,7 @@ import coromontools.state as state                          # noqa: E402
 from coromontools import MainWindow, font, icons             # noqa: E402
 from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
+from coromontools.grind import encounter_lines                # noqa: E402
 from coromontools.table import ICON, sort_rows                # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 from coromontools.widgets import mono_height                # noqa: E402
@@ -202,12 +203,36 @@ def main():
         names = ["Crimsonite " + mixed_zone.species.get(uid, uid)
                  for uid in mixed_zone.crimsonite]
         text = grind.species.toPlainText()
-        check("the zone's species pane names the crimsonite form",
+        check("the zone's spawns pane names the crimsonite form",
               all(name in text for name in names)
-              and text.count("crimsonite") >= len(names), names)
+              and text.lower().count("crimsonite") >= len(names), names)
         grind.show_zone(keep_zone)
         grind.min_share.setValue(keep_share)
         pump(app)
+
+    # A GROUP ENCOUNTER IS ONE LINE NAMING ITS PARTY - the user: "it's sort of weird when showing the
+    # info for groups of 3 spawning ... it says tripple battle, in this case it's Armadon and 2 Armodo,
+    # but it doesn't say that, so the percentages are misleading". The percentages are the proof the fix
+    # works: an encounter's share is the chance of meeting THAT fight, so a zone's lines add up to 100%.
+    # The per-species view counted a repeated member once PER PARTY SLOT and therefore summed past it.
+    group = next((zone for zone in all_zones
+                  if any(row["battles"] > 1 for row in zone.encounters())), None)
+    check("some zone rolls a group encounter", group is not None)
+    if group is not None:
+        grouped = [row for row in group.encounters() if row["battles"] > 1]
+        check("a group encounter is one line that names its party",
+              bool(grouped) and all(any(rec["count"] > 1 for rec in row["members"])
+                                    or len(row["members"]) > 1 for row in grouped),
+              [row["name"] for row in grouped][:2])
+        shares = [row["share"] for row in group.encounters()]
+        check("... and the zone's encounters add up to 100%",
+              abs(sum(shares) - 100.0) < 0.05, sum(shares))
+        check("... where the per-species view counts a repeated member twice",
+              sum(row["share"] for row in group.slots()) > 100.0,
+              sum(row["share"] for row in group.slots()))
+        check("... and the pane draws those encounters, one line each",
+              len(encounter_lines(group)) == len(group.encounters()),
+              encounter_lines(group)[:2])
 
     # ---------------------------------------------------------------- database tab
     # THE GRID IS THE ONLY DEX VIEW NOW. The Coromon tab used to list every Coromon beside its
