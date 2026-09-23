@@ -13,13 +13,22 @@ the sort is. The rule is on the FORMATTED text, which is what the old code sorte
 
 A row is a dict of display strings keyed by column key, plus an optional PAYLOAD key holding
 the object the row stands for - the Zone or the skill - so a selection can be mapped back
-without a parallel lookup table.
+without a parallel lookup table. A row may also carry an `ICON` (a QPixmap), which is drawn in
+ONE column - whichever the table was built with as its `icon_column` - because a decoration
+returned for every column would put the same picture in all of them.
 """
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSize, Qt, Signal
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView
 
 PAYLOAD = "_payload"
+ICON = "_icon"
+
+# HOW TALL A ROW IS WITH AND WITHOUT AN ICON. 20 px is what a text row has always been; a row drawing
+# an icon is the icon's own height plus this much air, because a 32 px picture in a 20 px row is a
+# picture with its top and bottom cut off.
+ROW_HEIGHT = 20
+ICON_PAD = 6
 
 
 class Column:
@@ -90,6 +99,8 @@ class TableModel(QAbstractTableModel):
         super().__init__(parent)
         self.columns = list(columns)
         self.rows = []
+        # The KEY of the one column that draws each row's `ICON`, or None for a text-only table.
+        self.icon_key = None
 
     def set_rows(self, rows):
         self.beginResetModel()
@@ -113,6 +124,12 @@ class TableModel(QAbstractTableModel):
         column = self.columns[index.column()]
         if role == Qt.ItemDataRole.DisplayRole:
             return self.rows[index.row()].get(column.key, "")
+        if role == Qt.ItemDataRole.DecorationRole:
+            # ONE COLUMN ONLY: a decoration is per index, so returning the row's icon for every column
+            # would draw the same picture under every heading.
+            if self.icon_key and column.key == self.icon_key:
+                return self.rows[index.row()].get(ICON)
+            return None
         if role == Qt.ItemDataRole.TextAlignmentRole:
             return column.qt_align
         if role == Qt.ItemDataRole.UserRole:
@@ -134,9 +151,10 @@ class DataTable(QTableView):
     sortChanged = Signal(str, bool)
     selectionChangedTo = Signal(object)   # the payload of the current row, or None
 
-    def __init__(self, columns, sort_key=None, sort_desc=False, parent=None):
+    def __init__(self, columns, sort_key=None, sort_desc=False, parent=None, icon_column=None):
         super().__init__(parent)
         self.model_ = TableModel(columns, self)
+        self.model_.icon_key = icon_column
         self.setModel(self.model_)
 
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -147,7 +165,7 @@ class DataTable(QTableView):
         self.setWordWrap(False)
         self.setSortingEnabled(False)
         self.verticalHeader().setVisible(False)
-        self.verticalHeader().setDefaultSectionSize(20)
+        self.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
         self.horizontalHeader().setStretchLastSection(True)
         self.horizontalHeader().setHighlightSections(False)
         self.horizontalHeader().setSectionsClickable(True)
@@ -167,7 +185,29 @@ class DataTable(QTableView):
         selected zone alone should not move the selection to the top of the table.
         """
         self.model_.set_rows(sort_rows(rows, self._sort_key, self._sort_desc))
+        self._fit_icons()
         self._select_first_or(keep_row)
+
+    def _fit_icons(self):
+        """Size the rows and the icon box to whatever decoration the new rows carry, if any.
+
+        ONLY WHEN THEY CARRY ONE: every other table in this window is text, and its rows stay at the
+        tight `ROW_HEIGHT` - a taller row would cost rows on screen for nothing. When they do, the row
+        is the icon's own height plus `ICON_PAD`, and `content_height` reads `sectionSize(0)`, so a tab
+        that sizes itself to its content follows this without knowing anything about icons.
+        """
+        height = 0
+        if self.model_.icon_key:
+            for row in self.model_.rows:
+                icon = row.get(ICON)
+                if icon is not None:
+                    height = max(height, icon.height())
+        if not height:
+            self.setIconSize(QSize(0, 0))
+            self.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
+            return
+        self.setIconSize(QSize(height, height))
+        self.verticalHeader().setDefaultSectionSize(height + ICON_PAD)
 
     def content_height(self):
         """The height this table needs to draw every row it has, header and frame included.

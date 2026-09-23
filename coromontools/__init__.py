@@ -14,6 +14,7 @@ Modules are split by responsibility:
 * ``grind``      - the "Where to grind" tab
 * ``database_tab`` - the Database tab: the game's own grid, caught / seen / unknown per potential
                    category, and where the picked Coromon can be caught
+* ``items_tab``  - the Items tab: every item, with the stats and the sprites the game's Lua holds
 * ``skills_tab`` - the Skills tab
 
 Run it with the entry script beside this package (``encounters_gui.py``), or
@@ -44,6 +45,7 @@ from . import mapnames, state                                               # no
 from .config import ON_TOP_DEFAULT                                     # noqa: E402
 from .database_tab import DatabaseTab                                  # noqa: E402
 from .grind import GrindTab, rank, zone_rows                           # noqa: E402
+from .items_tab import ItemsTab                                        # noqa: E402
 from .skills_tab import SkillsTab                                      # noqa: E402
 from .theme import apply_theme                                         # noqa: E402
 
@@ -61,19 +63,22 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(MIN_WIDTH, MIN_HEIGHT)
 
-        # THREE TABS, and they are the three questions: where to grind, what the save records (with
-        # where each Coromon can be caught), and what the skills do. The Coromon tab USED to sit
-        # between the first two with a flat list of every Coromon and its locations - the user:
-        # "get rid of the coromon tab, since the database tab superseeds it". It was a second view
-        # of the same data: the Database grid holds every dex entry, its crimsonite forms included,
-        # and clicking a cell lists that Coromon's locations (see `database_tab.py`), so the list
-        # was a copy - and the copy that could not show what the save records.
+        # FOUR TABS, and they are the four questions: where to grind, what the save records (with
+        # where each Coromon can be caught), what the items are (with the stats only the game's Lua
+        # has), and what the skills do.
+        # The Coromon tab USED to sit between the first two with a flat list of every Coromon and its
+        # locations - the user: "get rid of the coromon tab, since the database tab superseeds it". It
+        # was a second view of the same data: the Database grid holds every dex entry, its crimsonite
+        # forms included, and clicking a cell lists that Coromon's locations (see `database_tab.py`),
+        # so the list was a copy - and the copy that could not show what the save records.
         self.tabs = QTabWidget()
         self.grind = GrindTab(zones, prefs)
         self.database = DatabaseTab(prefs)
+        self.items = ItemsTab()
         self.skills = SkillsTab(skill_list, prefs)
         self.tabs.addTab(self.grind, "  Where to grind  ")
         self.tabs.addTab(self.database, "  Database  ")
+        self.tabs.addTab(self.items, "  Items  ")
         self.tabs.addTab(self.skills, "  Skills  ")
         self.setCentralWidget(self.tabs)
 

@@ -1,9 +1,9 @@
 """Offscreen smoke test for the grind window.
 
-Checks that the data reaches the widgets: the three tabs, a filled ranking, a map with a plan, the
-game's own database grid and the dex icons in it, the skill table and its description, sorting,
-filtering, the cross-tab jump, and the window's saved geometry. Runs on Qt's `offscreen` platform,
-so it needs no display and nothing running.
+Checks that the data reaches the widgets: the four tabs, a filled ranking, a map with a plan, the
+game's own database grid and the dex icons in it, the item catalogue with the stats the game's Lua
+holds, the skill table and its description, sorting, filtering, the cross-tab jump, and the window's
+saved geometry. Runs on Qt's `offscreen` platform, so it needs no display and nothing running.
 
     python ui_smoke.py
 
@@ -31,13 +31,14 @@ import encounters                                           # noqa: E402
 import skills                                               # noqa: E402
 
 import dex                                                  # noqa: E402
+import items as item_data                                   # noqa: E402
 import savefile                                             # noqa: E402
 
 import coromontools.state as state                          # noqa: E402
 from coromontools import MainWindow, font, icons             # noqa: E402
 from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
-from coromontools.table import sort_rows                      # noqa: E402
+from coromontools.table import ICON, sort_rows                # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 from coromontools.widgets import mono_height                # noqa: E402
 
@@ -91,11 +92,11 @@ def main():
     pump(app)
 
     # ---------------------------------------------------------------- window
-    # THE COROMON TAB IS GONE - the Database tab supersedes it (see `coromontools/__init__.py`), so
-    # the tabs are the three questions there are, in that order.
+    # THE COROMON TAB IS GONE - the Database tab supersedes it (see `coromontools/__init__.py`) - so
+    # the tabs are the four questions there are, in that order.
     titles = [window.tabs.tabText(index).strip() for index in range(window.tabs.count())]
-    check("three tabs, in that order",
-          titles == ["Where to grind", "Database", "Skills"], titles)
+    check("four tabs, in that order",
+          titles == ["Where to grind", "Database", "Items", "Skills"], titles)
     check("window titled", bool(window.windowTitle()), window.windowTitle())
     check("min size kept", window.minimumWidth() == 1040 and window.minimumHeight() == 560)
 
@@ -583,8 +584,96 @@ def main():
           database.saved_label.text() == report and database.counts.text() == tally,
           "%s" % database.saved_label.text())
 
-    # ---------------------------------------------------------------- skills tab
+    # ---------------------------------------------------------------- items tab
+    # THE STATS HERE ARE THE GAME'S OWN, read out of its Lua, because the item JSON has no stat field
+    # at all (see `items.py`). So these are the numbers the game charges and rolls with, checked
+    # against the Spinner line - which is also where the awkward cases live: Platinum overrides the
+    # shake count instead of a modifier, and the Dream Spinner's modifier is conditional.
     window.tabs.setCurrentIndex(2)
+    pump(app, 3)
+    items_tab = window.items
+    check("every item record is listed",
+          items_tab.table.model_.rowCount() == len(items_tab.all_items),
+          items_tab.table.model_.rowCount())
+    check("the category filter lists the game's categories",
+          items_tab.category.count() == len(item_data.categories(items_tab.all_items)) + 1,
+          items_tab.category.count())
+    spinners = {item.uid: item for item in items_tab.all_items if item.category == "spinner"}
+    check("all 17 spinners are there", len(spinners) == 17, len(spinners))
+    for uid, modifier, cost, sell in (("SPINNER_REGULAR_1", 1.0, 200.0, 100.0),
+                                      ("SPINNER_REGULAR_2", 1.5, 600.0, 300.0),
+                                      ("SPINNER_REGULAR_3", 2.0, 1200.0, 600.0)):
+        stats = spinners[uid].stats()
+        check("%s: modifier, cost and sell price read off the game" % uid,
+              stats.get("getCatchRateModifier") == [modifier]
+              and stats.get("getGoldCost") == [cost]
+              and stats.get("getGoldSellPrice") == [sell], stats)
+    platinum = spinners["SPINNER_REGULAR_4"].stats()
+    check("Platinum Spinner has no modifier - it overrides the shake count instead",
+          not platinum.get("getCatchRateModifier")
+          and platinum.get("getAmountOfShakes") == [5.0], platinum.get("getAmountOfShakes"))
+    check("the base catch rates are the game's own rarity table",
+          item_data.base_catch_rates() == {"common": 0.375, "uncommon": 0.3, "rare": 0.225,
+                                           "legendary": 0.1}, item_data.base_catch_rates())
+    spinning = item_data.spinner_sprites("SPINNER_REGULAR_2")
+    check("a spinner has the thrown and the spinning sheet, each cut into frames",
+          item_data.strip(spinning["spinning"]) == (14, 35)
+          and item_data.strip(spinning["throw"]) == (57, 215),
+          {key: item_data.strip(one) for key, one in spinning.items()})
+    gauntlets = [item for item in items_tab.all_items if item.category == "gauntlet"]
+    worn = [item for item in gauntlets if len(item_data.gauntlet_parts(item.uid)) == 2]
+    check("all 18 gauntlet skins have both worn sprites",
+          len(worn) == len(gauntlets) == 18, "%d of %d" % (len(worn), len(gauntlets)))
+    check("every spinner has a bag icon",
+          all(item.icon for item in spinners.values()),
+          [item.uid for item in spinners.values() if not item.icon])
+    items_tab.category.setCurrentIndex(items_tab.category.findData("spinner"))
+    pump(app, 2)
+    check("filtering to spinners lists exactly them",
+          items_tab.table.model_.rowCount() == len(spinners), items_tab.table.model_.rowCount())
+    items_tab.table.selectRow(1)
+    pump(app, 2)
+    shown = items_tab.table.current_payload()
+    check("picking one shows its icon, its stats and its pictures",
+          shown is not None and not items_tab.icon.pixmap().isNull()
+          and items_tab.sprites.count() == 2 and "catch modifier" in items_tab.stats.toPlainText(),
+          "%s: %d sprite(s)" % (getattr(shown, "uid", None), items_tab.sprites.count()))
+    items_tab.search.setText("zzz-nothing")
+    pump(app, 1)
+    check("the item find box empties the list", items_tab.table.model_.rowCount() == 0)
+    items_tab.search.setText("")
+    items_tab.category.setCurrentIndex(0)
+    pump(app, 1)
+
+    # THE FIRST COLUMN CARRIES THE EXTRACTED ICON - the user: "the first column has to be an extracted
+    # icon tho" - and it is drawn IN the name column rather than in a column of its own, which is what
+    # `icon_column="name"` is for. EVERY ICON IS PADDED INTO ONE BOX, because a QTableView has a single
+    # icon size for all its cells and Qt would otherwise rescale 16x16 and 20x16 pixel art to fit.
+    model = items_tab.table.model_
+    filled = [index for index, row in enumerate(model.rows) if row.get(ICON) is not None]
+    boxes = {model.rows[index][ICON].size() for index in filled}
+    first = filled[0] if filled else -1
+    check("the name column draws the item's icon, and no other column does",
+          bool(filled)
+          and model.data(model.index(first, 0), Qt.ItemDataRole.DecorationRole) is not None
+          and model.data(model.index(first, 1), Qt.ItemDataRole.DecorationRole) is None,
+          "%d row(s) with an icon" % len(filled))
+    check("every list icon is drawn in the one box the table was sized for",
+          len(boxes) == 1 and boxes == {items_tab.box}, boxes)
+    check("the rows are tall enough for that box",
+          items_tab.table.verticalHeader().sectionSize(0) >= items_tab.box.height(),
+          "%d px rows, %d px icon" % (items_tab.table.verticalHeader().sectionSize(0),
+                                      items_tab.box.height()))
+    check("an item the game has no artwork for still draws its name",
+          any(row.get(ICON) is None for row in model.rows)
+          and model.data(model.index(next(index for index, row in enumerate(model.rows)
+                                          if row.get(ICON) is None), 0),
+                         Qt.ItemDataRole.DisplayRole),
+          "%d of %d rows have no icon"
+          % (sum(1 for row in model.rows if row.get(ICON) is None), len(model.rows)))
+
+    # ---------------------------------------------------------------- skills tab
+    window.tabs.setCurrentIndex(3)
     pump(app, 3)
     skills_tab = window.skills
     # the filters are saved state, so clear them before counting: a run after a filtered one
@@ -620,7 +709,7 @@ def main():
           skills_tab.table.model_.rows[-1]["power"])
 
     # ---------------------------------------------------------------- saved state
-    check("tab index saved", prefs.get("tab") == 2, prefs.get("tab"))
+    check("tab index saved", prefs.get("tab") == 3, prefs.get("tab"))
     check("skill filters saved", prefs.get("skill_type") == "poison", prefs.get("skill_type"))
     check("prefs readable back", state.load_prefs().get("skill_type") == "poison")
     check("nothing written to the real settings",
