@@ -37,6 +37,23 @@ from . import config  # noqa: E402
 # ahead of them.
 # ===========================================================================
 LUA = r"""
+-- RUN A FEATURE'S BODY EXACTLY ONCE. It exists only for the composer (see core._feature_fn), which
+-- wraps every feature in a function so its Lua gets its own 200-local budget.
+--
+-- A BARE `(function() ... end)()` CANNOT BE USED FOR THAT WRAPPER IN LUA 5.1, and the way it fails
+-- is worth knowing: a statement that begins with `(` is AMBIGUOUS when the statement before it could
+-- have ended with an expression, and the compiler rejects the ENTIRE chunk with
+--
+--     ambiguous syntax (function call x new statement) near '('
+--
+-- which reads like a syntax error a thousand lines away from anything you changed. `luaparser`
+-- ACCEPTS that form happily, so the offline parse check cannot catch it - the only check that can is
+-- the game's own Lua 5.1 (see qr_lua_check.py --ingame). Calling a named helper makes the statement
+-- start with an identifier, which is unambiguous, and it costs no local at the chunk level - which
+-- `local function` would (one per feature).
+local function hudRun(f)
+  return f()
+end
 local function uv(fn, name)
   if type(fn) ~= 'function' then return nil end
   for i = 1, 120 do
@@ -65,6 +82,41 @@ local function twNode()
   local w = uv(m.getTiledWorld, 'tiledWorld')
   if type(w) ~= 'table' or type(w.x) ~= 'number' then return nil end
   return w
+end
+
+-- THE WORLD GENERATION. One cheap question, asked once per frame, that three features used to ask
+-- separately with a timer each: "is this still the same world, and the same save?"
+--
+-- A SAVE LOAD IS A NEW WORLD, and so is a map change - so the generation is derived from the two
+-- things that actually change when one happens: the overworld node's IDENTITY (a rebuilt world has
+-- a new node object) and the world existing at all (`worldHelper:isCreated()`, which is a plain
+-- boolean field and keeps working after the module's metatable is stripped). It does NOT depend on
+-- `getSelectedSaveslotIndex`, which cannot see a reload of the SAME slot - and that is the case the
+-- reload feature produces.
+--
+-- `n` only ever counts CHANGES, so a consumer's cheap test is `local gen = worldGen(); if gen ~= my
+-- lastGen then ...` - one integer compare on the frames where nothing happened. Both reads are
+-- pcall'd and the node is remembered rather than cleared, so a menu or a battle (where the node is
+-- not reachable) does not look like a change, and an unreadable frame reports "nothing changed"
+-- rather than inventing one.
+local WG_n, WG_node, WG_live = 0, nil, false
+local function worldGen()
+  local wh = _G.worldHelper
+  local live = false
+  if type(wh) == 'table' and type(wh.isCreated) == 'function' then
+    local ok, v = pcall(wh.isCreated, wh)
+    live = (ok and v) and true or false
+  end
+  local node = twNode()
+  if node ~= nil and node ~= WG_node then
+    WG_n = WG_n + 1
+    WG_node = node
+  end
+  if live ~= WG_live then
+    if live then WG_n = WG_n + 1 end   -- false -> true is a world being (re)built
+    WG_live = live
+  end
+  return WG_n, live
 end
 
 local function playerSprite()
@@ -136,41 +188,36 @@ end
 -- The mistake this exists to prevent has now been made twice: `if <cache> == nil or
 -- (<ticks> % INTERVAL) == 0` runs the search EVERY TICK while the table has never been found,
 -- because a failed search is not cached. In cooldowns that cost ~40 ms a frame; in steptimer,
--- whose poll is 250 ms, it was four full walks of package.loaded per second. So this counts from
--- the LAST ATTEMPT, and it refuses to search at all until a save is loaded - `playerStats.getSteps()`
--- is the game's own step counter, it only answers once a save exists, and it is far cheaper than
--- the search it guards.
+-- whose poll is 250 ms, it was four full walks of package.loaded per second. So a failure is
+-- counted and delayed like a success, and the search never runs at all until a world is up -
+-- `worldGen()` answers that in two reads, far cheaper than the search it guards.
 --
 -- It keeps NO reference of its own between calls beyond the cache, so it is safe for any number of
 -- features to call every tick. Callers that want the table to survive a save reload should keep
 -- their own copy; this only guarantees a recent one.
-local LS_found, LS_lastMs = nil, nil
-local LS_HUNT_MS, LS_FOUND_MS = 1000, 12000
+local LS_found, LS_gen, LS_lastMs = nil, nil, nil
+local LS_RETRY_MS = 1000
 local function liveSaveSettings()
-  local ok, n = pcall(function() return playerStats.getSteps() end)
-  if not ok or tonumber(n) == nil then
-    LS_found, LS_lastMs = nil, nil     -- no save: nothing to read, nothing to remember
+  local gen, live = worldGen()
+  -- THE CHEAP PATH, AND IT IS THE ONLY PATH ON MOST FRAMES: the world has not changed since the
+  -- search that found this table, so there is nothing to look for.
+  if LS_found ~= nil and gen == LS_gen then return LS_found end
+  if not live then
+    -- no world: nothing to read, and nothing worth remembering - so the next world searches at once
+    -- instead of waiting out an inherited interval
+    LS_found, LS_gen, LS_lastMs = nil, nil, nil
     return nil
   end
-  -- THROTTLED IN MILLISECONDS, NOT IN CALLS, and that is about who is allowed to call this.
-  --
-  -- A call-counted interval makes the cost depend on the caller's rate: the same helper driven once
-  -- per frame instead of four times a second searches package.loaded twelve times more often. At 165
-  -- fps this would search once every 0.36 s with the table found, and forty times a second while it
-  -- is not - which is exactly the mistake that cost cooldowns ~40 ms a frame and steptimer four
-  -- searches a second. Measured in time, any feature may call it every frame and the search still
-  -- happens at this rate and no faster.
-  --
-  -- 1 s while nothing has been found, because a save load is the moment the table appears; 12 s once
-  -- it has been, matching steptimer's own rescan.
+  -- SOMETHING CHANGED, OR NOTHING HAS BEEN FOUND YET. A change is looked at immediately - that IS
+  -- the save-loaded event, and there is no timer left to wait for. A miss is retried at a low rate,
+  -- because a failed search must never become a per-frame search: that is the mistake documented
+  -- above, and it cost cooldowns ~40 ms a frame.
   local now = system.getTimer()
   if type(now) ~= 'number' then now = 0 end
-  local every = LS_found and LS_FOUND_MS or LS_HUNT_MS
-  if LS_lastMs == nil or (now - LS_lastMs) >= every then
-    LS_lastMs = now
-    local s = saveSettingsTable()
-    if s then LS_found = s end
-  end
+  if LS_found == nil and LS_lastMs ~= nil and (now - LS_lastMs) < LS_RETRY_MS then return nil end
+  LS_lastMs, LS_gen = now, gen
+  local s = saveSettingsTable()
+  if s then LS_found = s end
   return LS_found
 end
 
@@ -203,6 +250,36 @@ end
 
 local function drop(g)
   if type(g) == 'table' and g.parent then pcall(function() g:removeSelf() end) end
+end
+
+-- IS THIS OBJECT STILL ON THE DISPLAY STAGE? The question every prune in these features means to
+-- ask, and `parent == nil` is NOT it.
+--
+-- `display.remove(group)` takes a GROUP off the stage and nils THAT object's parent, while every
+-- descendant keeps its own - so a row inside a destroyed pause menu still answers `row.parent`
+-- with the container it was built in, and a prune written as `row.parent == nil` never fires.
+-- Retaining one such row then retains the whole dead screen up the parent chain, and the game's
+-- own UI code destroys screens this way (pauseMenu's is `instance = display.remove(instance)`), so
+-- this is the common case rather than an edge one. reload.py's off-stage input prune reached the
+-- same conclusion from the other end; this is that test, shared.
+--
+-- Anything that cannot be judged answers TRUE - "still on the stage" - so a prune can only ever be
+-- conservative: no live object is removed because a walk failed or ran out of depth.
+local function hudOnStage(o)
+  local t = type(o)
+  if t ~= 'table' and t ~= 'userdata' then return false end
+  local stage = display.getCurrentStage()
+  if type(stage) ~= 'table' then return true end
+  local cur, guard = o, 0
+  while cur ~= nil do
+    if cur == stage then return true end
+    if guard >= 40 then return true end          -- too deep to judge: do not prune
+    guard = guard + 1
+    local ok, p = pcall(function() return cur.parent end)
+    if not ok then return true end
+    cur = p
+  end
+  return false                                    -- reached the top without the stage: detached
 end
 
 -- Keep a screen-space group on top of whatever the game has drawn since. Stage children
@@ -294,6 +371,11 @@ local H = {}
 _G.__hud = H
 H.feats = {}
 
+-- WHAT EACH FEATURE REPORTED AT INSTALL, collected by the summaries at the end and printed once.
+-- Declared here rather than in the driver because each feature now runs inside its own function and
+-- reaches this through the closure.
+local done = {}
+
 -- `period` is the feature's own poll interval in ms; the shared timer runs at the finest
 -- one and each feature is run every `every` ticks. A feature that needs every frame takes
 -- period 0: it gets an enterFrame listener of its own instead of a slot here.
@@ -319,7 +401,8 @@ end
 
 
 # Appended after the feature blocks. Runs everything once so the install reports real
-# numbers rather than promises, then says what happened.
+# numbers rather than promises, then says what happened. `done` is declared in HOST, because
+# the features are their own functions now and reach it through the closure.
 DRIVER = r"""
 H.tickBody = tick
 H.timer = timer.performWithDelay(TICK_MS, tick, 0)
@@ -328,8 +411,6 @@ for _, f in pairs(H.feats) do
   if f.on and f.update then pcall(f.update) end
 end
 
-local done = {}
-__SUMMARIES__
 if #done == 0 then return 'nothing selected' end
 return 'installed  ' .. table.concat(done, '\n           ')
 """
@@ -353,6 +434,14 @@ else
   end
   table.sort(names)
   out[#out + 1] = 'overlays: ' .. table.concat(names, '  ')
+end
+
+-- The world generation, so the trigger every save-table cache now hangs off is visible: it must sit
+-- still while you play, and step when a save is loaded or a map is entered.
+do
+  local wg, wlive = worldGen()
+  out[#out + 1] = string.format('world generation = %d (a world is %s)',
+    wg, wlive and 'loaded' or 'not loaded')
 end
 
 __ADD__
@@ -391,6 +480,40 @@ return table.concat(out, '\n')
 def compose(parts):
     """Join Lua fragments, dropping any that are empty."""
     return "\n".join(p for p in parts if p and p.strip())
+
+
+def _feature_fn(*parts):
+    """One feature's Lua, wrapped in a function of its own.
+
+    WHY IT IS A FUNCTION AND NOT JUST A `do ... end` BLOCK, which is the mistake that broke the
+    whole install (2026-09-23):
+
+        luaL_loadstring failed: function at line 1 has more than 200 local variables
+
+    **Lua 5.1's 200-local limit is PER FUNCTION AND COUNTS EVERY DECLARATION IN IT** - not the
+    locals active at one time. A `do ... end` block releases its variables at the end of the block
+    for REGISTER purposes, but every name it declared is still counted against the enclosing
+    function's budget. So wrapping the sections in `do ... end` (which `section()` already does)
+    saved nothing, and the install chunk was quietly near the ceiling: 146 top-level declarations
+    plus every do-block local in every section, with 16 features installed.
+
+    The previous note in this repo said a section's `do ... end` "does not count" - that is wrong,
+    and it is why the budget was thought to have ~96 locals of headroom when it had almost none.
+    Counted rather than estimated: the chunk needs the count of declarations per FUNCTION, which is
+    what qr_lua_check.py's `local budgets` check now reports.
+
+    A function body gets its own budget, so this restores ~170 locals of headroom and guarantees
+    that adding a feature cannot spend another feature's budget.
+
+    The body is CALLED through `hudRun` rather than written as a bare `(function() ... end)()`,
+    because that form does not compile in Lua 5.1 (see hudRun in LUA) - and the
+    `hud:feature:begin` / `hud:feature:end` comments are what `qr_lua_check.py` reads to see the
+    chunk level of the composed text WITHOUT parsing it (a full parse of the install chunk takes
+    ~35 s). They are the only reliable marker: the wrapper's own `(function()` / `end)()` lines are
+    not unique, because several features' summary expressions are themselves `(function() ... end)()`.
+    """
+    return ("-- hud:feature:begin\nhudRun(function()\n%s\nend)\n-- hud:feature:end"
+            % compose(list(parts)))
 
 
 # Settings for the top level of overlays.toml. Each feature declares its own section.
@@ -451,28 +574,40 @@ CONFIG_PATH = os.path.join(_data_dir(), config.FILENAME)
 def install_code(features, cfg):
     """The whole install as one chunk. The host tears down whatever was installed last
     time first, so this is 'make the game match the config', not 'add to what is there' -
-    which is also what makes setting enabled = false in the config remove a feature."""
-    summaries = []
+    which is also what makes setting enabled = false in the config remove a feature.
+
+    Every feature is emitted inside its own function (see _feature_fn) and then the driver runs
+    once, so the chunk's own locals are only the shared preamble, the host and this driver.
+    """
+    blocks = []
     for f in features:
         if not cfg[f.NAME]["enabled"]:
             continue
-        summaries.append(
-            "do local s = %s if s and s ~= '' then done[#done + 1] = s end end"
-            % f.summary(cfg[f.NAME])
+        blocks.append(
+            _feature_fn(
+                f.lua(cfg[f.NAME]),
+                f.section(cfg[f.NAME]),
+                "do local s = %s if type(s) == 'string' and s ~= '' then done[#done + 1] = s end end"
+                % f.summary(cfg[f.NAME]),
+            )
         )
-    return compose(
-        [LUA, HOST]
-        + [f.lua(cfg[f.NAME]) for f in features]
-        + [f.section(cfg[f.NAME]) for f in features]
-        + [DRIVER.replace("__SUMMARIES__", "\n".join(summaries))]
-    )
+    return compose([LUA, HOST] + blocks + [DRIVER])
 
 
 def _composed_doc(features, body, method, cfg):
-    adds = "\n".join("add((%s))" % getattr(f, method)(cfg[f.NAME]) for f in features)
-    return compose(
-        [LUA] + [f.lua(cfg[f.NAME]) for f in features] + [body.replace("__ADD__", adds)]
+    """The status/report chunk: the shared preamble, then ONE function per feature holding that
+    feature's queries and its own line, then the body's own locals `out` and `add`.
+
+    Each feature's `lua()` and its line go in the same function because they belong together - the
+    line calls the helpers the queries define - and the function's own budget is what keeps those
+    helpers from being counted against the chunk (see _feature_fn). `add` is an upvalue of the
+    enclosing function, so the block still appends to the same list.
+    """
+    adds = "\n".join(
+        _feature_fn(f.lua(cfg[f.NAME]), "add((%s))" % getattr(f, method)(cfg[f.NAME]))
+        for f in features
     )
+    return compose([LUA] + [body.replace("__ADD__", adds)])
 
 
 def status_code(features, cfg):
@@ -484,8 +619,9 @@ def report_code(features, cfg):
 
 
 def action_code(feature, lua, cfg):
-    """A one-shot action contributed by a feature needs the shared helpers too."""
-    return compose([LUA, feature.lua(cfg), lua])
+    """A one-shot action contributed by a feature needs the shared helpers too - and its own
+    function, for the same reason every other feature block has one."""
+    return compose([LUA, _feature_fn(feature.lua(cfg), lua)])
 
 
 # How often to look for the game while it is not running, and how often to look for its
@@ -619,8 +755,15 @@ def wait_for_game(process, log=print):
 
 
 def apply(b, features, cfg):
-    """Make the game match the config: the one-shot repairs first, then the features, then
-    say what was installed and what it looks like from in there."""
+    """Make the game match the config: the one-shot repairs first, then the features, then say
+    what was installed.
+
+    The full status and report dumps used to follow the install summary here, and they were a wall
+    of text at every start for something that is asked for rarely. They are still one command away
+    and still read-only: `python _status.py` (status) or `python _status.py --report` (the long
+    version), which attach, evaluate the same chunks and detach - safe to run while this is
+    watching, and quiet when nothing needs looking at.
+    """
     for f in features:
         for name, lua in getattr(f, "ACTIONS", {}).items():
             if cfg[f.NAME].get(name):
@@ -628,12 +771,6 @@ def apply(b, features, cfg):
 
     print("--- applied ---")
     print(eval_(b, install_code(features, cfg), timeout=60.0))
-    print()
-    print("--- status ---")
-    print(eval_(b, status_code(features, cfg)))
-    print()
-    print("--- report ---")
-    print(eval_(b, report_code(features, cfg)))
 
 
 def read_config(features, warn=None):
@@ -1010,16 +1147,8 @@ def main(features):
                 apply(b, features, cfg)
                 pad = start_trigger_keys(cfg, features, b)
                 print()
-                print(
-                    "watching %s - this stays attached until the game closes and re-attaches"
-                    % process
-                )
-                print("by itself when it is started again. Ctrl+C to stop.")
-                print(
-                    "edits to %s are picked up while this runs: save the file and the features "
-                    "are torn down and re-installed to match it, with no restart. Flipping one "
-                    "`enabled` at a time is how to see what a feature costs." % config.FILENAME
-                )
+                print("watching %s - Ctrl+C to stop. Edits to %s are picked up live."
+                      % (process, config.FILENAME))
                 if pad is not None:
                     if pad.failed:
                         print("gamepad: not reading the triggers - %s" % pad.failed)

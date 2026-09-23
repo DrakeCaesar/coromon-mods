@@ -19,13 +19,15 @@ from ingame import FEATURES, core  # noqa: E402
 
 
 def main():
+    what = "report" if "--report" in sys.argv[1:] else "status"
     cfg = core.read_config(FEATURES)
     if cfg is None:
         print("could not read the config")
         return 1
     bridge = Bridge("coromon.exe")
     time.sleep(0.2)
-    result = bridge.eval(core.status_code(FEATURES, cfg), timeout=60.0)
+    code = core.report_code(FEATURES, cfg) if what == "report" else core.status_code(FEATURES, cfg)
+    result = bridge.eval(code, timeout=60.0)
     out = result.get("out")
     if out is None:
         out = "ERROR: %s" % (result.get("err"),)

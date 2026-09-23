@@ -30,8 +30,9 @@ accumulated here, so there is nothing to go stale.
 serialised one and does not track a deposit as it happens, which is why the live one is what
 is read. It is also why nothing has to be hooked to notice a new deposit: a fresh handover
 appears in this list with its own target, so the counter picks it up on its next tick and
-starts counting down by itself, with no install step and no class hook. The list is re-found
-every RESCAN_TICKS because a save reload replaces the table it is read from.
+starts counting down by itself, with no install step and no class hook. The list is re-found when
+`worldGen()` says the world changed - a save load builds a new world - rather than on a timer, so
+nothing here polls for it and a reload is still noticed immediately.
 
 Finding that table is a search, and that is the game's fault rather than a choice: the save
 data is not reachable from any global, from Game/Save/the player, or from any displayed
@@ -98,10 +99,6 @@ HOW IT DRAWS, and the measurements behind it:
 """
 
 NAME = "steptimer"
-
-# re-find the live save table every this many ticks. At the 250 ms poll that is 12.5 s, which
-# is the cost of a `package.loaded` walk against how long a stale table can survive a reload.
-RESCAN_TICKS = 50
 
 CORNERS = ["top-left", "top-right", "bottom-left", "bottom-right"]
 
@@ -320,43 +317,51 @@ do
   local SPACING = __SPACING__
   local READY = __READY__
 
-  -- The live save table, re-found periodically: a save reload replaces the table this reads
-  -- from, and the old one goes stale without ever looking wrong.
+  -- The live save table, re-found when the WORLD changes: a save reload replaces the table this
+  -- reads from, and the old one goes stale without ever looking wrong.
   --
   -- THE THROTTLE USED TO BE DEFEATED, and it was this feature - not cooldowns - that cost the
   -- most. The condition was
   --
-  --     if f.save == nil or (f.ticks % __RESCAN__) == 0 then
+  --     if f.save == nil or (f.ticks % RESCAN_TICKS) == 0 then
+  --
+  -- (that name was the rescan interval this file used to carry as a constant; the interval is gone,
+  -- but the shape of the bug is worth keeping. Note it is written without its dunder markers here on
+  -- purpose: qr_lua_check.py rejects any dunder-NAME-shaped token left in a composed chunk, even in
+  -- a comment, because an unsubstituted one would be a nil global rather than a syntax error.)
   --
   -- and a failed scan is not cached: while the table had never been found, `f.save` was nil on
-  -- every tick, so the whole package.loaded walk ran EVERY TICK instead of every __RESCAN__. At
+  -- every tick, so the whole package.loaded walk ran EVERY TICK instead of every rescan. At
   -- this feature's 250 ms poll that is four full walks a second, which is what the runtime
   -- toggles showed up - and on the title screen, where the table does not exist at all, it was
   -- pure waste.
   --
-  -- So: the interval is measured from the LAST ATTEMPT (a failure counts like a success), and
-  -- the walk is gated on a save existing. `playerStats.getSteps()` is the game's own step counter
-  -- and it is the cheapest thing that answers "is a save loaded?" - far cheaper than the walk -
-  -- so the title screen now does no walking at all, and the first attempt after a save loads is
-  -- the one that finds the table.
-  local function saveLoaded()
-    local ok, n = pcall(function() return playerStats.getSteps() end)
-    return ok and tonumber(n) ~= nil
-  end
-
+  -- So: a failure is counted and delayed like a success, and the walk is gated on a world existing -
+  -- and, since 2026-09-23, on the WORLD CHANGING rather than on a timer at all. A save load builds a
+  -- new world, so `worldGen()` changing IS the save-loaded event; once the table has been found for
+  -- this world nothing searches again until the world changes, which is what removes the periodic
+  -- rescan this used to do every RESCAN_TICKS ticks for ever.
+  --
+  -- `playerStats.getSteps()` was the old gate for "is a save loaded?". `worldGen()` answers the same
+  -- question for the price of two reads, and it answers it in a battle and behind a menu too, where
+  -- the counter's module may not be loaded yet.
   local function save()
-    if not saveLoaded() then
+    local gen, live = worldGen()
+    if not live then
       -- no save, so there is nothing to read and nothing to remember - and clearing these means
       -- the next save is looked for on its own first tick rather than after an inherited wait
-      f.save, f.lastScan = nil, nil
+      f.save, f.gen, f.lastScan = nil, nil, nil
       return nil
     end
-    local every = f.save and __RESCAN__ or RETRY_TICKS
-    if f.lastScan == nil or (f.ticks - f.lastScan) >= every then
-      f.lastScan = f.ticks
-      local s = saveSettings()
-      if s then f.save = s end
+    if f.save ~= nil and gen == f.gen then return f.save end
+    -- nothing found yet for this world: retry at RETRY_TICKS, so a table that never appears cannot
+    -- cost a walk per tick
+    if f.save == nil and f.lastScan ~= nil and (f.ticks - f.lastScan) < RETRY_TICKS then
+      return nil
     end
+    f.gen, f.lastScan = gen, f.ticks
+    local s = saveSettings()
+    if s then f.save = s end
     return f.save
   end
 
@@ -437,7 +442,6 @@ end
         .replace("__MY__", str(int(cfg["margin_y"])))
         .replace("__SPACING__", str(int(spacing)))
         .replace("__READY__", _lua_str(cfg["ready_text"]))
-        .replace("__RESCAN__", str(RESCAN_TICKS))
     )
 
 

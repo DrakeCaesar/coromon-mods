@@ -2420,7 +2420,9 @@ do
     if f.overlay then pcall(function() keepOnTop(f.overlay) end) end
 
     -- The list container: known from the screen, and re-asked if the screen was rebuilt.
-    if f.container ~= nil and f.container.parent == nil then f.container = nil end
+    -- Stage membership, not `parent == nil`: a container inside a menu that has been
+    -- display.remove'd keeps its own parent, which is why this never noticed the screen going.
+    if f.container ~= nil and not hudOnStage(f.container) then f.container = nil end
     if f.container == nil then
       f.container = loadoutListContainer(f.screen)
       if f.container ~= nil then f.bars = f.bars or {} end
@@ -2428,7 +2430,9 @@ do
 
     for row in pairs(f.rows) do
       local container = type(row) == 'table' and row.parent or nil
-      if type(row) ~= 'table' or row.parent == nil then
+      -- Row -> its container -> the list's screen -> the menu, and the menu is the thing that is
+      -- display.remove'd, so the row's OWN membership is what decides. See hudOnStage in core.py.
+      if not hudOnStage(row) then
         f.rows[row] = nil
       elseif type(container) == 'table' then
         -- ONLY THE REAL LIST. A row the popup built is skipped here - its container is not the
@@ -2476,8 +2480,15 @@ do
     end
     -- The screen went: the chips were children of its container, so they went with it, and
     -- holding the table would keep a dead screen alive.
+    --
+    -- STAGE MEMBERSHIP, AND THIS ONE MATTERED. `container.parent == nil` never fired: a list
+    -- container inside a pause menu that has been `display.remove`d keeps its own parent, so the
+    -- prune never ran, `killBar` therefore never ran, and every menu the player ever opened kept
+    -- its chip row alive - 3 touchable registrations per slot, six slots, never handed back to
+    -- inputHelper - on top of the dead screen the container chain held on to. hudOnStage walks the
+    -- container's chain to the stage, which is what "the screen went" actually means.
     for container, bar in pairs(f.bars) do
-      if type(container) ~= 'table' or container.parent == nil then
+      if not hudOnStage(container) then
         killBar(bar)
         f.bars[container] = nil
       end
@@ -2486,11 +2497,22 @@ do
     -- stage child, so nothing else would remove it. ONLY A SCREEN WE KNOW ABOUT COUNTS: a nil
     -- `f.screen` means no list has been seen yet, which is not evidence that the screen went away,
     -- and treating it as such closed the dialog one tick after it opened.
-    if f.overlay ~= nil and f.screen ~= nil and f.screen.parent == nil then closeOverlay() end
+    --
+    -- STAGE MEMBERSHIP, for the same reason as the prunes above and with one extra consequence:
+    -- `f.screen.parent == nil` does not fire when the pause menu is closed, because the menu's
+    -- `display.remove` nils the MENU's parent and leaves the screen's alone - so a confirm dialog
+    -- opened in the pause menu stayed on the stage over the overworld after the menu was closed.
+    -- hudOnStage answers TRUE when it cannot judge, so the one-tick-after-opening bug above cannot
+    -- come back this way: a live screen is on the stage, which is exactly what keeps the dialog up.
+    if f.overlay ~= nil and f.screen ~= nil and not hudOnStage(f.screen) then closeOverlay() end
   end
 
   local function kill()
     killRows()
+    -- And the row set, which `killRows` does not touch: without this a feature toggle keeps every
+    -- row the game ever built reachable through the old feature table (`squad.py`'s kill clears
+    -- its own for the same reason).
+    f.rows = {}
     closeOverlay()
     -- The hover listener is Runtime-level, so the feature has to take it with it.
     pcall(function() Runtime:removeEventListener('mouse', onMouseMove) end)
@@ -2585,8 +2607,19 @@ def report(cfg):
       out[#out + 1] = string.format('  slot %d (%d): %s', i, #list, table.concat(parts, ' '))
     end
   end
-  local head = string.format('loadouts: %d saved in %s', #out,
-    tostring(loadoutPath() or '???'))
+  -- THE PROBE. Open and close the pause menu a few times, then read these two numbers: with the
+  -- stage-membership prune they follow what is really on screen, and they must not climb with the
+  -- number of opens. Rows that climb while the chip rows stay put mean the container is recognised
+  -- but the row is not being released.
+  local heldRows, heldBars = 0, 0
+  local live = _G.__hud and _G.__hud.feats.loadouts
+  if type(live) == 'table' then
+    for _ in pairs(live.rows or {}) do heldRows = heldRows + 1 end
+    for _ in pairs(live.bars or {}) do heldBars = heldBars + 1 end
+  end
+  local head = string.format('loadouts: %d saved in %s\n  held now: %d row(s), %d chip row(s)%s',
+    #out, tostring(loadoutPath() or '???'), heldRows, heldBars,
+    (live == nil) and '   (feature not installed)' or '')
   if #out == 0 then return head end
   return head .. '\n' .. table.concat(out, '\n')
 end)()""".replace("__SLOTS__", str(int(cfg["slots"])))

@@ -321,7 +321,19 @@ do
     if next(f.rows) == nil then hookRows() end      -- the class may not be loaded yet
     local n = 0
     for row in pairs(f.rows) do
-      if type(row) ~= 'table' or row.parent == nil then
+      -- THE PRUNE IS STAGE MEMBERSHIP, NOT `row.parent == nil`, and that is a fix rather than a
+      -- tidy-up. `pauseMenu`'s teardown is `instance = display.remove(instance)`: that takes the
+      -- menu's GROUP off the stage and nils the GROUP's parent, while every descendant keeps its
+      -- own - so a row inside a destroyed menu still answers `row.parent` with the container it
+      -- was built in. The old test therefore never fired, and the rows of every menu ever opened
+      -- were kept, each dragging its whole dead screen up the parent chain, and re-attached (five
+      -- times a second) for the rest of the session. hudOnStage asks the question the prune means:
+      -- walk the parent chain to display.getCurrentStage(). See its definition in core.py.
+      if not hudOnStage(row) then
+        local rec = f.rows[row]
+        if type(rec) == 'table' and type(rec.text) == 'table' then
+          pcall(function() rec.text:removeSelf() end)   -- ours; the row is going anyway
+        end
         f.rows[row] = nil      -- the screen went: the label was a child of the row, so it went too
         f.conds[row] = nil
       else
@@ -381,9 +393,27 @@ end)()""".replace("__FONT__", font).replace("__TIER__", "true" if cfg["tier_colo
 
 def report(cfg):
     return r"""(function()
+  local f = _G.__hud and _G.__hud.feats.squad
+  local out = {}
+  if type(f) ~= 'table' then
+    out[#out + 1] = 'squad: not installed'
+  else
+    local held, conds = 0, 0
+    for _ in pairs(f.rows or {}) do held = held + 1 end
+    for _ in pairs(f.conds or {}) do conds = conds + 1 end
+    -- THE PROBE. Open and close the pause menu a few times, then read this: with the
+    -- stage-membership prune it follows the rows really on screen. On the old `row.parent == nil`
+    -- test it climbed by one row per Coromon per open and never came down, because a row inside a
+    -- display.remove'd menu keeps its parent.
+    out[#out + 1] = string.format(
+      'squad rows held = %d (drawn now = %d), status icons held = %d', held, f.count or 0, conds)
+  end
   local rows = squadRows()
-  if #rows == 0 then return 'squad - the squad screen is not open' end
-  local out = { string.format('squad - %d Coromon', #rows) }
+  if #rows == 0 then
+    out[#out + 1] = 'squad - the squad screen is not open'
+    return table.concat(out, '\n')
+  end
+  out[#out + 1] = string.format('squad - %d Coromon', #rows)
   for i = 1, #rows do
     local fact = squadFactFor(rows[i])
     out[#out + 1] = string.format('  %-16s  L%-4s  P%-2s  [%s]', fact.name,

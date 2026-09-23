@@ -68,10 +68,13 @@ The label is drawn on the display stage, so it is screen-space: it does not move
 and is unaffected by the overworld zoom. Its position is re-read every frame rather than
 remembered, because the game owns the row's layout and it shifts when the icon set does.
 
-IT RUNS EVERY FRAME, so nothing is missed between polls and the label never lags a row that
-has just moved. That is affordable because the search is cheap: measured over 200 passes on a
-live screen, the walk visits 1217 nodes in 0.043 ms, a quarter of one percent of a 60 fps
-frame. No countdown of our own ticks anywhere - every number drawn was read out of the game on
+IT RUNS EVERY FRAME while anything is counting down, so nothing is missed between polls and the
+label never lags a row that has just moved - and while NOTHING is counting down the search is
+skipped altogether, because a label can only be drawn where a marker and a matching effect meet,
+and with no effect there is neither. That gate is in update(). The search itself was measured at
+1217 nodes in 0.043 ms on a live screen, but cdMarkers' budget is 4000 nodes and the pause menu's
+tree is that big - so the pass worth not paying for is the menu, sixty times a second, finding
+nothing. No countdown of our own ticks anywhere - every number drawn was read out of the game on
 that same frame.
 """
 
@@ -85,6 +88,14 @@ MATCH_TOL = 0.02
 # How often to re-find the save's settings table, in frames. Finding it walks all of
 # package.loaded, which is not something to do sixty times a second.
 RESCAN_FRAMES = 120
+
+# How often, in frames, a pass at which NOTHING is counting down is allowed to ask whether one has
+# started. While an effect is running this is not used at all - the clock is read every frame, as
+# it always was - so this only prices the idle case, and it is what lets the marker search be
+# skipped outright while there is nothing it could pair. At 60 fps this is ~10 asks a second, and
+# each ask is one pass over the save's effect list (a handful of entries, a couple of pcalls each) -
+# the walk itself runs on the pass that finds something, and not before.
+IDLE_PROBE_FRAMES = 6
 
 # The two fonts the game ships. outline_8 is the smaller, which is what fits under an icon.
 FONTS = ["outline_8", "outline_10_bold"]
@@ -294,16 +305,30 @@ do
   -- down to ~20, CPU up), and it goes away the moment a game is loaded and the table appears and
   -- gets cached.
   --
-  -- So the interval is now measured from the LAST ATTEMPT rather than from the last SUCCESS. A
-  -- failed scan is remembered like a successful one; the only difference is that there is nothing
-  -- to keep using in between.
+  -- AND THE TIMER IS GONE ENTIRELY, replaced by the world generation. A save load builds a new
+  -- world, so `worldGen()` changing IS the save-loaded event, and reacting to it is both cheaper and
+  -- more correct than a rescan on a frame count: that timer kept firing for as long as the feature
+  -- was installed - including every 2 s while an effect was running, which is the one state where a
+  -- millisecond-scale search under a live countdown is most likely to be felt. Now, once the table
+  -- has been found for this world, nothing searches again until the world changes.
+  --
+  -- The retry belt stays, and it is the mistake this file already made twice: while the table has
+  -- never been found, a FAILED search has to be remembered and delayed like a successful one, or it
+  -- runs every frame. __RESCAN__ is that delay, and it now applies only in that state.
   local function settings()
-    local passes = f.passes or 0
-    if f.lastScan == nil or (passes - f.lastScan) >= __RESCAN__ then
-      f.lastScan = passes
-      local s = cdSaveSettings()
-      if s then f.settings = s end
+    local gen, live = worldGen()
+    if f.settings ~= nil and gen == f.gen then return f.settings end
+    if not live then
+      f.settings, f.gen, f.lastScan = nil, nil, nil
+      return nil
     end
+    local passes = f.passes or 0
+    if f.settings == nil and f.lastScan ~= nil and (passes - f.lastScan) < __RESCAN__ then
+      return nil
+    end
+    f.gen, f.lastScan = gen, passes
+    local s = cdSaveSettings()
+    if s then f.settings = s end
     return f.settings
   end
 
@@ -319,17 +344,47 @@ do
 
   local function update()
     if not f.on then return end
-    local markers = cdMarkers()
-    local entries, seen, used = {}, {}, {}
     f.passes = (f.passes or 0) + 1
-    f.markers = #markers
-    -- LAZY, AND THIS IS THE SECOND HALF OF THE MENU COST. The settings table exists only to MATCH a
-    -- marker to the effect whose fraction it is showing, so with no markers there is nothing to
-    -- match and no reason to pay for finding it. On the title screen, and across the whole overworld
-    -- whenever nothing is running, there are no markers - so the package.loaded walk no longer
-    -- happens there at all: not every frame (which was the bug), and not amortised over every 120th
-    -- frame either. It is now driven by a marker actually existing.
-    local effects = (#markers > 0) and cdEffects(settings()) or {}
+
+    -- WHETHER TO WALK AT ALL IS DECIDED BEFORE THE WALK, AND IT REMEMBERS NOTHING ABOUT MARKERS.
+    --
+    -- A label is only ever drawn where a marker is AND an effect's fraction matches its scale, so
+    -- with no timed effect in the save there is nothing a walk could pair and nothing it could
+    -- draw: the search is skipped outright. That is where the cost was - it ran on the title
+    -- screen, over an idle overworld and inside every menu sixty times a second to find nothing,
+    -- and the pause menu (~4000 nodes) is what paid the most for it.
+    --
+    -- `f.timed` is only the COUNT of running effects from the last read. Which marker belongs to
+    -- which effect is still rediscovered from scratch on every pass the walk runs, so this
+    -- survives a save reload, a map change and a rebuilt quick-item row with no invalidation
+    -- anywhere. Caching the association instead is the alternative, and it is the bug this project
+    -- keeps meeting: a handle that outlives what it points at.
+    --
+    -- While an effect IS running, the old path runs every frame and the settings table is still
+    -- read on every one of those frames, so its rescan interval is exactly what it was. While
+    -- nothing is running the question is asked every IDLE_PROBE_FRAMES instead, which is the one
+    -- behaviour difference: the rescan interval is then longer in wall-clock terms. Nothing is on
+    -- screen to go stale in that state, and the next effect to start is picked up within one probe.
+    local markers, effects = {}, {}
+    if f.timed == nil or f.timed > 0 then
+      markers = cdMarkers()
+      f.walks = (f.walks or 0) + 1
+      effects = (#markers > 0) and cdEffects(settings()) or {}
+    else
+      f.idlePasses = (f.idlePasses or 0) + 1
+      if f.idlePasses >= __IDLE__ then
+        f.idlePasses = 0
+        f.probes = (f.probes or 0) + 1
+        effects = cdEffects(settings())
+        if #effects > 0 then
+          markers = cdMarkers()
+          f.walks = (f.walks or 0) + 1
+        end
+      end
+    end
+    f.markers, f.effects, f.timed = #markers, #effects, #effects
+
+    local entries, seen, used = {}, {}, {}
 
     for i = 1, #markers do
       local marker = markers[i]
@@ -421,6 +476,7 @@ end
         .replace("__OFFSET__", str(int(cfg["offset_y"])))
         .replace("__TOL__", str(MATCH_TOL))
         .replace("__RESCAN__", str(RESCAN_FRAMES))
+        .replace("__IDLE__", str(IDLE_PROBE_FRAMES))
     )
 
 
@@ -508,6 +564,12 @@ def report(cfg):
       'passes=%s  markers last pass=%s  effects seen=%s  labels drawn=%s',
       tostring(f.passes), tostring(f.markers), tostring(f.effects),
       tostring(#(f.entries or {})))
+    -- THE NUMBER TO WATCH. `walks` is how many times the top-strip search actually ran, and it used
+    -- to be one per pass: with nothing counting down it must now stay flat - sitting on the title
+    -- screen or walking around an idle overworld - and step up only while an effect is running.
+    out[#out + 1] = string.format(
+      'searches: walks=%s of %s passes, idle probes=%s  (walks was one per pass before)',
+      tostring(f.walks or 0), tostring(f.passes), tostring(f.probes or 0))
   end
   return table.concat(out, '\n')
 end)()""".replace("__TOL__", str(MATCH_TOL)).replace("__OFF__", str(int(cfg["offset_y"])))
