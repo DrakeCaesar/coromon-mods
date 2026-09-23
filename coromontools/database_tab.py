@@ -714,7 +714,8 @@ class DatabaseTab(QWidget):
         the map could NOT answer, which is what `set_zone` returning False means ("no map file",
         "not marked on the map of...", or nothing picked yet).
         """
-        self.species.setPlainText("\n".join(encounter_lines(zone)) if zone is not None else "")
+        self.species.setPlainText("\n".join(encounter_lines(zone, xp_of=dex.xp_reward))
+                                  if zone is not None else "")
         drew = self.map.set_zone(zone)
         self.map_head.setText("" if drew else self.map.headline)
         self.map_head.setVisible(not drew)

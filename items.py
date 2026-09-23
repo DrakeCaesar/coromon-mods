@@ -288,9 +288,32 @@ def stats_of(uid, car=None):
     return out
 
 
+XP_GEM_EFFECT = "mutateXpEarned"
+
+
+def xp_multiplier(uid, car=None):
+    """The XP a hold item lets its holder earn, as a multiplier - or None when it has no effect.
+
+    READ OUT OF THE GAME'S OWN EFFECT BODY, whose argument names say what each figure means
+    (`classes.items.HOLD_EXTRA_XP`, `mutateXpEarned(_monsterSprite, _isLazy, _xpPerMonsterSprite,
+    _value)`):
+
+      * the Smart Gem returns `1.1 * _value` for its own holder - it scales what that Coromon was
+        going to get, so a benched holder (whose `_value` is 0) gets 0.1 of nothing;
+      * the lazy gems return `factor * _xpPerMonsterSprite + _value`, and ONLY when `_isLazy` - i.e.
+        when the holder did not face the enemy. Since `_value` is 0 in that case, the figure is
+        exactly the factor of its share: the Sloth Gem's 0.5, the Lazy Gem's 0.2.
+
+    `classes.battle.rules.afterMonsterSpritesFaintedXp` is what passes those arguments, and it is
+    also what divides an enemy's reward among the sprites that FACED it.
+    """
+    values = stats_of(uid, car).get(XP_GEM_EFFECT) or []
+    numbers = [value for value in values if isinstance(value, (int, float))]
+    return float(numbers[-1]) if numbers else None
+
+
 def _constants(car=None):
     """`{NAME: value}` for the named constants the item classes read, read from the abstract spinner.
-
     Only the ones an item's own body can reference are worth having, and there is exactly one in this
     family: a body that needs the shake count loads the global `AMOUNT_OF_SHAKES_REQUIRED` rather
     than a literal, which is why the Platinum Spinner reads as `getAmountOfShakes =

@@ -184,6 +184,76 @@ class Species:
     def total(self):
         return sum(self.stats.values()) if self.stats else 0
 
+    @property
+    def base_stats(self):
+        """The MEAN of this Coromon's base stats - the average the XP formula takes (see `xp_reward`).
+
+        All seven keys the data carries, `sp` included, because that is the table `baseStats` holds and
+        the game averages whatever its mutated-stats function returns.
+        """
+        return self.total / float(len(self.stats)) if self.stats else 0.0
+
+
+_XP_LINES = None      # uid -> (its 1-based place in the evolution line, how many places there are)
+_XP_MONSTERS = None   # uid -> Species, so `xp_reward` takes an id as happily as an object
+
+
+def _xp_monsters():
+    """`uid -> Species`, built once. A crimsonite form shares its species' uid and stats."""
+    global _XP_MONSTERS
+    if _XP_MONSTERS is None:
+        _XP_MONSTERS = {mon.uid: mon for mon in monsters()}
+    return _XP_MONSTERS
+
+
+def _xp_lines():
+    """`uid -> (place, stages)` over every evolutionary line, built once - see `xp_reward`."""
+    global _XP_LINES
+    if _XP_LINES is None:
+        _XP_LINES = {}
+        for _family, stages in lines():
+            for index, mon in enumerate(stages, start=1):
+                _XP_LINES[mon.uid] = (index, len(stages))
+    return _XP_LINES
+
+
+def xp_reward(mon, level):
+    """The XP the game awards for defeating `mon` at `level` - the game's OWN formula, from its Lua.
+
+    `mon` is a `Species` or a bare UID (an encounter row carries ids, not objects).
+
+    READ OUT OF THE BYTECODE, because no data file has an XP number anywhere: `Monster:calculateXpReward`
+    in resource.car is
+
+        return math.floor((index / stages) * table.average(self:getMutatedBaseStats(
+            self:getAmountOfSkippedEvolutionsForLevel())) * self:getLevelForXpRewardCalculation() / 2)
+
+    which in words is:
+      * `index / stages` - the species' PLACE IN ITS EVOLUTION LINE, 1-based over the family's evolution
+        objects (`getIndexInRandomizableEvolutionObjects` -> `array.findIndexByFunction`, whose loop was
+        measured to start at 1). So the first stage of a three-stage line gives a third of what the last
+        stage gives, and a single-stage family gives all of it.
+      * `average(base stats)` - the mean of the base stats (`Species.base_stats`).
+      * `/ 2` - a constant in the formula's own body (k[10] of it).
+    NOT INCLUDED, because they are not part of this function:
+      * a wild POTENT or PERFECT Coromon is worth 2x or 4x - `abstractWildParticipant.getXpReward`
+        multiplies this result by 2.0 for category B and 4.0 for C - and the A/B/C odds are a difficulty
+        setting, so what this returns is the STANDARD-category reward;
+      * a zone participant (the hexagon encounters) multiplies by 1.5 as well.
+
+    ONE PART COULD NOT BE VERIFIED OFFLINE: `getMutatedBaseStats` is CALLED but defined in no module in
+    the archive (every one was searched for the definition), so it is injected at runtime, and this
+    averages the seven keys the data holds. If the game's own set differs, every value is off by one
+    constant factor - the place to check is what a real wild Coromon awards.
+    """
+    if isinstance(mon, str):
+        mon = _xp_monsters().get(mon)
+    place = _xp_lines().get(getattr(mon, "uid", None))
+    if not place or not level:
+        return None
+    index, stages = place
+    return int((index / float(stages)) * mon.base_stats * float(level) / 2.0)
+
 
 def monsters(include_unused=False, with_crimsonite=False):
     """Every Coromon, in dex order: numbered first, then the ones with no dex number.

@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListW
                                QListWidgetItem, QPushButton, QSpinBox, QSplitter,
                                QVBoxLayout, QWidget)
 
+import dex
+
 from . import mapnames
 from .config import (LEVEL_DEFAULT, MIN_SHARE_DEFAULT, ONLY_XP_DEFAULT, ON_TOP_DEFAULT,
                      SCALES_SPAN, XP_MARGIN)
@@ -32,26 +34,78 @@ from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
 from .widgets import mono_text, note
 
+import items
+
 try:
     import savefile
 except ImportError:          # the button then explains itself instead of crashing
     savefile = None
 
-NOTES = ("Shares are the game's own encounter weights, normalised - whether the game draws "
-         "proportionally to them is unverified. The monster data has no XP yield, so zones are "
-         "ranked by how high the monsters are, not by XP per battle.")
+# THE GEMS THAT MOVE XP, in the order the user asked for them, and the reason they are columns at
+# all: the Smart Gem pays the Coromon that FIGHTS, and the two lazy gems are the only way a Coromon
+# you are NOT fighting with earns anything - the game hands XP to the sprites that FACED the enemy
+# (`classes.battle.rules.afterMonsterSpritesFaintedXp`), so a benched Coromon without one gets zero.
+# The multipliers are READ OUT OF THE GAME'S OWN ITEM CLASSES (`items.xp_multiplier`): 1.1 for the
+# Smart Gem, 0.5 for the Sloth Gem, 0.2 for the Lazy Gem.
+GEMS = (
+    ("smart", "smart gem", "HOLD_EXTRA_XP"),
+    ("sloth", "sloth gem", "HOLD_LAZY_XP_PREMIUM"),
+    ("lazy", "lazy gem", "HOLD_LAZY_XP"),
+)
+
+NOTES = ("Shares are the game's own encounter weights, normalised. XP PER FIGHT IS THE GAME'S OWN "
+         "REWARD, not an estimate: `dex.xp_reward` is the formula out of the Lua - the Coromon's "
+         "place in its evolution line x the mean of its base stats x its level / 2 - averaged over "
+         "the encounters the zone can roll, a group counted member by member (a party of two is two "
+         "Coromon defeated). Three things it is NOT: a wild Potent or Perfect Coromon is worth 2x or "
+         "4x (a difficulty setting), a squad splitting the reward is not in a per-fight figure, and "
+         "the mean of the base stats is the one step that calls a function the shipped archive does "
+         "not contain (`getMutatedBaseStats`), so read the numbers as exact to within a constant. "
+         "The reward follows the monster's level, so a zone's rank does not depend on yours, and how "
+         "often the zone rolls a fight at all (`stepsWithEncounter`, 1-4 per encounter) is NOT "
+         "weighed in - this column is per fight, not per step. An encounter the game cannot roll at "
+         "all (a LEVEL RANGE THAT IS EMPTY: Pyramid F6 ships a 2725-27 typo) is left out and says "
+         "so, rather than adding a level-2725 reward to the zone. The three GEM COLUMNS are the same "
+         "fight with each XP gem on the holder: the Smart Gem's is for the Coromon that FIGHTS (1.1x), "
+         "the Sloth (0.5x) and Lazy (0.2x) gems pay one that DID NOT - nothing else does, and they "
+         "are how you level a Coromon you are not fighting with. All four are ONE Coromon facing the "
+         "whole fight (the solo case); two Coromon facing the same enemy SPLIT that enemy's reward.")
 
 MAP_NOTES = ("Patches are read from the map tiles: the marker's tile, plus the connected tiles "
              "of the same tileset - exact for grass, whose tiles are one map cell. Water and "
              "cave markers name no layer and show as small outlined squares.")
 
+# THE NUMBERS COME FIRST, AND THAT IS A DELIBERATE ORDER. This window is used BESIDE a fullscreen
+# game, so it is small: measured on the shipped window state it opens at 1040x560, which leaves this
+# table a 428 px viewport. With Area and Zone in front, that showed two names and "exp level" and
+# pushed every XP column off the right edge - which is exactly how the user came to ask "it's not
+# showing the extra columns for exp anywhere still, am I overlooking them?": they were all past the
+# scrollbar, the base column included. Zone (140) + the four XP columns (70 each = 280) = 420 px, so
+# the fight's worth AND the three gems are readable with no scrolling at all at that width, and the
+# descriptive columns follow for anyone who drags the window wider. The full area name is not lost -
+# selecting a row prints it, with the whole spawn list, in the pane below.
 COLUMNS = (
+    Column("zone", "Zone", 140, "w"),
+    # THE NUMBER THE TAB EXISTS FOR, and the column it opens sorted by: what one fight is worth here.
+    Column("xp", "xp / fight", 70, "e", desc_first=True),
+    # ... AND WHAT THE SAME FIGHT IS WORTH WITH EACH XP GEM ON THE HOLDER - see `GEMS`.
+) + tuple(
+    Column(key, heading, 70, "e", desc_first=True) for key, heading, _uid in GEMS
+) + (
     Column("area", "Area", 190, "w"),
-    Column("zone", "Zone", 170, "w"),
     Column("explvl", "exp level", 80, "e", desc_first=True),
     Column("best", "most common", 240, "w", desc_first=True),
     Column("flags", "flags", 150, "w"),
 )
+
+
+def gem_factors():
+    """`{column key: multiplier}` for the XP gems, read from the game - None when it cannot be read.
+
+    A gem the archive has no class for is reported as None rather than 1.0, so its column stays
+    blank instead of pretending the gem does nothing.
+    """
+    return {key: items.xp_multiplier(uid) for key, _heading, uid in GEMS}
 
 
 def zone_rows(zone, min_share=0.0):
@@ -65,7 +119,7 @@ def zone_rows(zone, min_share=0.0):
             if row["share"] >= min_share]
 
 
-def encounter_lines(zone, min_share=0.0):
+def encounter_lines(zone, min_share=0.0, xp_of=None):
     """One aligned line per ENCOUNTER of `zone`, most likely first - the body of a spawns pane.
 
     ONE FORMATTER FOR TWO TABS: this tab draws it under its map and the Database tab under its location
@@ -80,11 +134,52 @@ def encounter_lines(zone, min_share=0.0):
 
     The heading belongs to the caller: this tab names the zone and marks a water zone, the Database tab
     does not, because the selected row directly above the pane already names it.
+
+    `xp_of` adds WHAT A FIGHT IS WORTH, and the gems with it: the ranking's whole claim is XP per
+    fight, so a zone's own pane has to show where that number comes from - and the gems are the same
+    fight with one on the holder, which is the other half of "where should I grind". Four aligned
+    number columns follow the share, named by a HEADER ROW of their own (the numbers are bare so they
+    stay narrow, and a column nobody can name is unreadable):
+
+             name              level    share   fight   smart   sloth    lazy
+        Chonktoad              L55-60   20.0%    4406    4847    2203     881
+
+    `fight` is the whole fight (every body in the party), and `smart` / `sloth` / `lazy` are that
+    figure with each XP gem on the holder - the Smart Gem for a Coromon that FIGHTS, the other two for
+    one that does not (see `GEMS`). A group is worth every body, exactly as the column that sums them
+    does. An entry whose LEVEL RANGE IS EMPTY (the game's own typo - see `Zone.rollable_encounters`)
+    gets no figure at all, because there is no level to reward: it says so instead, and the zone's
+    total leaves it out.
     """
     rows = [row for row in zone.encounters() if row["share"] >= min_share]
     width = max([14] + [len(row["name"]) + 1 for row in rows])
-    return ["  %-*s L%-3s-%-3s  %5.1f%%" % (width, row["name"], row["min"], row["max"], row["share"])
-            for row in rows]
+    out = []
+    if xp_of is not None:
+        # THE COLUMNS ARE NAMED ONCE, which is what lets the rows carry bare numbers: six number
+        # columns with " xp" after each would be half again as wide, and this pane is narrow (it sits
+        # in the map column of a window that is kept beside the game).
+        out.append("  %-*s %-7s %6s %6s %6s %6s %6s"
+                   % (width, "", "level", "share", "fight", "smart", "sloth", "lazy"))
+    gems = gem_factors() if xp_of is not None else {}
+    for row in rows:
+        line = "  %-*s L%-3s-%-3s %5.1f%%" % (width, row["name"], row["min"], row["max"],
+                                              row["share"])
+        if xp_of is not None:
+            if row["rollable"]:
+                fight = zone.encounter_xp(row, xp_of)
+                line += " %6d" % fight
+                # ... AND THE SAME FIGHT WITH EACH GEM ON THE HOLDER. A gem whose multiplier could not
+                # be read prints "-" rather than a figure computed from a guess, exactly as the table's
+                # column goes blank - and the two must agree, they are one reading of one item class.
+                for key, _heading, _uid in GEMS:
+                    factor = gems.get(key)
+                    line += (" %6d" % (fight * factor)) if factor else " %6s" % "-"
+            else:
+                # NO LEVEL, NO REWARD: four blanks and the reason, rather than a figure from a level
+                # the game cannot roll (see `Zone.rollable_encounters`).
+                line += " %6s %6s %6s %6s  (empty level range)" % ("-", "-", "-", "-")
+        out.append(line)
+    return out
 
 
 def rank(zones, level, min_share=0.0, only_xp=True):
@@ -226,7 +321,7 @@ class GrindTab(QWidget):
         controls.addWidget(self.on_top)
         box.addLayout(controls)
 
-        self.table = DataTable(COLUMNS, sort_key="explvl", sort_desc=True)
+        self.table = DataTable(COLUMNS, sort_key="xp", sort_desc=True)
         self.table.selectionChangedTo.connect(self.show_zone)
         box.addWidget(self.table, 1)
         box.addWidget(note(NOTES, wrap=700))
@@ -351,19 +446,31 @@ class GrindTab(QWidget):
         picked = rank(self.reachable(), self.level.value(), self.min_share_value(),
                       self.only_xp.isChecked())
         min_share = self.min_share_value()
+        # read once for the whole table: the multipliers come out of the archive, which is cached a
+        # uid at a time but is not something to ask for on every row
+        factors = gem_factors()
         rows = []
         for zone in picked:
             species = zone_rows(zone, min_share)
             best = species[0] if species else None
-            rows.append({
+            # ONE FIGHT's worth of XP, which is what the ranking is about - see `Zone.xp_per_encounter`
+            fight = zone.xp_per_encounter(dex.xp_reward)
+            row = {
                 "area": mapnames.area(zone.map_file),
                 "zone": zone.name,
                 "explvl": "%.2f" % zone.average_level,
+                "xp": "%.0f" % fight,
                 "best": ("%s L%s-%s  %.0f%%" % (best["name"], best["min"], best["max"],
                                                 best["share"]) if best else ""),
                 "flags": " ".join(self._flags(zone, species)),
                 PAYLOAD: zone,
-            })
+            }
+            # THE SAME FIGHT WITH EACH GEM ON THE HOLDER (see `GEMS`): the holder's own earnings, not
+            # the zone's. A gem whose multiplier could not be read leaves its cell blank rather than
+            # claiming the gem changes nothing.
+            for key, factor in factors.items():
+                row[key] = "%.0f" % (fight * factor) if factor else ""
+            rows.append(row)
         self.table.set_rows(rows, keep_row=self.selected_zone)
         # re-shown explicitly: filtering the species list or ticking a new area can change what
         # the SAME selected zone is, and a selection that did not move emits nothing
@@ -376,6 +483,14 @@ class GrindTab(QWidget):
 
         A zone labelled "multi" is one where a single encounter can be a double or triple
         battle, which changes what the walk is worth without changing any number in the row.
+
+        REVERSED LEVELS IS THE GAME'S OWN TYPO, not a reading of ours, and it is flagged because it
+        is the one thing here that can put a zone at the top of the ranking on its own: PYRAMID_F6
+        ships `GHOST_OCTO_1 minLevel 2725, maxLevel 27`, and the game rolls a wild level with
+        `math.random(minLevel, maxLevel)`, which LUA REFUSES for an empty interval - so that entry
+        can never produce a fight. Its row says so, its level and its XP are left out of the zone's
+        numbers (`Zone.rollable_encounters`), and the flag is what tells you why the zone's total
+        does not cover all of its spawns.
         """
         flags = []
         if zone.water:
@@ -385,6 +500,8 @@ class GrindTab(QWidget):
         bottom = min((rec["min"] for rec in spawns), default=0)
         if top - bottom >= SCALES_SPAN:
             flags.append("scales")
+        if any(rec["min"] > rec["max"] for rec in spawns):
+            flags.append("odd levels")
         if any(row["battles"] >= 2 for row in species):
             flags.append("multi")
         return flags
@@ -422,9 +539,21 @@ class GrindTab(QWidget):
         self._show_map_head()
 
     def _species_text(self, zone):
+        """The selected zone: its name, WHAT A FIGHT IS WORTH THERE, and then every fight it rolls.
+
+        The headline says the number is an AVERAGE over the fights below and names the best of them,
+        because on its own it looks wrong: WATERROUTE_4 reads 4840 while three of its five fights are
+        worth more than that (6101, 4775, 4485) - the user: "weird it still shows the data as
+        WATERROUTE_4 ... 4840 xp / fight ... 6101 xp". It is the average, weighted by the odds of
+        meeting each fight, and a zone's best fight is worth knowing on its own.
+        """
+        expected, best, count = zone.xp_spread(dex.xp_reward)
         lines = ["%s  (%s)%s" % (zone.name, mapnames.area(zone.map_file),
-                                 "   water" if zone.water else ""), ""]
-        lines.extend(encounter_lines(zone, self.min_share_value()))
+                                 "   water" if zone.water else ""),
+                 "%.0f xp / fight   (average of %d encounter%s, best %.0f)"
+                 % (expected, count, "" if count == 1 else "s", best),
+                 ""]
+        lines.extend(encounter_lines(zone, self.min_share_value(), xp_of=dex.xp_reward))
         return "\n".join(lines)
 
     def _show_map_head(self):

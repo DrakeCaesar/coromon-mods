@@ -126,6 +126,72 @@ that in its own popup on entering.
 
 from .text import pretty
 
+# EIGHT of the names below are not names but PLACEHOLDER KEYS, and the game substitutes them while
+# it DRAWS - so printing a name as it is read out of the localisation shows the raw key. Measured
+# with the shipped archive, all three forms the game uses:
+#
+#   * `[monster <UID>]`         -> that Coromon's own name. `pyramid` is "Pyramid of
+#                                 [monster TITAN_SAND]", which the game draws as "Pyramid of Sart",
+#                                 and `ghostTown_temple` is the Monastery of Illuginn;
+#   * `[world.map.<key>.name]` -> another area's name, i.e. `NAME_BY_KEY[key]`. `iceCave` is
+#                                 literally "[world.map.frozenCave.name]", which is "Frozen Cavern";
+#   * `[map <map file>]`       -> the area that map FILE belongs to (`mansion` names
+#                                 `ghostTown_manor`, via `KEY_BY_MAP`).
+#
+# Without this, the window showed "Pyramid of [monster TITAN_SAND] F6" in every area column.
+import re
+
+try:
+    import dex
+except ImportError:                                    # pragma: no cover - only outside the tools
+    dex = None
+
+PLACEHOLDER = re.compile(r"\\[([^\\]]+)\\]")
+_MONSTER_NAMES = None
+
+
+def _monster_names():
+    """{UID: name} for every Coromon, read once - a placeholder names a UID, never a name."""
+    global _MONSTER_NAMES
+    if _MONSTER_NAMES is None:
+        _MONSTER_NAMES = {}
+        if dex is not None:
+            for mon in dex.monsters(include_unused=True):
+                _MONSTER_NAMES[mon.uid] = mon.name
+    return _MONSTER_NAMES
+
+
+def _one(token):
+    """One placeholder's replacement, or None when it is a form this does not know."""
+    parts = token.split()
+    if len(parts) == 2 and parts[0] == "monster":
+        return _monster_names().get(parts[1]) or pretty(parts[1])
+    if len(parts) == 2 and parts[0] == "map":
+        key = KEY_BY_MAP.get(parts[1])
+        return NAME_BY_KEY.get(key) if key else pretty(parts[1])
+    if token.startswith("world.map.") and token.endswith(".name"):
+        return NAME_BY_KEY.get(token[len("world.map."):-len(".name")])
+    return None
+
+
+def resolve(text, _depth=0):
+    """A name with the game's placeholders filled in, and the brackets gone either way.
+
+    A name that resolves to another placeholder is resolved again, so regenerating the tables from
+    a patched game cannot loop. An unknown form loses its brackets rather than being drawn as a
+    key - seeing "[item X]" in an area column is what sent me looking for this in the first place.
+    """
+    if not text or "[" not in text:
+        return text
+
+    def swap(match):
+        found = _one(match.group(1))
+        if found is None or _depth > 3:
+            return found or match.group(1)
+        return resolve(found, _depth + 1)
+
+    return PLACEHOLDER.sub(swap, text)
+
 # {map file: localisation key}, from each map module's `setMapName(...)`  (%d entries)
 KEY_BY_MAP = {
 %s}
@@ -149,7 +215,7 @@ def area(map_file):
         which a list of tickable areas needs.
     """
     key = KEY_BY_MAP.get(map_file)
-    name = NAME_BY_KEY.get(key) if key else None
+    name = resolve(NAME_BY_KEY.get(key)) if key else None
     # A placeholder is not a name: the debug maps localise to "?" (`world.map.unknown.name`), and
     # "? (Developer Home Area)" reads worse than the file name does.
     if not name or name in ("?", "???"):

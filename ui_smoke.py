@@ -35,7 +35,7 @@ import items as item_data                                   # noqa: E402
 import savefile                                             # noqa: E402
 
 import coromontools.state as state                          # noqa: E402
-from coromontools import MainWindow, font, icons             # noqa: E402
+from coromontools import MainWindow, font, icons, mapnames as mn   # noqa: E402
 from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
 from coromontools.grind import encounter_lines                # noqa: E402
@@ -103,6 +103,25 @@ def main():
 
     # ---------------------------------------------------------------- grind tab
     grind = window.grind
+    # WHICH COLUMN TO CLICK IS LOOKED UP BY KEY, never by position: the ranking's columns are ordered
+    # for a small window (the numbers first), so a `_header_clicked(3)` that used to mean "x p / fight"
+    # now means something else - and a stale index makes a sort check pass while testing nothing.
+    col = lambda key: [c.key for c in grind.table.model_.columns].index(key)     # noqa: E731
+
+    def pane_rows(text):
+        """`[(name, share, [fight, smart, sloth, lazy])]` - the priced lines of a spawns pane.
+
+        READ BY COLUMNS, NOT BY A SUFFIX. Every priced line ends with the four numbers, and the two
+        tokens before them are the level range ("L55 -60") and the share; a party name may contain
+        spaces, so the name is whatever is left in front. The heading row and an entry the game cannot
+        roll (whose columns are "-") fail the `isdigit` test and drop out - which is the point.
+        """
+        out = []
+        for line in text.split("\n"):
+            parts = line.split()
+            if len(parts) > 7 and parts[-1].isdigit():
+                out.append((" ".join(parts[:-7]), parts[-5], [int(v) for v in parts[-4:]]))
+        return out
     check("areas listed", grind.area_list.count() == len(grind.maps), grind.area_list.count())
     # the tick list is imported from the Tk version's state file the first time, which is the
     # point of the migration - so the expectation is "what was saved", not "everything"
@@ -125,20 +144,36 @@ def main():
         check("legend lists the zones", len(grind.map.legend) > 0, len(grind.map.legend))
 
     # sorting: the numeric column opens high-first, then flips, then comes back
+    # IT OPENS ON XP PER FIGHT NOW, because that is the question this tab exists to answer - the user:
+    # "the where to grind tab is basically meant to tell me where to get the most XP per encounter, but
+    # I am not sure if the values are accurate, actually it doens't even show the xp".
     key, desc = grind.table.sort_state
-    check("ranking sorts by exp level, descending", key == "explvl" and desc is True)
-    top_before = grind.table.model_.rows[0]["explvl"]
-    grind.table._header_clicked(0)
+    check("ranking opens on xp per fight, biggest first", key == "xp" and desc is True)
+    xps = [float(row["xp"]) for row in grind.table.model_.rows]
+    check("... ranked as a number, biggest first", xps == sorted(xps, reverse=True), xps[:4])
+    check("... and every zone has one", all(row["xp"] for row in grind.table.model_.rows))
+    top_before = grind.table.model_.rows[0]["zone"]
+    grind.table._header_clicked(col("area"))
     key, desc = grind.table.sort_state
     check("clicking Area re-sorts ascending", key == "area" and desc is False)
     check("area sort is alphabetical",
           grind.table.model_.rows[0]["area"] <= grind.table.model_.rows[-1]["area"])
-    grind.table._header_clicked(2)
+    grind.table._header_clicked(col("explvl"))
     key, desc = grind.table.sort_state
     check("exp level opens descending again", key == "explvl" and desc is True)
-    check("first row unchanged by the round trip",
-          grind.table.model_.rows[0]["explvl"] == top_before,
-          "%s vs %s" % (grind.table.model_.rows[0]["explvl"], top_before))
+    check("exp level is ranked as a number too, biggest first",
+          [float(r["explvl"]) for r in grind.table.model_.rows]
+          == sorted((float(r["explvl"]) for r in grind.table.model_.rows), reverse=True),
+          [r["explvl"] for r in grind.table.model_.rows][:4])
+    # ... AND THE TWO COLUMNS ARE NOT THE SAME LIST, which is worth asserting rather than assuming:
+    # the highest-XP zone and the highest-LEVEL zone were the same one only while a data typo
+    # (PYRAMID_F6's level 2725) topped both. Sorting back on xp has to restore the same first row -
+    # that is the round trip; that the two orders differ is the reason the tab ranks on XP.
+    grind.table._header_clicked(col("xp"))
+    key, desc = grind.table.sort_state
+    check("sorting back on xp restores the same first row",
+          key == "xp" and desc is True and grind.table.model_.rows[0]["zone"] == top_before,
+          "%s vs %s" % (grind.table.model_.rows[0]["zone"], top_before))
 
     # filters: an invariant rather than a count, because the filter may legitimately remove
     # nothing at a low squad level and the check still has to mean something
@@ -150,6 +185,160 @@ def main():
     without_xp = grind.table.model_.rowCount()
     check("'still gives XP' can only remove zones", with_xp <= without_xp,
           "%d with the filter, %d without" % (with_xp, without_xp))
+
+    # THE XP NUMBER IS DERIVED, NOT TYPED IN, so it is checked by recomputing it from the parts
+    # rather than against a remembered constant. The column is `Zone.xp_per_encounter(fed with
+    # dex.xp_reward)`, and `dex.xp_reward` reads the game's own formula out of the Lua: the Coromon's
+    # place in its evolution line x the mean of its base stats x its level / 2.
+    grind.only_xp.setChecked(False)
+    pump(app)
+    grouped_zone = next((z for z in all_zones
+                         if any(m["count"] > 1 for r in z.encounters() for m in r["members"])), None)
+    check("some zone spawns a group", grouped_zone is not None,
+          getattr(grouped_zone, "name", None))
+    if grouped_zone is not None:
+        want = 0.0
+        for row, weight in grouped_zone.rollable_encounters():
+            want += weight * grouped_zone.encounter_xp(row, dex.xp_reward)
+        got = grouped_zone.xp_per_encounter(dex.xp_reward)
+        check("xp per fight is the shares times the reward, recomputed member by member",
+              abs(got - want) < 0.5, "%.1f vs %.1f in %s" % (got, want, grouped_zone.name))
+        # a group is worth EVERY member: drop the extra bodies and the number has to fall
+        leader = max(grouped_zone.encounters(),
+                     key=lambda r: sum(m["count"] for m in r["members"]))
+        bodies = sum(m["count"] for m in leader["members"])
+        one = sum(dex.xp_reward(m["uid"], (m["min"] + m["max"]) / 2.0) for m in leader["members"])
+        check("a group of %d is worth all %d bodies" % (bodies, bodies),
+              sum(dex.xp_reward(m["uid"], (m["min"] + m["max"]) / 2.0) * m["count"]
+                  for m in leader["members"]) > one, "%s" % leader["name"])
+
+    # THE XP GEMS ARE COLUMNS, right after the fight's own worth - the user: "after the base XP column,
+    # show a column showing how much the coromon holding the Smart Gem would earn ... then Sloth gem -
+    # which claims 50% xp for coromon not participating in the battle and Lazy gem - 20% for not
+    # participating". The multipliers are the ones my reading of the game's own effect bodies says, so
+    # the first check is that the archive still agrees: `items.xp_multiplier` reads
+    # `mutateXpEarned(_monsterSprite, _isLazy, _xpPerMonsterSprite, _value)` out of
+    # `classes.items.HOLD_*_XP`, where the Smart Gem scales `_value` (what its holder was going to get)
+    # and the lazy gems scale `_xpPerMonsterSprite` - but ONLY for a holder that did not face the
+    # enemy, because that is when `_value` is 0 and the gem is the whole of its earnings.
+    want_gems = {"HOLD_EXTRA_XP": 1.1, "HOLD_LAZY_XP_PREMIUM": 0.5, "HOLD_LAZY_XP": 0.2}
+    got_gems = {uid: item_data.xp_multiplier(uid) for uid in want_gems}
+    check("the Smart Gem and the two lazy gems read as 1.1x / 0.5x / 0.2x out of the game",
+          got_gems == want_gems, got_gems)
+    check("... and a gem with no XP effect has none", item_data.xp_multiplier("HOLD_RECOVER_HEALTH") is None)
+    headings = [column.heading for column in grind.table.model_.columns]
+    # THE NUMBERS COME FIRST - Zone, then the fight's worth and the three gems - because this window
+    # is used beside the game: at the size it ships with (1040x560) the table has a 428 px viewport,
+    # and with the names in front every XP column was past the right edge, which is why the user
+    # asked "it's not showing the extra columns for exp anywhere still, am I overlooking them?".
+    check("the four xp columns come first, so they fit a small window",
+          [column.key for column in grind.table.model_.columns][:5]
+          == ["zone", "xp", "smart", "sloth", "lazy"], headings)
+    check("... and they are narrow enough to fit one together",
+          sum(column.width for column in grind.table.model_.columns[:5]) <= 430,
+          sum(column.width for column in grind.table.model_.columns[:5]))
+    rows = grind.table.model_.rows
+    # tolerance 1.5, not 1: both figures are ROUNDED for display, and the column multiplies the
+    # unrounded fight, so a row can land a whole unit off (PYRAMID_F4: 1330 shown, x1.1 = 1463.0, but
+    # its real fight is 1329.93 so the cell reads 1462)
+    check("every row prices all three gems off its own fight",
+          all(abs(float(r["smart"]) - float(r["xp"]) * 1.1) <= 1.5
+              and abs(float(r["sloth"]) - float(r["xp"]) * 0.5) <= 1.5
+              and abs(float(r["lazy"]) - float(r["xp"]) * 0.2) <= 1.5 for r in rows),
+          [(r["xp"], r["smart"], r["sloth"], r["lazy"]) for r in rows[:2]])
+    check("... so the Smart Gem is worth MORE than the fight and the lazy gems less",
+          all(float(r["smart"]) > float(r["xp"]) > float(r["sloth"]) > float(r["lazy"])
+              for r in rows), [(r["xp"], r["smart"]) for r in rows[:1]])
+    # a gem column opens biggest-first like the rest of the numbers, and ranks the same zones
+    grind.table._header_clicked(col("smart"))
+    key, desc = grind.table.sort_state
+    check("a gem column sorts, biggest first, on its own numbers",
+          key == "smart" and desc is True
+          and [float(r["smart"]) for r in grind.table.model_.rows]
+          == sorted((float(r["smart"]) for r in grind.table.model_.rows), reverse=True),
+          [r["smart"] for r in grind.table.model_.rows][:4])
+    check("... in the same order as the base column, since the gems only scale it",
+          [r["zone"] for r in grind.table.model_.rows]
+          == [r["zone"] for r in sorted(grind.table.model_.rows, key=lambda r: -float(r["xp"]))])
+    grind.table._header_clicked(col("xp"))                     # back to the base column
+
+    # THE DATA'S OWN TYPO MUST NOT DECIDE THE RANKING. PYRAMID_F6 ships `GHOST_OCTO_1 minLevel 2725,
+    # maxLevel 27` and the game rolls the wild level with `math.random(minLevel, maxLevel)`
+    # (`classes.lists.EncounterZoneList.lu` line 115) - which LUA REFUSES for an empty interval, so
+    # that entry can never produce a fight. The user: "PYRAMID_F6 ... Squidly L2725-27 14.3% 32237
+    # xp ... this does not look plausible", and it was not: 32237 xp came from a level-2725 Coromon
+    # and made that floor the best grind in the game. Now the entry is left out of the zone's level
+    # and its XP, says so in the pane, and the zone reads as the L27-35 floor it is.
+    broken = [z for z in all_zones if any(not rec["rollable"] for rec in z.encounters())]
+    check("the game ships a zone with a reversed level range", bool(broken),
+          [(z.name, max(rec["min"] for rec in z.encounters())) for z in broken][:2])
+    check("... and the ranking flags it instead of trusting the level",
+          all("odd levels" in grind._flags(z, z.encounters()) for z in broken),
+          [grind._flags(z, z.encounters()) for z in broken][:2])
+    if broken:
+        zone = broken[0]
+        bad = [rec for rec in zone.encounters() if not rec["rollable"]]
+        check("... its broken entry is kept in the listing, with the game's own numbers",
+              len(bad) == 1 and bad[0]["min"] > bad[0]["max"],
+              [(rec["name"], rec["min"], rec["max"]) for rec in bad])
+        check("... but it is out of the level and the XP: both stay inside the real spawns",
+              zone.average_level <= max(rec["max"] for rec in zone.encounters() if rec["rollable"])
+              and 0 < zone.xp_per_encounter(dex.xp_reward) < 1000 * max(rec["max"] for rec in zone.encounters()),
+              "%s: L%.2f, %.0f xp/fight"
+              % (zone.name, zone.average_level, zone.xp_per_encounter(dex.xp_reward)))
+        grind.show_zone(zone)
+        pump(app)
+        pane = grind.species.toPlainText()
+
+        def dashes(line):
+            """The four priced columns of a line as they appear, i.e. "-" when there is no figure."""
+            parts = line.split()
+            if "(empty" not in parts:
+                return None
+            return parts[parts.index("(empty") - 4:parts.index("(empty")]
+
+        check("... and the pane refuses to price it",
+              "empty level range" in pane
+              and any(dashes(ln) == ["-", "-", "-", "-"] for ln in pane.splitlines()),
+              [ln for ln in pane.splitlines() if "(empty" in ln][:1])
+        check("... while the fights that CAN roll keep their four figures",
+              len(pane_rows(pane)) == len([r for r in zone.encounters() if r["rollable"]]),
+              len(pane_rows(pane)))
+        check("... while the zone's own total is the price of the fights that do happen",
+              "%.0f xp / fight" % zone.xp_per_encounter(dex.xp_reward) in pane,
+              pane.splitlines()[0])
+
+    # the formula's own parts: linear in level, and a one-stage Coromon (place 1 of 1) is base/2
+    solo = next((uid for uid in dex._XP_MONSTERS if dex._xp_lines()[uid] == (1, 1)), None)
+    if solo is not None:
+        mon = dex._XP_MONSTERS[solo]
+        check("a Coromon that never evolves is worth base stats / 2 per level",
+              abs(dex.xp_reward(solo, 40) - mon.base_stats * 40 / 2.0) < 0.5,
+              "%d for %s (base %.1f)" % (dex.xp_reward(solo, 40), mon.name, mon.base_stats))
+    deepest = max(dex._XP_MONSTERS, key=lambda uid: dex._xp_lines()[uid][0] / float(dex._xp_lines()[uid][1]))
+    check("... it doubles with level",
+          abs(dex.xp_reward(deepest, 40) - 2 * dex.xp_reward(deepest, 20)) <= 1,
+          "%d at L40 vs %d at L20 (%s)"
+          % (dex.xp_reward(deepest, 40), dex.xp_reward(deepest, 20), dex._XP_MONSTERS[deepest].name))
+    # the place in the line is a real multiplier: the last stage of the longest line (three stages)
+    # is worth more than the same family's base form at the same level
+    longest = max(dex.lines(), key=lambda pair: len(pair[1]))
+    first, last = longest[1][0], longest[1][-1]
+    check("a later evolution is worth more than its base form",
+          dex.xp_reward(last.uid, 20) > dex.xp_reward(first.uid, 20)
+          and len(longest[1]) > 1,
+          "%s %d vs %s %d at L20" % (last.name, dex.xp_reward(last.uid, 20),
+                                     first.name, dex.xp_reward(first.uid, 20)))
+
+    # and the top row really is the best place to grind, by the number in its own column
+    key, desc = grind.table.sort_state
+    check("the ranking is still the xp column, biggest first", key == "xp" and desc is True)
+    xp_rows = [float(r["xp"]) for r in grind.table.model_.rows]
+    check("... and its first row is the highest on the list", xp_rows[0] == max(xp_rows),
+          "%.0f at %s" % (xp_rows[0], grind.table.model_.rows[0]["zone"]))
+    grind.table._header_clicked(col("xp"))
+    check("... and flips to smallest first", grind.table.sort_state[1] is False)
+    grind.table._header_clicked(col("xp"))
 
     # untick everything -> the hint, not a blank pane
     grind.set_all(False)
@@ -188,15 +377,30 @@ def main():
               len(raw_pairs) == len(mixed_zone.monsters) + len(mixed_zone.crimsonite),
               "%d slot(s) -> %d ordinary + %d crimsonite"
               % (len(raw_pairs), len(mixed_zone.monsters), len(mixed_zone.crimsonite)))
+        # THE EXPECTED LEVEL IS PER ENCOUNTER TOO, and that is what the crimsonite split has to
+        # survive: both forms count (you meet a crimsonite while walking like anything else), but a
+        # group's members no longer each carry the whole entry's share, which is what made this
+        # column read 74.20 for WATERROUTE_4 against a real 54.33.
         ordinary_level = sum(r["share"] / 100.0 * (r["min"] + r["max"]) / 2.0
                              for r in mixed_zone.monsters.values())
-        check("the expected level counts both forms",
-              abs(mixed_zone.average_level -
-                  sum(r["share"] / 100.0 * (r["min"] + r["max"]) / 2.0
-                      for r in mixed_zone.slots())) < 1e-9
-              and mixed_zone.average_level > ordinary_level,
-              "%.2f (%.2f without the crimsonite slots)"
-              % (mixed_zone.average_level, ordinary_level))
+        only_ordinary = sum(weight * mixed_zone.encounter_level(row)
+                            for row, weight in mixed_zone.rollable_encounters()
+                            if not row["crimsonite"])
+        recomputed = sum(weight * mixed_zone.encounter_level(row)
+                         for row, weight in mixed_zone.rollable_encounters())
+        check("the expected level counts both forms, once per encounter",
+              abs(mixed_zone.average_level - recomputed) < 1e-9
+              and mixed_zone.average_level != only_ordinary,
+              "%.2f (%.2f with only the ordinary spawns, %.2f if the per-species view is believed)"
+              % (mixed_zone.average_level, only_ordinary, ordinary_level))
+        check("... and it is the level of a Coromon the zone actually spawns",
+              min(row["min"] for row in mixed_zone.encounters())
+              <= mixed_zone.average_level
+              <= max(row["max"] for row in mixed_zone.encounters()),
+              "%.2f within L%s-%s"
+              % (mixed_zone.average_level,
+                 min(row["min"] for row in mixed_zone.encounters()),
+                 max(row["max"] for row in mixed_zone.encounters())))
         grind.min_share.setValue(0)
         grind.show_zone(mixed_zone)
         pump(app)
@@ -233,6 +437,49 @@ def main():
         check("... and the pane draws those encounters, one line each",
               len(encounter_lines(group)) == len(group.encounters()),
               encounter_lines(group)[:2])
+        # THE PANE HAS TO EXPLAIN THE RANKING. The column's claim is XP per fight, so the zone's own
+        # pane repeats its total and then what each of its fights is worth - otherwise the number the
+        # list is sorted by is a number with no visible source.
+        grind.show_zone(group)
+        pump(app)
+        pane = grind.species.toPlainText()
+        check("the spawns pane names the zone's own xp per fight",
+              "%.0f xp / fight" % group.xp_per_encounter(dex.xp_reward) in pane,
+              pane.splitlines()[0])
+        # ... AND SAYS IT IS AN AVERAGE, NAMING THE BEST FIGHT. Without that the headline looks
+        # wrong: WATERROUTE_4 reads 4840 while THREE of its five fights are worth more (6101, 4775,
+        # 4485) - the user: "weird it still shows the data as WATERROUTE_4 ... 4840 xp / fight ...
+        # 6101 xp". Both figures are recomputed here, and the pane's own lines have to agree with the
+        # best it names.
+        expected, best, count = group.xp_spread(dex.xp_reward)
+        check("... and that the figure is the average over the fights, with the best of them named",
+              "average of %d" % count in pane and "best %.0f" % best in pane
+              and abs(expected - group.xp_per_encounter(dex.xp_reward)) < 0.5,
+              pane.splitlines()[1])
+        rich = pane_rows(pane)
+        check("... and every listed fight's own row, group members counted",
+              len(rich) == len([r for r in group.encounters() if r["rollable"]]),
+              [r[0] for r in rich][:2])
+        listed = [row[2][0] for row in rich]
+        check("... with the best figure being one of those fights, not an average of its own",
+              bool(listed) and abs(max(listed) - best) <= 1,
+              "best %.0f vs the biggest line %s" % (best, max(listed) if listed else "none"))
+        check("... the commonest fight on the first line, as the list is ordered",
+              bool(rich) and rich[0][1] == "%.1f%%" % group.encounters()[0]["share"],
+              rich[:1])
+        # THE THREE GEM COLUMNS ARE THE FIGHT SCALED, in the pane as in the table - the user: "after
+        # the base XP column, show a column showing how much the coromon holding the Smart Gem would
+        # earn ... then Sloth gem ... and lazy gem".
+        check("... and each row prices all three gems off its own fight",
+              all(abs(row[2][1] - row[2][0] * 1.1) <= 2
+                  and abs(row[2][2] - row[2][0] * 0.5) <= 2
+                  and abs(row[2][3] - row[2][0] * 0.2) <= 2 for row in rich),
+              [r[2] for r in rich][:2])
+        check("... under a heading row that names all four columns",
+              any(ln.split() == ["level", "share", "fight", "smart", "sloth", "lazy"]
+                  for ln in pane.splitlines()), pane.splitlines()[2:3])
+        grind.show_zone(keep_zone)          # leave the tab on the zone the run started with
+        pump(app)
 
     # ---------------------------------------------------------------- database tab
     # THE GRID IS THE ONLY DEX VIEW NOW. The Coromon tab used to list every Coromon beside its
@@ -275,9 +522,12 @@ def main():
     grind.min_share.setValue(0)        # the two panes are only comparable unfiltered
     grind.show_zone(chosen)
     pump(app, 3)
-    first_tab = grind.species.toPlainText().split("\n")[2:]
+    # THE HEADINGS ARE STRIPPED BY SHAPE, NOT BY COUNT: the spawn lines are the ones that start with
+    # the listing's own two-space indent, so adding a line to the first tab's heading (the average and
+    # best line did) cannot silently shift what this compares.
+    first_tab = [line for line in grind.species.toPlainText().split("\n") if line.startswith("  ")]
     grind.min_share.setValue(keep_share_pct)
-    here = database.species.toPlainText().split("\n")
+    here = [line for line in database.species.toPlainText().split("\n") if line.startswith("  ")]
     check("picking a location lists what else spawns there, exactly as the first tab does",
           bool(here) and here == first_tab, "%s vs %s" % (first_tab[:1], here[:1]))
     check("... with none of it scrolled out of sight",
@@ -487,6 +737,27 @@ def main():
           len(set(answers)) == 1 and answers[0][0].startswith("Buzzlet")
           and ("Woodlow Harbor", "HARBOR_A", "L7-12", "44.4%") in answers[0][1],
           "%s -> %s" % (answers[0][0], answers[0][1][:2]))
+
+    # A PLACEHOLDER IS NOT A NAME, and eight of the game's area names ARE placeholders - the game
+    # substitutes them while it draws, so reading one out of the localisation and printing it showed
+    # the raw key. Measured in the archive: `[monster <UID>]` (`pyramid` is "Pyramid of
+    # [monster TITAN_SAND]" and the game draws "Pyramid of Sart"), `[world.map.<key>.name]` and
+    # `[map <file>]`. `mapnames.resolve` fills all three in, and the tabs must never show a bracket.
+    pool = {mn.NAME_BY_KEY[k] for k in mn.NAME_BY_KEY} | {mn.area(z.map_file) for z in all_zones}
+    leftover = sorted(name for name in pool if "[" in mn.resolve(name))
+    check("no area name is left as a raw placeholder", not leftover, leftover[:3])
+    check("a placeholder naming a Coromon resolves to that Coromon's name",
+          mn.area("pyramid_f6") == "Pyramid of Sart F6"
+          and "TITAN_SAND" not in mn.area("pyramid_f6"), mn.area("pyramid_f6"))
+    check("... and one naming a map resolves to that map's area",
+          mn.resolve(mn.NAME_BY_KEY["iceCave"]) == mn.NAME_BY_KEY["frozenCave"]
+          and "[" not in mn.resolve(mn.NAME_BY_KEY["iceRoute"]),
+          "%s / %s" % (mn.resolve(mn.NAME_BY_KEY["iceCave"]),
+                       mn.resolve(mn.NAME_BY_KEY["iceRoute"])))
+    check("... including a name that is nothing but a placeholder",
+          mn.NAME_BY_KEY["ghostTown_temple"].count("[") == 1
+          and mn.resolve(mn.NAME_BY_KEY["ghostTown_temple"]).startswith("Monastery of "),
+          mn.resolve(mn.NAME_BY_KEY["ghostTown_temple"]))
 
     # THE LIST OPENS ON THE BIGGEST SHARE FIRST, and on the NUMBER in that column rather than its
     # text - the user: "by default the list of spawn locations there for a coromon should be ordered

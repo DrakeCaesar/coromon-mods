@@ -112,16 +112,46 @@ class Zone:
     def water(self):
         return self.name.endswith("_WATER")
 
+    def rollable_encounters(self):
+        """The encounters the game can actually roll a level for, weighted by their own share.
+
+        THE GAME ROLLS `math.random(minLevel, maxLevel)` - `classes.lists.EncounterZoneList.lu`,
+        line 115, which builds the `Monster` right afterwards with that number as its `level` - and
+        LUA REFUSES AN EMPTY INTERVAL, so an entry whose `minLevel` is above its `maxLevel` can never
+        produce a fight. PYRAMID_F6 ships exactly that: `GHOST_OCTO_1 minLevel 2725, maxLevel 27`,
+        where every other Pyramid floor uses 25-27, so it is a typo in the game's own data and not a
+        level-2725 Coromon. Believing it produced the nonsense the user spotted - "Squidly
+        L2725-27 14.3% 32237 xp", which made that floor the best grind in the game.
+
+        Such an entry is left out of the level and XP expectations and the rest are renormalised
+        over their own shares, because a fight the game cannot start cannot take a share of the
+        fights the player gets. `Zone.encounters()` still lists it, with the game's own numbers.
+
+        The weights are FRACTIONS (0..1) of the fights you will meet, and they no longer count a
+        group's members separately - the same unit `encounters()` fixed the percentages for.
+        """
+        rows = [row for row in self.encounters() if row["rollable"]]
+        total = sum(row["share"] for row in rows) or 1.0
+        return [(row, row["share"] / total) for row in rows]
+
     @property
     def average_level(self):
-        """Expected level per encounter, weighted by share - the grind ranking.
+        """Expected level for ONE encounter, weighted by the chance of meeting it - the ranking.
 
-        BOTH FORMS COUNT: a crimsonite encounter is an encounter like any other, so it belongs in
-        the expectation - the two dicts together are the zone's 100%. The split is about telling
-        two Coromon apart as species (see `slots`), not about what you meet while walking.
+        PER ENCOUNTER, like the shares: the expectation is `sum(share x the party's mean level)` over
+        the encounters that can be rolled. Counting each SPECIES instead added up shares past 100%
+        for a group (measured on WATERROUTE_4: 74.20 that way against 54.33 here) and reported an
+        expected level above anything the zone spawns.
         """
-        return sum(r["share"] / 100.0 * (r["min"] + r["max"]) / 2.0
-                   for r in list(self.monsters.values()) + list(self.crimsonite.values()))
+        return sum(weight * self.encounter_level(row)
+                   for row, weight in self.rollable_encounters())
+
+    @staticmethod
+    def encounter_level(row):
+        """A party's mean level, one count per BODY - two Silquill are two Coromon."""
+        bodies = sum(member["count"] for member in row["members"]) or 1
+        return sum(member["count"] * (member["min"] + member["max"]) / 2.0
+                   for member in row["members"]) / bodies
 
     def slots(self):
         """Every spawn in the zone, as `{"name", "crimsonite", "share", "min", "max", ...}`.
@@ -184,8 +214,52 @@ class Zone:
                 "max": max(rec["max"] for rec in members),
                 "battles": len(party),
                 "crimsonite": all(rec["crimsonite"] for rec in members),
+                # EVERY MEMBER's range has to be rollable, not just the party's span: a reversed
+                # range on one member of a group would be hidden by `min`/`max` over the others.
+                "rollable": all(rec["min"] <= rec["max"] for rec in members),
             })
         return sorted(out, key=lambda rec: -rec["share"])
+
+    def xp_per_encounter(self, xp_of):
+        """Expected XP for ONE encounter in this zone, given `xp_of(uid, level)`.
+
+        THE NUMBER THIS WHOLE TAB EXISTS TO RANK BY, and it belongs to the ENCOUNTER for the same
+        reason its share does: one fight is what the player gets, so the expectation is
+        `sum over encounters (share x the party's total XP)`. A group counts EVERY member (a party of
+        two Skuldra is two Skuldra defeated), and each member's level is the middle of its own range,
+        which is the same reading `average_level` uses.
+
+        `xp_of` is passed in rather than imported so this module stays data-only - the formula lives in
+        `dex.xp_reward`, read out of the game's own `Monster:calculateXpReward`.
+        """
+        return sum(weight * self.encounter_xp(row, xp_of)
+                   for row, weight in self.rollable_encounters())
+
+    def xp_spread(self, xp_of):
+        """`(expected, best, encounters)` for one fight in this zone - the pane's headline.
+
+        THE EXPECTATION ALONE READS LIKE A LIE, which is what the user ran into: WATERROUTE_4's five
+        encounters are worth 4406 / 6101 / 4431 / 4775 / 4485 xp, so the zone's own 4840 is LOWER
+        than three of the five numbers printed underneath it. It is the average, weighted by the
+        chance of meeting each fight (all five are 20% here, so it is the plain mean as well), and
+        the best fight in that grass is worth 6101 - both of which a reader is entitled to see.
+        """
+        rows = self.rollable_encounters()
+        expectation = sum(weight * self.encounter_xp(row, xp_of) for row, weight in rows)
+        best = max((self.encounter_xp(row, xp_of) for row, _weight in rows), default=0.0)
+        return expectation, best, len(rows)
+
+    def encounter_xp(self, row, xp_of):
+        """One encounter's party's total XP, given `xp_of(uid, level)` - see `xp_per_encounter`.
+
+        Every member counts once per body: a party of two is two Coromon defeated, so a group is worth
+        more than its leader even though it fills one line of the listing.
+        """
+        xp = 0.0
+        for member in row["members"]:
+            middle = (member["min"] + member["max"]) / 2.0
+            xp += (xp_of(member["uid"], middle) or 0) * member["count"]
+        return xp
 
     def listing(self, min_share=0.0):
         """Every spawn as a text row, most common first (see `slots`)."""
