@@ -947,8 +947,8 @@ def main():
     check("the missing tab read the same save as the database",
           (miss.slot, miss.saved) == (database.slot, database.saved),
           "missing %s/%s, database %s/%s" % (miss.slot, miss.saved, database.slot, database.saved))
-    check("the ranking opens on the most missing, biggest first",
-          miss.table.sort_state == ("missing", True), miss.table.sort_state)
+    check("the ranking opens on the most lines to catch, biggest first",
+          miss.table.sort_state == ("lines", True), miss.table.sort_state)
     check("... and it lists the zones that can fill something",
           miss.table.model_.rowCount() > 0, miss.table.model_.rowCount())
 
@@ -961,9 +961,11 @@ def main():
     check("... the crimsonite group only for the lines that have a form",
           all(g.kind != dex.CRIMSONITE or g.skin == dex.CRIMSONITE for g in miss.groups_)
           and len({g.family for g in miss.groups_ if g.kind == dex.CRIMSONITE}) > 0)
-    check("... and a group is caught when one stage is, which is the user's rule",
-          all(g.caught == any(g.kind in savefile.categories(mon.uid, miss_owned)
-                              for mon in g.members)
+    # ... AND EVERY STAGE OF THE LINE, which is the rule the user settled on last: "if we are missing
+    # any member of a line - that counts as one slot discard what I said about evolutions being trivial
+    # to get". Cross-checked against `savefile.categories`, the other reader of the same record.
+    check("... and a group is caught only when EVERY stage of the line has it",
+          all(g.caught == all(g.kind in savefile.categories(mon.uid, miss_owned) for mon in g.members)
               for g in miss.groups_ if g.kind != dex.CRIMSONITE),
           "%d caught of %d" % (sum(1 for g in miss.groups_ if g.caught), len(miss.groups_)))
     check("... the crimsonite group being the line's skin, not a dex entry",
@@ -975,52 +977,84 @@ def main():
               for uid in list(miss_owned)[:40] for kind in ("A", "B", "C")),
           "checked %d uid(s)" % min(40, len(miss_owned)))
 
-    # THE ROWS: the count in the "to catch" column is the number of MISSING groups that spawn there,
-    # recomputed from `dex.where` - the whole point of the tab.
-    rows = [r for r in miss.rows if r["missing"]]
+    # THE ROWS: the count in the "to catch" column is the number of distinct LINES with something
+    # missing that spawn there - the user changed it from a per-group count: "right now we count 1
+    # potent missing and 1 perfect missing etc of the same evolutionary line as 2 missing - weight 2,
+    # it should rather count as 1 as one member".
     # A ZONE WITH NOTHING LEFT IS STILL LISTED, sorted to the bottom rather than hidden: it is the
     # answer to "where is there nothing for me", which is worth having when the ones above it are all
     # far away. The count is what orders the list.
     check("the rows that are done sit at the bottom",
           [bool(r["missing"]) for r in miss.rows]
           == sorted((bool(r["missing"]) for r in miss.rows), reverse=True),
-          [len(r["missing"]) for r in miss.rows][-4:])
-    check("... sorted by how many are missing, and nothing is missing outside the zone's own groups",
-          [len(r["missing"]) for r in miss.rows]
-          == sorted((len(r["missing"]) for r in miss.rows), reverse=True)
+          [len(r["missing_lines"]) for r in miss.rows][-4:])
+    check("... sorted by the lines to catch, and nothing is missing outside the zone's own groups",
+          [len(r["missing_lines"]) for r in miss.rows]
+          == sorted((len(r["missing_lines"]) for r in miss.rows), reverse=True)
           and all(set(r["missing"]) <= set(r["groups"]) for r in miss.rows))
+    check("... a line's several missing kinds counted ONCE, which is the whole change",
+          all(len(r["missing_lines"]) <= len(r["missing"]) for r in miss.rows)
+          and any(len(r["missing_lines"]) < len(r["missing"]) for r in miss.rows),
+          [(len(r["missing_lines"]), len(r["missing"])) for r in miss.rows[:3]])
+    check("... and a line is in that count only when it really has something missing",
+          all(len({g.family for g in r["missing"]}) == len(r["missing_lines"]) for r in miss.rows)
+          and all(set(r["missing_lines"]) <= set(r["hosted_lines"]) for r in miss.rows))
+    check("... the table shows those counts, not the group counts, in \"to catch\" and \"of\"",
+          [r["lines"] for r in miss.table.model_.rows]
+          == ["%d" % len(r["missing_lines"]) for r in miss.rows]
+          and [r["of"] for r in miss.table.model_.rows]
+          == ["%d" % len(r["hosted_lines"]) for r in miss.rows],
+          [(r["lines"], r["of"]) for r in miss.table.model_.rows[:3]])
     sample = miss.rows[0]
     hosted = {uid for uid in sample["zone"].monsters} | set(sample["zone"].crimsonite)
     families = {missing_data.family_of().get(uid) for uid in hosted}
     check("... the top row's groups are exactly the missing ones of the lines that spawn there",
           {g.family for g in sample["missing"]} <= families,
-          "%d missing, lines %s" % (len(sample["missing"]), sorted(f for f in families if f)))
+          "%d line(s) / %d group(s) missing, lines %s"
+          % (len(sample["missing_lines"]), len(sample["missing"]),
+             sorted(f for f in families if f)))
     zone_names = [r["zone"].name for r in miss.rows]
     check("... a zone is listed once", len(zone_names) == len(set(zone_names)))
     check("... every zone in the list really spawns a line a group belongs to",
           all(any(uid in missing_data.family_of() for uid in list(r["zone"].monsters)
                   + list(r["zone"].crimsonite)) for r in miss.rows))
 
-    # THE PANE: one line per missing group of the selected zone, most likely first.
+    # THE PANE: ONE LINE PER EVOLUTIONARY LINE, with the kinds it is short of on that line - the user
+    # spelled out the unit: "standard, potent and perfect kyreptil should count as 1 group ... only if
+    # we were missing both potent kyreptil and kyraptor does that count as one missing slot". So a
+    # 2-stage line short of three kinds is ONE row here, and the kinds are named on it.
     miss.table.selectRow(0)
     pump(app, 3)
     pane = miss.detail.toPlainText()
-    check("the pane names the selected zone and how many groups are missing",
-          sample["zone"].name in pane and "%d of %d groups missing"
-          % (len(sample["missing"]), len(sample["groups"])) in pane, pane.splitlines()[:2])
+    check("the pane names the selected zone and how many lines and groups are short",
+          sample["zone"].name in pane and "%d line(s) short, %d of %d groups missing"
+          % (len(sample["missing_lines"]), len(sample["missing"]), len(sample["groups"])) in pane,
+          pane.splitlines()[:2])
     named = [line for line in pane.splitlines() if line.startswith("  ") and line.strip()]
-    check("... with one line per missing group", len(named) == len(sample["missing"]),
-          len(named))
-    check("... each naming its line and its kind",
-          all(any(g.name in line and missing_tab.SHORT[g.kind] in line
-                  for g in sample["missing"]) for line in named))
-    check("... and the kinds in the rank column add up to the count",
+    check("... with one line per LINE short, not per kind",
+          len(named) == len(sample["missing_lines"]), len(named))
+    check("... each naming its line and every kind that line is short of",
+          all(any(g.family and g.name in line and
+                  all(missing_tab.SHORT[k] in line
+                      for k in {x.kind for x in sample["missing"] if x.family == g.family})
+                  for g in sample["missing"]) for line in named),
+          named[:2])
+    check("... each row standing for one of the lines that is short here",
+          sorted(line.split()[0] for line in named)
+          == sorted({g.name for g in sample["missing"]}), named[:2])
+    row_of = {line.split()[0]: line for line in named}
+    check("... with every missing kind named on its line's own row",
+          all(missing_tab.SHORT[g.kind] in row_of[g.name] for g in sample["missing"]), named[:2])
+    check("... and the kinds in the rank column add up to the groups the model counts",
           all(not r["kinds"] or sum(int(part.split()[-1]) for part in r["kinds"].split("\u00b7"))
-              == int(r["missing"]) for r in miss.table.model_.rows),
+              == len(model_row["missing"])
+              for r, model_row in zip(miss.table.model_.rows, miss.rows)),
           miss.table.model_.rows[0]["kinds"])
     check("the tab's summary counts the groups the same way",
-          "%d group(s) left in" % sum(1 for g in miss.groups_ if not g.caught)
-          in miss.summary.text(), miss.summary.text())
+          "%d line(s) short, %d group(s) left" % (
+              len({g.family for g in miss.groups_ if not g.caught}),
+              sum(1 for g in miss.groups_ if not g.caught)) in miss.summary.text(),
+          miss.summary.text())
     # ... AND A ZONE WITH NOTHING LEFT SAYS SO, rather than an empty pane that reads as a bug.
     caught_one = next((r for r in miss.rows if not r["missing"]), None)
     if caught_one is not None:

@@ -35,29 +35,34 @@ try:
 except ImportError:                             # reported in the top row instead of a crash
     savefile = None
 
-# "to catch" is the number the whole tab exists for and the column it opens sorted by; "of" is how
-# many groups the zone can fill at all, so a row reads "4 of 12" - four left, out of twelve the zone
-# offers - and the kinds column says which of the four kinds those four are.
+# "to catch" is the number the whole tab exists for and the column it opens sorted by, and it counts
+# LINES: a line missing its potent and its perfect group is one thing to go and get (the user: "it
+# should rather count as 1 as one member"), while the missing-kinds column still says how many
+# individual catches those lines add up to. "of" is how many lines the zone can fill at all, so a row
+# reads "3 of 20".
 COLUMNS = (
     Column("area", "Area", 200, "w"),
     Column("zone", "Zone", 160, "w"),
-    Column("missing", "to catch", 80, "e", desc_first=True),
+    Column("lines", "to catch", 80, "e", desc_first=True),
     Column("of", "of", 60, "e"),
     # THE BEST SINGLE CHANCE AMONG THE MISSING ONES, so two zones with the same count can be told
     # apart: twelve groups at 2% each is a worse target than eight at 30%.
     Column("easiest", "easiest", 80, "e", desc_first=True),
-    Column("kinds", "missing kinds", 250, "w"),
+    # HOW MANY OF THE MISSING LINES ARE SHORT OF EACH KIND, so it reads in the same unit as "to catch"
+    # ("lines short of standard 2, potent 5, perfect 5") - a line short of three kinds appears in three
+    # of these counts, which is what makes it a count of CATCHES waiting rather than of lines.
+    Column("kinds", "lines short of", 230, "w"),
     Column("levels", "levels", 90, "e"),
 )
 
 # SHORT KIND LABELS, for the rank column and the pane: the full words are in `missing.KIND_NAMES`.
 SHORT = {"A": "standard", "B": "potent", "C": "perfect", "crimsonite": "crimsonite"}
 
-RULE = ("A LINE COUNTS AS CAUGHT when ANY ONE of its stages is caught in that potential category - it "
-        "evolves into the rest - and its crimsonite group when that line's crimsonite skin is "
-        "unlocked. So a line is worth up to four groups and only a group with NOTHING caught counts as "
-        "missing. An ordinary spawn can turn up any of the three potential categories; a crimsonite "
-        "spawn fills the crimsonite group only.")
+RULE = ("A LINE IS COUNTED HERE WHENEVER ANY OF ITS MEMBERS IS MISSING, and it counts once - a line "
+        "short of two potential categories is still one slot to go and find. A kind is missing until "
+        "EVERY stage of the line has it: catching a base form and evolving it does not fill the evolved "
+        "form's own entry. A line's crimsonite group is its skin unlock. An ordinary spawn can turn up "
+        "any of the three potential categories; a crimsonite spawn fills the crimsonite group only.")
 
 
 class MissingTab(QWidget):
@@ -99,7 +104,7 @@ class MissingTab(QWidget):
         top.addWidget(self.reload_button)
         outer.addLayout(top)
 
-        self.table = DataTable(COLUMNS, sort_key="missing", sort_desc=True)
+        self.table = DataTable(COLUMNS, sort_key="lines", sort_desc=True)
         self.table.selectionChangedTo.connect(self.show_zone)
         self.table.doubleClicked.connect(self._jump)
         outer.addWidget(self.table, 3)
@@ -144,24 +149,24 @@ class MissingTab(QWidget):
     def _fill(self):
         """Turn the model into table rows, and say in the top row how the dex stands."""
         rows = []
-        self._odds = {}
+        self._folded = {}
         for row in self.rows:
             zone = row["zone"]
-            # THE ODDS ARE WORKED OUT ONCE PER ZONE and kept: the row needs the level span and the
-            # best chance, and the pane below prints every one of them - three passes over the same
-            # `dex.where` lookups for no reason otherwise.
-            odds = [(group, missing_data.odds_in(zone, group)) for group in row["missing"]]
-            self._odds[zone.name] = odds
-            spans = [hit for _group, hit in odds if hit]
+            # THE MISSING GROUPS FOLDED PER LINE (`missing.lines_missing`), worked out once per zone:
+            # the row needs their level span and best odds, and the pane below prints them - and the
+            # two must be the same numbers, so they come from one reading.
+            folded = missing_data.lines_missing(zone, row["missing"])
+            self._folded[zone.name] = folded
+            hits = [entry["odds"] for entry in folded if entry["odds"]]
             rows.append({
                 "area": mapnames.area(zone.map_file),
                 "zone": zone.name,
-                "missing": "%d" % len(row["missing"]),
-                "of": "%d" % len(row["groups"]),
-                "easiest": "%.1f%%" % max(hit[2] for hit in spans) if spans else "-",
+                "lines": "%d" % len(row["missing_lines"]),
+                "of": "%d" % len(row["hosted_lines"]),
+                "easiest": "%.1f%%" % max(hit[2] for hit in hits) if hits else "-",
                 "kinds": self._kinds(row["missing"]),
-                "levels": ("L%s-%s" % (min(hit[0] for hit in spans), max(hit[1] for hit in spans))
-                           if spans else "-"),
+                "levels": ("L%s-%s" % (min(hit[0] for hit in hits), max(hit[1] for hit in hits))
+                           if hits else "-"),
                 PAYLOAD: zone,
             })
         self.table.set_rows(rows)
@@ -171,8 +176,8 @@ class MissingTab(QWidget):
         helpful = sum(1 for row in self.rows if row["missing"])
         # Terse on purpose, and the tooltip carries the same sentence in full for the width the row
         # cannot spare (the two labels are the elastic ones, as in the Database tab).
-        text = ("%d group(s) left in %d line(s) \u00b7 %d zone(s) can help"
-                % (left, still_short, helpful))
+        text = ("%d line(s) short, %d group(s) left \u00b7 %d zone(s) can help"
+                % (still_short, left, helpful))
         self.summary.setText(text)
         self.summary.setToolTip(text)
 
@@ -198,19 +203,23 @@ class MissingTab(QWidget):
         if row is None:
             return ""
         missing = row["missing"]
-        lines = ["%s  (%s)   %d of %d groups missing"
-                 % (zone.name, mapnames.area(zone.map_file), len(missing), len(row["groups"])), ""]
+        lines = ["%s  (%s)   %d line(s) short, %d of %d groups missing"
+                 % (zone.name, mapnames.area(zone.map_file), len(row["missing_lines"]),
+                    len(missing), len(row["groups"])), ""]
         if not missing:
             lines.append("  every group this zone can fill is already caught.")
             return "\n".join(lines)
-        # MOST LIKELY FIRST: the share is summed over the line's slots here, so the top line is the
-        # group that is both missing and easiest to run into.
-        odds = sorted(self._odds.get(zone.name, []), key=lambda pair: -(pair[1][2] if pair[1] else 0))
-        width = max(len(pair[0].name) for pair in odds)
-        for group, hit in odds:
-            lines.append("  %-*s  %-11s %s   %s" % (
-                width, group.name, SHORT[group.kind],
-                "L%s-%s" % (hit[0], hit[1]) if hit else "        ",
+        # ONE ROW PER LINE, with the kinds it is short of named on it - see `missing.lines_missing`
+        # for why, and for what its odds mean.
+        folded = self._folded.get(zone.name, [])
+        width = max(len(entry["name"]) for entry in folded)
+        labels = [" · ".join(SHORT[kind] for kind in entry["kinds"]) for entry in folded]
+        kind_width = max(len(text) for text in labels)
+        for entry, text in zip(folded, labels):
+            hit = entry["odds"]
+            lines.append("  %-*s  %-*s  %s   %s" % (
+                width, entry["name"], kind_width, text,
+                "L%s-%s" % (hit[0], hit[1]) if hit else "-",
                 "%.1f%% of the slots here" % hit[2] if hit else "no wild slot"))
         return "\n".join(lines)
 

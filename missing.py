@@ -1,20 +1,27 @@
 """What the dex is still missing, and which zones are worth walking to go and get it.
 
-THE USER'S RULE, which is what this file exists to implement: "each evolutionary line has 1 to 3
-coromon, at 3 potential levels, 4th if we count crimsonite variants. those we need to condense
-internally into 4 coromon groups per evolutionary line - if we have at least one of the evolutions of
-the 4 groups caught - it counts as having that kind of coromon already captured, because transition
-between evolution levels is trivial, basically if we are missing all 3 of a potential level - that
-counts as missing and if we have one - that means caught. based on this data I would like to have a
-list of spawn zones ordered by how many coromon we don't have yet captured that spawn there".
+THE USER'S RULE, after one revision (the earlier half is quoted because it is what the current rule
+was changed FROM):
 
-So the UNIT IS (EVOLUTIONARY LINE, KIND) - `Group` - and a group is caught when ANY of its stages is
-caught in that category. A line makes up to four groups:
+    "each evolutionary line has 1 to 3 coromon, at 3 potential levels, 4th if we count crimsonite
+     variants. those we need to condense internally into 4 coromon groups per evolutionary line ...
+     based on this data I would like to have a list of spawn zones ordered by how many coromon we
+     don't have yet captured that spawn there"
 
-    standard    "A"           the line's stages, catching any one of them in category A
+     - then: "if we are missing any member of a line - that counts as one slot discard what I said
+     about evolutions being trivial to get"
+
+So a line makes up to four groups, and each is CAUGHT only when nothing of that kind is missing:
+
+    standard    "A"           every stage of the line owned in category A
     potent      "B"           ... in category B
     perfect     "C"           ... in category C
-    crimsonite  "crimsonite"  the line's crimsonite FORMS, which is a skin unlock per FAMILY
+    crimsonite  "crimsonite"  the line's crimsonite forms, which is a skin unlock per FAMILY
+
+An earlier version of this took "any one stage is enough, because the evolution between them is
+trivial" - that is the part the user discarded. `zones()` then counts LINES, not kinds: a line missing
+two kinds is one slot to go and find, which is why the ranking and the pane are per line and the kinds
+are named on the line's own row.
 
 A CRIMSONITE SLOT IS COUNTED AS THE CRIMSONITE GROUP ONLY, which is the conservative reading: the form
 is a Coromon of its own with no dex entry (see `dex.crimsonite_forms`), and whether catching one also
@@ -96,10 +103,22 @@ class Group:
         return dex.CRIMSONITE if self.kind == dex.CRIMSONITE else None
 
     def caught_in(self, owned, skins):
-        """Whether the save fills this group - ANY stage counts, which is the user's rule."""
+        """Whether the save fills this group - EVERY stage of the line, no evolution shortcut.
+
+        THE USER CHANGED THIS RULE: "if we are missing any member of a line - that counts as one slot
+        discard what I said about evolutions being trivial to get". So a potential-category group is
+        filled only when EVERY stage of the line has that category: catching a stage-1 Buzzlet as a
+        Potent and evolving it used to be enough, and it is not any more - the evolved form's own
+        Potent entry is a member that has to exist.
+
+        This is now the same reading as the Database tab's "hide complete" filter
+        (`database_tab._complete`, which asks it per stage and per category) - the two tabs agree on
+        what a finished line is, with the one difference that the crimsonite skin is a group of its
+        own here and is not part of completeness there.
+        """
         if self.kind == dex.CRIMSONITE:
             return ("%s|%s" % (self.family, dex.CRIMSONITE)) in (skins or ())
-        return any(_owns(owned, uid, self.kind) for uid in self.uids)
+        return all(_owns(owned, uid, self.kind) for uid in self.uids)
 
 
 def groups(owned=None, skins=None, lines=None):
@@ -180,13 +199,29 @@ def unlined_slots(zone_list):
     return sorted(out)
 
 
-def zones(zone_list, all_groups):
-    """The zones to grind, MOST MISSING GROUPS FIRST - the list the user asked for.
+def _lines(groups):
+    """The distinct evolutionary LINES the groups belong to, in the order they were met.
 
-    Each row is `{"zone", "groups", "missing"}`: every group the zone can fill, and the subset of them
-    the save does not have yet. Sorted by how many are missing, then by how many the zone offers at
-    all (a zone with four missing out of four is a better target than four out of twelve), then by name
-    so the order is stable.
+    THE COUNTING RULE THE USER CHANGED: a line missing both its potent and its perfect group is ONE
+    thing to go and get, not two - "right now we count 1 potent missing and 1 perfect missing etc of
+    the same evolutionary line as 2 missing - weight 2, it should rather count as 1 as one member".
+    The same grass grows it either way, so the trip is one; how many CATCHES it takes is what the
+    groups count for, and that is still visible per kind in the tab.
+    """
+    seen = []
+    for group in groups:
+        if group.family not in seen:
+            seen.append(group.family)
+    return seen
+
+
+def zones(zone_list, all_groups):
+    """The zones to grind, MOST MISSING LINES FIRST - the list the user asked for.
+
+    Each row is `{"zone", "groups", "missing", "missing_lines", "hosted_lines"}`: every group the zone
+    can fill, the subset of them the save does not have, and the LINES those groups belong to - which
+    is what the ranking is ordered by, with the group count as the tie-break (more catches waiting
+    there is more to do there) and the name last so the order is stable.
     """
     by_zone = groups_by_zone(zone_list, all_groups)
     rows = []
@@ -194,10 +229,42 @@ def zones(zone_list, all_groups):
         hosted = by_zone.get(zone.name, [])
         if not hosted:
             continue
-        rows.append({"zone": zone, "groups": hosted,
-                     "missing": [group for group in hosted if not group.caught]})
-    rows.sort(key=lambda row: (-len(row["missing"]), -len(row["groups"]), row["zone"].name))
+        missing = [group for group in hosted if not group.caught]
+        rows.append({"zone": zone, "groups": hosted, "missing": missing,
+                     "missing_lines": _lines(missing), "hosted_lines": _lines(hosted)})
+    rows.sort(key=lambda row: (-len(row["missing_lines"]), -len(row["missing"]),
+                               -len(row["hosted_lines"]), row["zone"].name))
     return rows
+
+
+def lines_missing(zone, groups):
+    """The missing groups FOLDED PER LINE - `[{"name", "kinds", "odds"}]`, best odds first.
+
+    THE UNIT THE USER COUNTS IN, and therefore the unit the pane prints: "standard, potent and perfect
+    kyreptil should count as 1 group ... only if we were missing both potent kyreptil and kyraptor does
+    that count as one missing slot". A line short of three kinds is ONE row naming all three, and
+    `odds` is the best way into that line here - the potential kinds share the same slots, while a
+    crimsonite group has its own, so when that is the only thing missing its own odds are what shows.
+    """
+    folded = []
+    for group in groups:
+        hit = odds_in(zone, group)
+        for entry in folded:
+            if entry["family"] == group.family:
+                entry["kinds"].append(group.kind)
+                if hit:
+                    entry["hits"].append(hit)
+                break
+        else:
+            folded.append({"family": group.family, "name": group.name, "kinds": [group.kind],
+                           "hits": [hit] if hit else []})
+    for entry in folded:
+        entry["kinds"].sort(key=KINDS.index)
+        entry["odds"] = ((min(hit[0] for hit in entry["hits"]),
+                          max(hit[1] for hit in entry["hits"]),
+                          max(hit[2] for hit in entry["hits"])) if entry["hits"] else None)
+    folded.sort(key=lambda entry: -(entry["odds"][2] if entry["odds"] else 0))
+    return folded
 
 
 def odds_in(zone, group):
@@ -239,14 +306,13 @@ def report(owned=None, skins=None):
              "zones that can fill something: %d, of which %d are missing something"
              % (len(rows), sum(1 for row in rows if row["missing"]))]
     for row in rows[:6]:
-        lines.append("  %-22s %-22s %d missing of %d"
+        lines.append("  %-22s %-22s %d line(s), %d group(s) missing of %d"
                      % (row["zone"].name, row["zone"].map_file,
-                        len(row["missing"]), len(row["groups"])))
-        for group in row["missing"][:3]:
-            odds = odds_in(row["zone"], group)
-            lines.append("      %-20s %-11s %s" % (
-                group.label, "L%s-%s" % odds[:2] if odds else "no slots", 
-                "%.1f%% of the slots here" % odds[2] if odds else ""))
+                        len(row["missing_lines"]), len(row["missing"]), len(row["groups"])))
+        for entry in lines_missing(row["zone"], row["missing"])[:3]:
+            lines.append("      %-16s %-30s %s" % (
+                entry["name"], " / ".join(KIND_NAMES[kind] for kind in entry["kinds"]),
+                "L%s-%s  %.1f%% of the slots here" % entry["odds"] if entry["odds"] else "no slot"))
     unlined = unlined_slots(_all_zones())
     if unlined:
         lines.append("spawn slots in no dex line (not counted): %d %s" % (len(unlined), unlined[:4]))
