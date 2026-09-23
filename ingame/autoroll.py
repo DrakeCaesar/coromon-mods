@@ -12,13 +12,22 @@ the previous one's `kill()` first.
 So the split is:
 
     this feature      notices the decided result and fires the reload, in the composited chunk,
-                      on the host's own tick
-    autoroll.py       presses Space, which is the one part that cannot come from in here, and
-                      reports what the feature is doing
+                      on the host's own tick - but only while a driver has it ARMED
+    autoroll.py       arms it, presses Space, and reports what it is doing
+
+NOTHING HAPPENS UNTIL THE DRIVER ARMS IT (`f.armed`, false at install and tested at the top of
+`update()`). The user, having found the opposite: "the idea was that the autoroll.py would be the
+one that triggers reloading if a wrong value roll is detected - the issue is that the overlays
+script does this even if autoroll.py is not used". Which it did, because the install was what armed
+it: merely having the overlay attached reloaded the save on every handover that decided anything
+but the target. Deciding and reloading really are in-game work, but they are only worth doing for a
+run somebody is driving - the confirm press cannot come from in here, so without a driver the loop
+could only rearrange a save nobody was rolling. `autoroll.py` arms it on the way in and disarms it
+on the way out, so quitting the driver stops the reloading there and then.
 
 `autoroll.py` drives this; it does not duplicate it. Turning this feature off (the `runtime`
 checkbox in the GUI, or `[autoroll] enabled = false`) stops the loop dead, and switching it back
-on re-arms it with the counters at zero - which is also how to re-arm after a hit, since `ready`
+on resets it with the counters at zero - which is also how to reset after a hit, since `ready`
 is terminal on purpose.
 
 AFTER A HIT IT WALKS. The Coromon is not collectable until its 1000 steps are walked, so on a hit
@@ -75,12 +84,13 @@ SETTINGS = [
         "enabled",
         True,
         "reroll the Potentiflator automatically: fire the reload whenever a handover decides a "
-        "potential other than TARGET. ON by default, because the roll loop is the point of the "
-        "reload button. It is also safe to leave on: it can only ever act on a handover that has "
-        "ALREADY been made, since it needs a parked deposit with a decided result to exist before "
-        "it does anything at all. It needs the reload feature installed, and it needs something "
-        "outside to press the confirm key - see autoroll.py. With the reload feature off the loop "
-        "stops and reports why rather than retrying, and it stops for good once it hits the target.",
+        "potential other than TARGET. It is SAFE to leave on, but not for the reason this comment "
+        "used to give: the loop does NOTHING until autoroll.py ARMS it (`f.armed`, false at "
+        "install), because a reload is only worth firing for a run something outside is driving - "
+        "the confirm press cannot come from in here. autoroll.py arms it on the way in and disarms "
+        "it on the way out, so the loop stops when the driver does. It needs the reload feature "
+        "installed: with that off the loop stops and reports why rather than retrying, and it "
+        "stops for good once it hits the target.",
     ),
 ]
 
@@ -93,6 +103,10 @@ local function autorollState()
   local f = _G.__hud and _G.__hud.feats and _G.__hud.feats.autoroll
   if type(f) ~= 'table' then return 'not installed' end
   if not f.on then return 'switched off' end
+  -- ARMED IS THE DIFFERENCE between the loop being installed and the loop being allowed to reload:
+  -- only autoroll.py arms it, because only autoroll.py can press the confirm key. Saying so here is
+  -- what keeps "it did nothing" from looking like "it is broken".
+  if not f.armed then return 'idle - run autoroll.py to start it' end
   local s = string.format('rolls=%d %s', f.rolls or 0, tostring(f.state))
   if f.hit then s = s .. ' HIT ' .. tostring(f.hit) end
   if f.why then s = s .. ' (' .. tostring(f.why) .. ')' end
@@ -138,6 +152,23 @@ do
   f.rearm = rearm
   rearm()
   f.on = false
+
+  -- ARMED OR NOT: whether a DRIVER is out there to press the confirm key. FALSE AT INSTALL, and that
+  -- is load-bearing rather than tidy - it is the whole difference between this feature and one that
+  -- reloads the save of anybody who merely has the overlay attached (see the module docstring).
+  -- The driver asks for both halves in one call, so there is no way to arrive at an armed loop with
+  -- a stale `ready` still in it:
+  local function arm()
+    f.armed = true
+    rearm()      -- a driver arriving IS a fresh run, and `ready` is terminal on purpose
+  end
+  local function disarm()
+    f.armed = false
+    -- stop asking for a direction at once: the driver releases its keys on the way out, and a word
+    -- left in `walk` would have the next reader believe a key is still held
+    f.walk, f.state = nil, 'idle'
+  end
+  f.arm, f.disarm, f.armed = arm, disarm, false
 
   local TARGET = __TARGET__
   local WALK_AFTER_HIT = __WALK__
@@ -305,6 +336,13 @@ do
 
   local function update()
     if not f.on then return end
+    -- NOT ARMED: nothing outside is pressing the confirm key, so a reload fired now would be a
+    -- reload nobody asked for - see `arm` above and the module docstring. The state says so, and
+    -- the readouts print it, because a loop that silently does nothing reads as a broken one.
+    if not f.armed then
+      f.state, f.why = 'idle', 'run autoroll.py to start the loop'
+      return
+    end
     if f.state == 'ready' or f.state == 'stuck' then return end
     if f.state == 'walking' then
       walkStep()
@@ -363,7 +401,8 @@ end
 
 
 def summary(cfg):
-    return "'autoroll: fires the reload when a handover decides anything but P%d'" % TARGET
+    return "'autoroll: rerolls a handover deciding anything but P%d, while autoroll.py drives it'" \
+        % TARGET
 
 
 def status(cfg):

@@ -153,12 +153,12 @@ show_potential = true
 
 [autoroll]
 # reroll the Potentiflator automatically: fire the reload whenever a handover decides a potential
-# other than TARGET. ON by default, because the roll loop is the point of the reload button. It is
-# also safe to leave on: it can only ever act on a handover that has ALREADY been made, since it
-# needs a parked deposit with a decided result to exist before it does anything at all. It needs
-# the reload feature installed, and it needs something outside to press the confirm key - see
-# autoroll.py. With the reload feature off the loop stops and reports why rather than retrying,
-# and it stops for good once it hits the target.
+# other than TARGET. It is SAFE to leave on, but not for the reason this comment used to give: the
+# loop does NOTHING until autoroll.py ARMS it (`f.armed`, false at install), because a reload is
+# only worth firing for a run something outside is driving - the confirm press cannot come from in
+# here. autoroll.py arms it on the way in and disarms it on the way out, so the loop stops when the
+# driver does. It needs the reload feature installed: with that off the loop stops and reports why
+# rather than retrying, and it stops for good once it hits the target.
 enabled = true
 
 [zoom]

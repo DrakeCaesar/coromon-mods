@@ -21,13 +21,19 @@ is the one part that cannot come from inside, and reports what the feature is do
 decide anything and it does not reload anything, so there is no way for it to fire a reload twice:
 the feature is installed once and the host tears the previous copy down before installing it again.
 
-IT DOES ASK FOR A FRESH START ON THE WAY IN. The loop stops for good at `ready` - that is what keeps
-it off a Coromon it has already rolled to the target - so `ready` outlives the Coromon it describes.
-A driver started after that Coromon was collected would read `ready`, press nothing, and exit. So
-`rearm()` is called once at startup; see it for exactly what it does and does not clear.
+IT TAKES THE LOOP OVER ON THE WAY IN, AND HANDS IT BACK ON THE WAY OUT. `arm()` runs once at
+startup, and the feature's loop does NOTHING AT ALL until it does - which is the fix for the reload
+firing on people who never ran this script: the install was what used to arm it, so merely having
+the overlay attached reloaded the save on every handover that decided anything but the target.
+`arm()` also asks for a fresh start, because the loop stops for good at `ready` - that is what keeps
+it off a Coromon it has already rolled to the target - so `ready` outlives the Coromon it describes,
+and a driver started after that Coromon was collected would read `ready`, press nothing, and exit.
+`disarm()` runs on the way out (in a `finally`, since Ctrl+C is the normal ending), so quitting this
+script stops the in-game reloading rather than leaving it running with nothing left to press.
 
 It also means one eval of a few lines per poll instead of a 12 KB chunk recompiled each time, and
-it works whether or not this script is the one that turned the feature on.
+that the feature can stay `enabled` in `overlays.toml` without doing anything until this script arms
+it.
 
 WHAT IT NEEDS. overlays.py attached, with `[reload] enabled` and `[autoroll] enabled`. The game
 window has to be in the foreground: `keybd_event` is delivered to whatever owns the foreground, so
@@ -122,38 +128,57 @@ ARM_CODE = r"""
 local f = _G.__hud and _G.__hud.feats and _G.__hud.feats.autoroll
 if type(f) ~= 'table' then return '!the autoroll feature is not installed!' end
 if not f.on then return '!the autoroll feature is switched off!' end
--- An installed-but-older chunk would have no rearm(), and silently pretending to have re-armed it
--- would leave exactly the state this exists to clear. Say so instead.
-if type(f.rearm) ~= 'function' then
-  return '!this copy of the feature cannot be re-armed - restart overlays.py to reinstall it!'
+-- An installed-but-older chunk would have no arm(), and the loop would then do nothing at all while
+-- this script pressed Space at it - which reads exactly like the loop being broken. Say so instead
+-- of leaving it to be guessed at.
+if type(f.arm) ~= 'function' then
+  return '!this copy of the feature cannot be armed - restart overlays.py to reinstall it!'
 end
 local was = tostring(f.state)
-f.rearm()
+-- ARMING IS WHAT MAKES THE LOOP RUN AT ALL (see ingame/autoroll.py), and it resets the counters on
+-- the way in: a driver arriving means a fresh run.
+f.arm()
 return was
 """
 
+# THE OTHER HALF OF THE PAIR, and the one that matters when this script dies: the loop lives in the
+# game process and outlives this one, so an armed loop with nothing left to press the confirm key is
+# worse than an idle one - it would keep reloading a save nobody was rolling.
+DISARM_CODE = r"""
+local f = _G.__hud and _G.__hud.feats and _G.__hud.feats.autoroll
+if type(f) ~= 'table' or type(f.disarm) ~= 'function' then return '!not armed by this feature!' end
+f.disarm()
+return 'ok'
+"""
 
-def rearm(b):
-    """Clear the loop's memory of the Coromon it was last working on, at startup.
 
-    WHY IT IS NEEDED. `ready` is TERMINAL in the feature, deliberately: it is how the loop stops
-    once it has hit the target, which is what keeps a reload away from the perfect Coromon it has
-    just walked. But terminal means the state OUTLIVES the Coromon it describes - collect that
-    Coromon, hand in a new one, and the loop is still sitting at `ready` with the old result and a
-    step count of zero. A restarted driver then does nothing whatsoever: its first read says
-    `ready`, and it exits having pressed nothing.
+def arm(b):
+    """Take the loop over: allow it to fire reloads, and clear its memory of the last Coromon.
 
-    WHY HERE AND NOT IN THE FEATURE. The feature could re-arm itself the moment its terminal
+    TWO THINGS IN ONE CALL, because both of them mean "this run starts here".
+
+    * ARMED - the feature does nothing at all until this happens (`f.armed`, false at install). The
+      reload only exists to serve a run somebody is driving, and the confirm press cannot come from
+      inside the game, so an overlay that arms itself on install is reloading a save nobody is
+      rolling. That was the bug this fixes; see the module docstring.
+    * RESET - `ready` is TERMINAL in the feature, deliberately: it is how the loop stops once it has
+      hit the target, which is what keeps a reload away from the perfect Coromon it has just walked.
+      But terminal means the state OUTLIVES the Coromon it describes - collect that Coromon, hand in
+      a new one, and the loop is still sitting at `ready` with the old result and a step count of
+      zero. A restarted driver then does nothing whatsoever: its first read says `ready`, and it
+      exits having pressed nothing.
+
+    WHY THE RESET IS HERE AND NOT IN THE FEATURE. The feature could do it the moment its terminal
     deposit goes away, and in the long run that is the better home for it. What it cannot fix is
     the RACE: the driver's first read may land before the loop's next tick has noticed anything, so
     it would still see the inherited `ready` and stop. Asking on the way in has no race, and the
     state machine keeps its single, meaningful meaning of terminal.
 
-    The loop's own reset is what runs - `rearm()` in the feature, the same code its install path
-    runs - rather than this script assigning to fields itself, so the feature stays the only thing
-    that knows what it remembers. A run already in progress survives being re-armed: the loop goes
-    back to 'starting', reads the deposit again, and because a walk's remaining steps are the
-    game's own absolute countdown, it carries on from where it was.
+    The loop's own reset is what runs - `arm()` in the feature, the same code its install path runs
+    - rather than this script assigning to fields itself, so the feature stays the only thing that
+    knows what it remembers. A run already in progress survives being re-armed: the loop goes back
+    to 'starting', reads the deposit again, and because a walk's remaining steps are the game's own
+    absolute countdown, it carries on from where it was.
 
     Returns the state that was replaced, or an error string prefixed with '!' like read_state.
     """
@@ -161,6 +186,19 @@ def rearm(b):
     if out == "":
         return "!no answer from the game!"
     return out
+
+
+def disarm(b):
+    """Hand the loop back: stop the reloading, so it cannot continue without a driver.
+
+    Expected to fail harmlessly - the usual reason for leaving is that the game closed, and the
+    `finally` that calls this must never turn that into an exception of its own.
+    """
+    try:
+        b.eval(DISARM_CODE, timeout=15.0)
+    except Exception as exc:                       # noqa: BLE001 - cleanup must not mask the exit
+        print("could not disarm the roll loop on the way out: %s: %s"
+              % (type(exc).__name__, exc))
 
 
 def game_foreground(hwnd):
@@ -296,6 +334,10 @@ def main():
         return 2
 
     b = Bridge(PROCESS, hooks=MINIMAL_HOOKS)
+    # Whether the loop was actually TAKEN OVER, so the cleanup only hands back what it took: an
+    # exit before arming (the game not past its loading screen, say) must not report a failure to
+    # disarm something that was never armed.
+    took_over = False
     try:
         for _ in range(150):
             if b.status().get("state"):
@@ -305,15 +347,16 @@ def main():
             print("attached, but no lua_State captured yet - is the game past its loading screen?")
             return 2
 
-        # A FRESH START BEFORE ANYTHING ELSE, and before waiting for the foreground for no better
-        # reason than that this is the order the messages read in. The loop may be sitting in a
-        # terminal state left over from the last Coromon - see rearm() for why that strands a
-        # restarted run.
-        was = rearm(b)
+        # ARM IT BEFORE ANYTHING ELSE, and before waiting for the foreground for no better reason
+        # than that this is the order the messages read in: the loop does nothing at all until this
+        # lands (see ingame/autoroll.py), and it may also be sitting in a terminal state left over
+        # from the last Coromon - see arm() for why that strands a restarted run.
+        was = arm(b)
         if was.startswith("!"):
             print(was.strip("!"))
             return 2
-        print("loop re-armed (was %s)" % was)
+        took_over = True
+        print("roll loop armed (was %s)" % was)
 
         # WAIT FOR THE FOREGROUND, DO NOT TAKE IT. Nothing may be pressed while the game is behind
         # something else, because keybd_event goes to whatever owns the foreground - and grabbing it
@@ -342,6 +385,11 @@ def main():
                 pad_drive.key(direction, False)
             except Exception:  # noqa: BLE001 - never let cleanup mask the real exit
                 pass
+        # AND HAND THE LOOP BACK, for the same reason the keys are released: it runs in the game
+        # and outlives this process, so an armed loop left behind would keep reloading on every
+        # handover with nothing left to press the confirm key.
+        if took_over:
+            disarm(b)
         b.detach()
 
 
