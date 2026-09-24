@@ -1,9 +1,10 @@
 """Offscreen smoke test for the grind window.
 
-Checks that the data reaches the widgets: the four tabs, a filled ranking, a map with a plan, the
+Checks that the data reaches the widgets: the six tabs, a filled ranking, a map with a plan, the
 game's own database grid and the dex icons in it, the item catalogue with the stats the game's Lua
-holds, the skill table and its description, sorting, filtering, the cross-tab jump, and the window's
-saved geometry. Runs on Qt's `offscreen` platform, so it needs no display and nothing running.
+holds, the skill table and its description, the wild Potential roll under the game's own settings,
+sorting, filtering, the cross-tab jump, and the window's saved geometry. Runs on Qt's `offscreen`
+platform, so it needs no display and nothing running.
 
     python ui_smoke.py
 
@@ -25,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtCore import QSettings, QSize, Qt                    # noqa: E402
 from PySide6.QtTest import QTest                                  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLabel        # noqa: E402
+from PySide6.QtWidgets import QApplication, QCheckBox, QLabel        # noqa: E402
 
 import encounters                                           # noqa: E402
 import skills                                               # noqa: E402
@@ -33,6 +34,7 @@ import skills                                               # noqa: E402
 import dex                                                  # noqa: E402
 import items as item_data                                   # noqa: E402
 import missing as missing_data                              # noqa: E402
+import potential                                            # noqa: E402
 import savefile                                             # noqa: E402
 
 import coromontools.state as state                          # noqa: E402
@@ -41,6 +43,7 @@ from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
 from coromontools.grind import encounter_lines                # noqa: E402
 from coromontools import missing_tab                          # noqa: E402
+from coromontools import potential_tab                        # noqa: E402
 from coromontools.table import ICON, sort_rows                # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 from coromontools.widgets import mono_height                # noqa: E402
@@ -96,10 +99,12 @@ def main():
 
     # ---------------------------------------------------------------- window
     # THE COROMON TAB IS GONE - the Database tab supersedes it (see `coromontools/__init__.py`) - and
-    # the Missing tab joined the set after the Database one, which it is the companion of.
+    # the Missing tab joined the set after the Database one, which it is the companion of. The
+    # Potential tab is APPENDED (see `coromontools/__init__.py`), so every saved tab index still means
+    # what it meant.
     titles = [window.tabs.tabText(index).strip() for index in range(window.tabs.count())]
-    check("five tabs, in that order",
-          titles == ["Where to grind", "Database", "Missing", "Items", "Skills"], titles)
+    check("six tabs, in that order",
+          titles == ["Where to grind", "Database", "Missing", "Items", "Skills", "Potential"], titles)
     check("window titled", bool(window.windowTitle()), window.windowTitle())
     check("min size kept", window.minimumWidth() == 1040 and window.minimumHeight() == 560)
 
@@ -1019,32 +1024,52 @@ def main():
           all(any(uid in missing_data.family_of() for uid in list(r["zone"].monsters)
                   + list(r["zone"].crimsonite)) for r in miss.rows))
 
-    # THE PANE: ONE LINE PER EVOLUTIONARY LINE, with the kinds it is short of on that line - the user
-    # spelled out the unit: "standard, potent and perfect kyreptil should count as 1 group ... only if
-    # we were missing both potent kyreptil and kyraptor does that count as one missing slot". So a
-    # 2-stage line short of three kinds is ONE row here, and the kinds are named on it.
+    # THE PANE LISTS THE MISSING COROMON ONE BY ONE - the user: "it doesn't list Fibio, which I don't
+    # have, but it spawns there", then "I said that if we are missing a member of line - it should
+    # still be listed". The COUNT is still per line (the table's "to catch"), but every Coromon that is
+    # short anywhere in the picked zone gets its own row, including the ones with no slot of their own
+    # here (they are reachable by evolving a stage that does spawn).
     miss.table.selectRow(0)
     pump(app, 3)
     pane = miss.detail.toPlainText()
-    check("the pane names the selected zone and how many lines and groups are short",
-          sample["zone"].name in pane and "%d line(s) short, %d of %d groups missing"
-          % (len(sample["missing_lines"]), len(sample["missing"]), len(sample["groups"])) in pane,
-          pane.splitlines()[:2])
-    named = [line for line in pane.splitlines() if line.startswith("  ") and line.strip()]
-    check("... with one line per LINE short, not per kind",
-          len(named) == len(sample["missing_lines"]), len(named))
-    check("... each naming its line and every kind that line is short of",
-          all(any(g.family and g.name in line and
-                  all(missing_tab.SHORT[k] in line
-                      for k in {x.kind for x in sample["missing"] if x.family == g.family})
-                  for g in sample["missing"]) for line in named),
-          named[:2])
-    check("... each row standing for one of the lines that is short here",
-          sorted(line.split()[0] for line in named)
-          == sorted({g.name for g in sample["missing"]}), named[:2])
+    listed = missing_data.members_missing(sample["zone"], sample["missing"])
+    check("the pane names the selected zone and how many Coromon are to catch",
+          sample["zone"].name in pane and "%d line(s) short \u00b7 %d Coromon to catch"
+          % (len(sample["missing_lines"]), len(listed)) in pane, pane.splitlines()[:2])
+    named = [line for line in pane.splitlines()
+             if line.startswith("  ") and line.strip() and line.split()[0] != "Coromon"]
+    check("... with one row per missing Coromon", len(named) == len(listed),
+          "%d row(s) for %d Coromon" % (len(named), len(listed)))
+    check("... under a heading row of its own",
+          [line.split() for line in pane.splitlines() if "needs" in line]
+          == [["Coromon", "needs", "line", "how", "levels", "share"]], pane.splitlines()[2:3])
+    check("... every one of them named, in the model's own order",
+          [line.split()[0] for line in named] == [entry["member"].name for entry in listed],
+          [line.split()[0] for line in named][:3])
     row_of = {line.split()[0]: line for line in named}
-    check("... with every missing kind named on its line's own row",
-          all(missing_tab.SHORT[g.kind] in row_of[g.name] for g in sample["missing"]), named[:2])
+    check("... each naming the line it belongs to and every kind it needs",
+          all(entry["line"] in row_of[entry["member"].name]
+              and all(missing_tab.SHORT[kind] in row_of[entry["member"].name]
+                      for kind in entry["kinds"]) for entry in listed), named[:2])
+    # ... INCLUDING THE ONES THAT DO NOT SPAWN HERE, which is the whole point of "still listed": a
+    # Coromon with no slot of its own is marked `evolve` (catch the kind on a stage that IS here and
+    # evolve it), and one with a slot shows the levels and share of that slot.
+    evolved = [entry for entry in listed if not entry["odds"]]
+    check("... with the ones that do not spawn here marked as evolved, not hidden",
+          len(evolved) == len([line for line in named if line.rstrip().endswith("-")]),
+          "%d evolve-only row(s)" % len(evolved))
+    check("... and the ones that do spawn here priced off their own slot",
+          all("L%s-%s" % entry["odds"][:2] in row_of[entry["member"].name]
+              and "%.1f%%" % entry["odds"][2] in row_of[entry["member"].name]
+              for entry in listed if entry["odds"]), listed[0]["member"].name)
+    # THE CASE THE USER REPORTED, found rather than assumed: a Coromon whose name is NOT its line's
+    # base form (Fibio in the Taddle line) has to be printed by name.
+    non_base = [entry for entry in listed if entry["member"].name != entry["line"]]
+    check("... including a stage that is not the line's base form", bool(non_base),
+          [(entry["member"].name, entry["line"]) for entry in non_base][:2])
+    check("... the Fibio case: named on its own row under its line",
+          all(entry["member"].name in row_of[entry["member"].name] for entry in non_base),
+          [(entry["member"].name, entry["line"]) for entry in non_base][:2])
 
     # THE RIGHT HALF IS THE MAP, the user: "the right half of the missing tab should also show the map
     # with the zone highlighted like the other tabs". It is the same `ZoneMap` widget, so the picked
@@ -1224,8 +1249,174 @@ def main():
           skills_tab.table.model_.rows[-1]["power"] in ("-", ""),
           skills_tab.table.model_.rows[-1]["power"])
 
+    # ---------------------------------------------------------------- potential tab
+    window.tabs.setCurrentIndex(5)
+    pump(app, 3)
+    pot = window.potential
+    # THE FOUR TABLES ARE THE GAME'S OWN NUMBERS, so their totals are still the ones the game rolls
+    # against: 3863 was RECORDED off the running game (a `table.rollKey` call inside it) before this
+    # tab existed, which is what pins the rest of the table to reality.
+    check("the four potential tables still total what the game's own tables total",
+          [potential.total(count) for count in sorted(potential.TABLES)]
+          == [3194, 3415, 3863, 4567],
+          [potential.total(count) for count in sorted(potential.TABLES)])
+    check("... and a speed-up never touches the tail (17-21), which is why it dilutes them",
+          all(potential.weights(count)[16:] == potential.weights(0)[16:]
+              for count in sorted(potential.TABLES)),
+          [potential.weights(3)[level - 1] for level in (1, 5, 17, 21)])
+
+    # THE CONTROLS OPEN ON THE GAME'S OWN SETTINGS, which is the whole point of the tab: `from_game`
+    # reads them out of the game's preferences, so what it shows before anything is touched is what
+    # the game will really do. Nothing here may be saved - see the tab's own docstring.
+    battle, overworld, animations = potential.read_settings()
+    check("the tab opened on the game's own settings",
+          pot.battle.isChecked() == bool(battle > 1)
+          and pot.overworld.isChecked() == bool(overworld > 1)
+          and pot.animations.isChecked() == bool(animations)
+          and not pot.scent.isChecked(),
+          "battle x%s, game x%s, encounter animations %s"
+          % (battle, overworld, "on" if animations else "off"))
+    # A TICK EACH, not a picker: the game's own test is `> 1`, so the multiplier's SIZE cannot matter
+    # and a three-way control would offer a difference that does not exist.
+    check("... with a tick per multiplier, because only 'above x1' is a difference",
+          isinstance(pot.battle, QCheckBox) and isinstance(pot.overworld, QCheckBox),
+          "%s, %s" % (type(pot.battle).__name__, type(pot.overworld).__name__))
+    check("... and x1.5 and x2 are worth the same one flag to the roll",
+          potential.speed_ups(potential.SPEEDS[1], 1.0, True)
+          == potential.speed_ups(potential.SPEEDS[2], 1.0, True) == 1,
+          "x%s vs x%s" % (potential.SPEEDS[1], potential.SPEEDS[2]))
+
+    def potential_rows():
+        """The tab's table as `{level: (kind, weight, 1 pick, chance)}`, straight off the model."""
+        return {int(row["level"]): (row["kind"], row["weight"], row["one"], row["chance"])
+                for row in pot.table.model_.rows}
+
+    count, scented = pot.configuration()
+    picks = potential.rolls(scented)
+    rows = potential_rows()
+    check("every potential level is listed once, in order",
+          sorted(rows) == list(potential.LEVELS), len(rows))
+    check("... each with the game's own weight from the table those flags pick",
+          all(rows[level][1] == "%d" % potential.weights(count)[level - 1]
+              for level in potential.LEVELS),
+          [(level, rows[level][1]) for level in (1, 11, 21)])
+    check("... and the category the game's own thresholds give it",
+          all(rows[level][0] == potential.KIND_NAMES[potential.level_kind(level)]
+              for level in potential.LEVELS), rows[21][0])
+    check("... and a chance that is the model's own, per level",
+          all(rows[level][3] == potential.percent(potential.chances(count, picks)[level - 1])
+              for level in potential.LEVELS),
+          [(level, rows[level][3]) for level in (11, 17, 21)])
+    check("... summing to exactly 100% of the levels",
+          abs(sum(potential.chances(count, picks)) - 1.0) < 1e-12)
+    check("the bar is drawn for every level and is longest at the table's peak",
+          all(row["bar"] for row in pot.table.model_.rows)
+          and max(len(row["bar"]) for row in pot.table.model_.rows)
+          == potential_tab.BAR,
+          [len(row["bar"]) for row in pot.table.model_.rows][:6])
+
+    kinds = potential.kind_chances(count, picks)
+    check("the header says which table and how many picks",
+          ("%d-weight table" % potential.total(count)) in pot.summary.text()
+          and (("%d picks" % picks) in pot.summary.text()
+               or (picks == 1 and "1 pick" in pot.summary.text())),
+          pot.summary.text())
+    check("... and the odds of the three categories, as the game's own letters",
+          all(potential.percent(kinds[letter]) in pot.odds.text()
+              for letter, _name, _low, _high in potential.KINDS)
+          and abs(sum(kinds.values()) - 1.0) < 1e-12, pot.odds.text())
+    check("... with the perfect odds said as '1 in N' as well",
+          potential.one_in(kinds["C"]) in pot.odds.text(),
+          potential.one_in(kinds["C"]))
+
+    # THE SCENT: the picks go from 1 / 3 and nothing else moves - so every level's chance changes,
+    # and it is the TOP of the table that gains and the middle that pays for it.
+    pot.scent.setChecked(True)
+    pump(app)
+    scented_rows = potential_rows()
+    check("the Potent Scent takes the best of three picks",
+          pot.configuration()[1] and potential.rolls(True) == 3,
+          pot.summary.text())
+    check("... which raises the perfect and potent chances and lowers the middle",
+          float(scented_rows[21][3].rstrip("%")) > float(rows[21][3].rstrip("%"))
+          and float(scented_rows[17][3].rstrip("%")) > float(rows[17][3].rstrip("%"))
+          and float(scented_rows[11][3].rstrip("%")) < float(rows[11][3].rstrip("%")),
+          "level 21 %s -> %s, level 11 %s -> %s"
+          % (rows[21][3], scented_rows[21][3], rows[11][3], scented_rows[11][3]))
+    check("... while the weights it draws from are untouched",
+          all(scented_rows[level][1] == rows[level][1] for level in potential.LEVELS))
+    pot.scent.setChecked(False)
+
+    # THE TWO TICKS: each one is a flag, and there is nothing in between to choose.
+    pot.battle.setChecked(False)
+    pot.overworld.setChecked(False)
+    pot.animations.setChecked(True)
+    pump(app)
+    plain = pot.configuration()[0]
+    plain_rows = potential_rows()
+    pot.battle.setChecked(True)
+    pump(app)
+    one = pot.configuration()[0]
+    pot.overworld.setChecked(True)
+    pump(app)
+    both = pot.configuration()[0]
+    check("each speed tick costs exactly one flag",
+          plain == 0 and one == plain + 1 and both == one + 1,
+          "none -> %d, battle -> %d, both -> %d" % (plain, one, both))
+    check("... and a flag really moves the table it rolls against",
+          potential.total(both) > potential.total(plain)
+          and float(potential_rows()[21][3].rstrip("%"))
+          < float(plain_rows[21][3].rstrip("%")),
+          "table %d -> %d, perfect %s -> %s"
+          % (potential.total(plain), potential.total(both), plain_rows[21][3],
+             potential_rows()[21][3]))
+    pot.animations.setChecked(False)
+    pump(app)
+    check("encounter animations OFF is the third flag",
+          pot.configuration()[0] == both + 1 == potential.MAX_SPEED_UPS,
+          pot.configuration()[0])
+    check("a missing setting reads as the game's own default (nothing sped up)",
+          potential.speed_ups(None, None, None) == 0, potential.speed_ups(None, None, None))
+
+    pot.reload_button.click()
+    pump(app)
+    check("'From the game' puts the controls back on the game's settings",
+          pot.battle.isChecked() == bool(battle > 1)
+          and pot.overworld.isChecked() == bool(overworld > 1)
+          and pot.animations.isChecked() == bool(animations)
+          and not pot.scent.isChecked(),
+          "battle x%s -> %s, game x%s -> %s, encounter animations -> %s"
+          % (battle, pot.battle.isChecked(), overworld, pot.overworld.isChecked(),
+             pot.animations.isChecked()))
+    check("... and says in the tooltip which multiplier the game really has",
+          ("x%g" % battle) in pot.battle.toolTip()
+          and ("x%g" % overworld) in pot.overworld.toolTip(),
+          pot.battle.toolTip().split("\n")[0])
+
+    # ALL 21 LEVELS AT THE WINDOW'S REAL SIZE, which is why the note is a tooltip: at 1040x560 the
+    # perfect row is the last one, and a wrapped paragraph under the table is exactly what would push
+    # it into a scrollbar. MEASURED, like every other layout claim here.
+    window.resize(1040, 560)
+    pump(app, 4)
+    potle = pot.table
+    check("all 21 levels fit the window it is really used at",
+          potle.content_height() <= potle.viewport().height() + 2,
+          "needs %d px, has %d" % (potle.content_height(),
+                                   potle.viewport().height()))
+    # ... AND SO DOES THE CONTROL ROW, which is five widgets on one line: the four switches and the
+    # button. Measured the way the Database tab's row is (all centres level), plus the one thing that
+    # row cannot ask - that the last widget's right edge is still inside the tab.
+    controls = [pot.scent, pot.battle, pot.overworld, pot.animations, pot.reload_button]
+    centres = {widget.geometry().center().y() for widget in controls}
+    check("the four switches and the button are one row, and it fits",
+          len(centres) == 1 and controls[-1].geometry().right() <= pot.width() - 4,
+          "centres %s, ends at %d of %d" % (sorted(centres), controls[-1].geometry().right(),
+                                            pot.width()))
+    window.resize(1420, 760)
+    pump(app, 4)
+
     # ---------------------------------------------------------------- saved state
-    check("tab index saved", prefs.get("tab") == 4, prefs.get("tab"))
+    check("tab index saved", prefs.get("tab") == 5, prefs.get("tab"))
     check("skill filters saved", prefs.get("skill_type") == "poison", prefs.get("skill_type"))
     check("prefs readable back", state.load_prefs().get("skill_type") == "poison")
     check("nothing written to the real settings",

@@ -13,7 +13,10 @@ Modules are split by responsibility:
 * ``mapview``    - the zone map, which patch of grass each zone is
 * ``grind``      - the "Where to grind" tab
 * ``database_tab`` - the Database tab: the game's own grid, caught / seen / unknown per potential
-                   category, and where the picked Coromon can be caught * ``missing_tab`` - the Missing tab: the zones that can still fill the dex, most missing groups first* ``items_tab``  - the Items tab: every item, with the stats and the sprites the game's Lua holds
+                   category, and where the picked Coromon can be caught * ``missing_tab`` - the Missing tab: the zones that can still fill the dex, most missing groups first
+* ``potential_tab`` - the Potential tab: the wild Potential roll, level by level, under the game's
+                   settings
+* ``items_tab``  - the Items tab: every item, with the stats and the sprites the game's Lua holds
 * ``skills_tab`` - the Skills tab
 
 Run it with the entry script beside this package (``encounters_gui.py``), or
@@ -46,6 +49,7 @@ from .database_tab import DatabaseTab                                  # noqa: E
 from .grind import GrindTab, rank, zone_rows                           # noqa: E402
 from .items_tab import ItemsTab                                        # noqa: E402
 from .missing_tab import MissingTab                                    # noqa: E402
+from .potential_tab import PotentialTab                                # noqa: E402
 from .skills_tab import SkillsTab                                      # noqa: E402
 from .theme import apply_theme                                         # noqa: E402
 
@@ -66,7 +70,8 @@ class MainWindow(QMainWindow):
         # FIVE TABS, and they are the questions: where to grind, what the save records (with where
         # each Coromon can be caught), WHAT IS STILL MISSING AND WHERE TO GET IT - the Database tab's
         # companion, sitting right after it - what the items are (with the stats only the game's Lua
-        # has), and what the skills do.
+        # has), and what the skills do. The Potential tab was added last (it describes the wild roll
+        # itself rather than a list of things to go and do).
         # The Coromon tab USED to sit between the first two with a flat list of every Coromon and its
         # locations - the user: "get rid of the coromon tab, since the database tab superseeds it". It
         # was a second view of the same data: the Database grid holds every dex entry, its crimsonite
@@ -78,11 +83,16 @@ class MainWindow(QMainWindow):
         self.missing = MissingTab(prefs)
         self.items = ItemsTab()
         self.skills = SkillsTab(skill_list, prefs)
+        self.potential = PotentialTab(prefs)
         self.tabs.addTab(self.grind, "  Where to grind  ")
         self.tabs.addTab(self.database, "  Database  ")
         self.tabs.addTab(self.missing, "  Missing  ")
         self.tabs.addTab(self.items, "  Items  ")
         self.tabs.addTab(self.skills, "  Skills  ")
+        # APPENDED, never inserted: a saved `prefs["tab"]` index has to keep meaning the tab it
+        # meant, which is why the new one goes at the end (the Potential tab is a reference page
+        # about the wild roll, so it has no natural place among the data tabs).
+        self.tabs.addTab(self.potential, "  Potential  ")
         self.setCentralWidget(self.tabs)
 
         self.grind.onTopToggled.connect(self.set_on_top)
@@ -172,6 +182,21 @@ def selftest():
         print("  ", "  ".join("%s=%s" % (key, value) for key, value in skills.row(skill).items()))
         print("    ", skills.resolve(skill.get("description"), skill))
     print("settings file:", state.settings().fileName())
+    # THE WILD POTENTIAL ROLL, as the game is configured right now (see `potential.py`): the three
+    # settings flags the roll reads, and what they add up to per potential level.
+    import potential
+    battle, overworld, animations = potential.read_settings()
+    count = potential.speed_ups(battle, overworld, animations)
+    print("potential: the game has battle x%s, game x%s, encounter animations %s"
+          % (battle, overworld, "on" if animations else "off"))
+    for scent in (False, True):
+        picks = potential.rolls(scent)
+        kinds = potential.kind_chances(count, picks)
+        print("  %d pick(s)%s: %s  \u00b7  perfect %s"
+              % (picks, " (Potent Scent)" if scent else "",
+                 "  ".join("%s %s" % (potential.KIND_NAMES[letter], potential.percent(kinds[letter]))
+                           for letter, _name, _low, _high in potential.KINDS),
+                 potential.one_in(kinds["C"])))
     for zone in rank(all_zones, 64, only_xp=True)[:6]:
         rows = zone_rows(zone)
         print("  %-22s %-18s expLvl %5.2f  %s" % (

@@ -96,17 +96,51 @@ def _decrypt(blob):
     return bytes(b ^ key[(i + OFFSET) % len(key)] for i, b in enumerate(blob))
 
 
-def _read_rows():
-    """Every `saveslot_self_*` row, decrypted, newest first.
+def _copy_db():
+    """A read-only URI for a COPY of the preferences database.
 
-    Returns a list of (dateTime, slot key, save dict). The game keeps the database open, so
-    it is copied out first rather than risking a lock.
+    The game keeps the database open, so it is copied out first rather than risking a lock. Every
+    reader here goes through this, so the saving slot and the game's own settings are always read the
+    same way.
     """
     if not os.path.exists(PREFS_DB):
         raise FileNotFoundError("%s does not exist - has the game ever saved?" % PREFS_DB)
     tmp = os.path.join(tempfile.gettempdir(), "coromon-prefs-copy.sqlite")
     shutil.copy2(PREFS_DB, tmp)
-    con = sqlite3.connect("file:%s?mode=ro" % tmp.replace("\\", "/"), uri=True)
+    return "file:%s?mode=ro" % tmp.replace("\\", "/")
+
+
+def global_settings():
+    """The game's own OPTIONS - the `globalSettings` row of the same database - or {}.
+
+    NOT part of a save: these are shared by every slot and they are what the game itself reads while
+    it plays, which is why the Potential tab opens on the player's real configuration instead of a
+    guess. The row is the base64 of the same XORed JSON the slots hold, WITHOUT the wrapper they have
+    (no `metadata`, no `versionId`), and its keys are all uppercase. An unreadable blob returns {} -
+    not being able to read the options must not stop the window.
+    """
+    try:
+        con = sqlite3.connect(_copy_db(), uri=True)
+        try:
+            row = con.execute(
+                "select value from preference where key = 'globalSettings'").fetchone()
+        finally:
+            con.close()
+        if not row or row[0] is None:
+            return {}
+        raw = row[0] if isinstance(row[0], bytes) else str(row[0]).encode()
+        obj = json.loads(_decrypt(base64.b64decode(raw)).decode("utf-8", "replace"))
+    except Exception:                       # noqa: BLE001 - see above: report nothing, not a crash
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _read_rows():
+    """Every `saveslot_self_*` row, decrypted, newest first.
+
+    Returns a list of (dateTime, slot key, save dict).
+    """
+    con = sqlite3.connect(_copy_db(), uri=True)
     try:
         rows = con.execute(
             "select key, value from preference where key like 'saveslot_self_%'").fetchall()

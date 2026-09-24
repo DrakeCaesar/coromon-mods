@@ -72,6 +72,9 @@ class Group:
         self.kind = kind
         self.members = list(members)
         self.caught = caught
+        # WHICH MEMBERS ARE SHORT, filled in by `groups()` from the save record - an empty list means
+        # the group is caught (see `missing_in`).
+        self.missing_members = []
         # THE LINE'S OWN NAME, passed in rather than taken from `members`: a crimsonite group's members
         # are the FORMS, whose names are "Crimsonite Fiddly", and a checklist that calls the line
         # "Crimsonite Fiddly" reads as a different Coromon instead of the crimsonite kind of Fiddly.
@@ -116,9 +119,20 @@ class Group:
         what a finished line is, with the one difference that the crimsonite skin is a group of its
         own here and is not part of completeness there.
         """
+        return not self.missing_in(owned, skins)
+
+    def missing_in(self, owned, skins):
+        """The MEMBERS this group is short of, in dex order - the user: "I said that if we are
+        missing a member of line - it should still be listed".
+
+        Empty means the group is caught. A potential category is missing on a stage whose own entry
+        lacks it (see `caught_in`), and a crimsonite group is missing on every form of the line while
+        the skin stays locked - the save records that per family, so there is nothing finer to say.
+        """
         if self.kind == dex.CRIMSONITE:
-            return ("%s|%s" % (self.family, dex.CRIMSONITE)) in (skins or ())
-        return all(_owns(owned, uid, self.kind) for uid in self.uids)
+            locked = ("%s|%s" % (self.family, dex.CRIMSONITE)) not in (skins or ())
+            return list(self.members) if locked else []
+        return [mon for mon in self.members if not _owns(owned, mon.uid, self.kind)]
 
 
 def groups(owned=None, skins=None, lines=None):
@@ -133,11 +147,13 @@ def groups(owned=None, skins=None, lines=None):
         for kind in ("A", "B", "C"):
             group = Group(family, kind, stages, False, line_name)
             group.caught = group.caught_in(owned, skins)
+            group.missing_members = group.missing_in(owned, skins)
             out.append(group)
         forms = [form for form in (dex.crimsonite_of(mon.uid) for mon in stages) if form]
         if forms:
             group = Group(family, dex.CRIMSONITE, forms, False, line_name)
             group.caught = group.caught_in(owned, skins)
+            group.missing_members = group.missing_in(owned, skins)
             out.append(group)
     return out
 
@@ -237,34 +253,53 @@ def zones(zone_list, all_groups):
     return rows
 
 
-def lines_missing(zone, groups):
-    """The missing groups FOLDED PER LINE - `[{"name", "kinds", "odds"}]`, best odds first.
+def member_odds(zone, mon, skin=None):
+    """`(min level, max level, share %)` for ONE Coromon in ONE zone, or None when it does not spawn.
 
-    THE UNIT THE USER COUNTS IN, and therefore the unit the pane prints: "standard, potent and perfect
-    kyreptil should count as 1 group ... only if we were missing both potent kyreptil and kyraptor does
-    that count as one missing slot". A line short of three kinds is ONE row naming all three, and
-    `odds` is the best way into that line here - the potential kinds share the same slots, while a
-    crimsonite group has its own, so when that is the only thing missing its own odds are what shows.
+    Per MEMBER rather than per line, because the pane lists the users' missing Coromon by name: a
+    Coromon can have several slots in one zone, so its shares are added up and its levels spanned -
+    the same reading `odds_in` uses for a whole line.
     """
-    folded = []
+    hits = [hit for hit in dex.where(mon.uid, skin) if hit[0].name == zone.name]
+    if not hits:
+        return None
+    return (min(hit[1] for hit in hits), max(hit[2] for hit in hits), sum(hit[3] for hit in hits))
+
+
+def members_missing(zone, groups):
+    """The short lines BROKEN DOWN PER MEMBER - `[{"member", "line", "kinds", "odds"}]`.
+
+    ONE ROW PER COROMON STILL MISSING, which is what the user asked for: "I said that if we are
+    missing a member of line - it should still be listed". A member of a line that spawns in the zone
+    only through its other stages stays listed too, with `odds` None - its line is short, so it is part
+    of what this zone can still finish: catch the kind on a stage that IS here and evolve it up.
+
+    Ordered by the line's best odds here and then by dex order inside a line, so a line's members sit
+    together and the zone's likeliest line comes first.
+    """
+    rows = []
     for group in groups:
-        hit = odds_in(zone, group)
-        for entry in folded:
-            if entry["family"] == group.family:
-                entry["kinds"].append(group.kind)
-                if hit:
-                    entry["hits"].append(hit)
-                break
-        else:
-            folded.append({"family": group.family, "name": group.name, "kinds": [group.kind],
-                           "hits": [hit] if hit else []})
-    for entry in folded:
-        entry["kinds"].sort(key=KINDS.index)
-        entry["odds"] = ((min(hit[0] for hit in entry["hits"]),
-                          max(hit[1] for hit in entry["hits"]),
-                          max(hit[2] for hit in entry["hits"])) if entry["hits"] else None)
-    folded.sort(key=lambda entry: -(entry["odds"][2] if entry["odds"] else 0))
-    return folded
+        for mon in group.missing_members:
+            row = next((r for r in rows if r["member"] is mon), None)
+            if row is None:
+                row = {"member": mon, "line": group.name, "family": group.family, "kinds": [],
+                       "hits": [], "order": len(rows)}
+                rows.append(row)
+            row["kinds"].append(group.kind)
+            hit = member_odds(zone, mon, group.skin)
+            if hit:
+                row["hits"].append(hit)
+    for row in rows:
+        row["kinds"].sort(key=KINDS.index)
+        row["odds"] = ((min(h[0] for h in row["hits"]), max(h[1] for h in row["hits"]),
+                        max(h[2] for h in row["hits"])) if row["hits"] else None)
+    # THE LINE'S BEST ODDS decide the line's position; inside a line, dex order as the groups came in.
+    best = {}
+    for row in rows:
+        value = row["odds"][2] if row["odds"] else 0
+        best[row["family"]] = max(best.get(row["family"], 0), value)
+    rows.sort(key=lambda row: (-best[row["family"]], row["order"]))
+    return rows
 
 
 def odds_in(zone, group):
@@ -309,10 +344,11 @@ def report(owned=None, skins=None):
         lines.append("  %-22s %-22s %d line(s), %d group(s) missing of %d"
                      % (row["zone"].name, row["zone"].map_file,
                         len(row["missing_lines"]), len(row["missing"]), len(row["groups"])))
-        for entry in lines_missing(row["zone"], row["missing"])[:3]:
-            lines.append("      %-16s %-30s %s" % (
-                entry["name"], " / ".join(KIND_NAMES[kind] for kind in entry["kinds"]),
-                "L%s-%s  %.1f%% of the slots here" % entry["odds"] if entry["odds"] else "no slot"))
+        for entry in members_missing(row["zone"], row["missing"])[:6]:
+            lines.append("      %-16s %-30s %-12s %s" % (
+                entry["member"].name, " / ".join(KIND_NAMES[kind] for kind in entry["kinds"]),
+                entry["line"],
+                "L%s-%s  %.1f%% of the slots here" % entry["odds"] if entry["odds"] else "evolve"))
     unlined = unlined_slots(_all_zones())
     if unlined:
         lines.append("spawn slots in no dex line (not counted): %d %s" % (len(unlined), unlined[:4]))

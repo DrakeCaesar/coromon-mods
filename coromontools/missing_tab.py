@@ -70,9 +70,13 @@ RULE = ("A LINE IS COUNTED HERE WHENEVER ANY OF ITS MEMBERS IS MISSING, and it c
         "any of the three potential categories; a crimsonite spawn fills the crimsonite group only.")
 
 
+def _row(text, width):
+    """One left-justified field of the pane's little table, plus its two-space gutter."""
+    return "%-*s  " % (width, text)
+
+
 class MissingTab(QWidget):
     """Spawn zones ordered by how many groups they can still fill."""
-
     zoneChosen = Signal(object)                 # a Zone, handed to the first tab on a double click
 
     def __init__(self, prefs, parent=None):
@@ -191,15 +195,15 @@ class MissingTab(QWidget):
     def _fill(self):
         """Turn the model into table rows, and say in the top row how the dex stands."""
         rows = []
-        self._folded = {}
+        self._members = {}
         for row in self.rows:
             zone = row["zone"]
-            # THE MISSING GROUPS FOLDED PER LINE (`missing.lines_missing`), worked out once per zone:
+            # THE MISSING COROMON OF THIS ZONE, worked out once per zone (`missing.members_missing`):
             # the row needs their level span and best odds, and the pane below prints them - and the
             # two must be the same numbers, so they come from one reading.
-            folded = missing_data.lines_missing(zone, row["missing"])
-            self._folded[zone.name] = folded
-            hits = [entry["odds"] for entry in folded if entry["odds"]]
+            members = missing_data.members_missing(zone, row["missing"])
+            self._members[zone.name] = members
+            hits = [entry["odds"] for entry in members if entry["odds"]]
             rows.append({
                 "area": mapnames.area(zone.map_file),
                 "zone": zone.name,
@@ -263,30 +267,41 @@ class MissingTab(QWidget):
         self.legend_box.addStretch(1)
 
     def detail_text(self, zone):
+        """The zone's headline, then ONE ROW PER COROMON still missing here - see `members_missing`."""
         if zone is None:
             return ""
         row = next((r for r in self.rows if r["zone"].name == zone.name), None)
         if row is None:
             return ""
         missing = row["missing"]
-        lines = ["%s  (%s)   %d line(s) short, %d of %d groups missing"
-                 % (zone.name, mapnames.area(zone.map_file), len(row["missing_lines"]),
-                    len(missing), len(row["groups"])), ""]
-        if not missing:
-            lines.append("  every group this zone can fill is already caught.")
+        members = self._members.get(zone.name, [])
+        lines = ["%s  (%s)   %d line(s) short \u00b7 %d Coromon to catch"
+                 % (zone.name, mapnames.area(zone.map_file), len(row["missing_lines"]), len(members)),
+                 ""]
+        if not members:
+            lines.append("  every Coromon of the lines this zone can fill is already caught.")
             return "\n".join(lines)
-        # ONE ROW PER LINE, with the kinds it is short of named on it - see `missing.lines_missing`
-        # for why, and for what its odds mean.
-        folded = self._folded.get(zone.name, [])
-        width = max(len(entry["name"]) for entry in folded)
-        labels = [" · ".join(SHORT[kind] for kind in entry["kinds"]) for entry in folded]
-        kind_width = max(len(text) for text in labels)
-        for entry, text in zip(folded, labels):
+        # ONE ROW PER MISSING COROMON, which is what the user asked for after seeing a SWAMP_3_A row
+        # that named only the line: "it doesn't list Fibio, which I don't have, but it spawns there",
+        # and then "I said that if we are missing a member of line - it should still be listed". The
+        # LINE is named on every row too (it is the counted slot, and the thing you evolve within), and
+        # the `how` column says whether this Coromon itself spawns here or arrives by evolving one that
+        # does - which is why a member with no slot of its own is listed rather than hidden.
+        width = max(len(entry["member"].name) for entry in members)
+        line_width = max(len(entry["line"]) for entry in members)
+        needs = [" · ".join(SHORT[kind] for kind in entry["kinds"]) for entry in members]
+        need_width = max(len(text) for text in needs)
+        lines.append("  %s%s%s%s  %s" % (
+            _row("Coromon", width), _row("needs", need_width), _row("line", line_width),
+            _row("how", 11), "levels      share"))
+        for entry, text in zip(members, needs):
             hit = entry["odds"]
-            lines.append("  %-*s  %-*s  %s   %s" % (
-                width, entry["name"], kind_width, text,
-                "L%s-%s" % (hit[0], hit[1]) if hit else "-",
-                "%.1f%% of the slots here" % hit[2] if hit else "no wild slot"))
+            lines.append("  %s%s%s%s  %s" % (
+                _row(entry["member"].name, width), _row(text, need_width),
+                _row(entry["line"], line_width),
+                _row("spawns here" if hit else "evolve", 11),
+                "%-8s  %5s" % ("L%s-%s" % (hit[0], hit[1]) if hit else "-",
+                               "%.1f%%" % hit[2] if hit else "-")))
         return "\n".join(lines)
 
     def _jump(self, index):
