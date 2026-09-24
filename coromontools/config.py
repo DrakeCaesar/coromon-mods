@@ -143,6 +143,31 @@ ICON_ZOOM_KEY = "icon_zoom"
 # how that tab is being read at the time, not something to re-tick on every start.
 HIDE_COMPLETE_KEY = "hide_complete"
 
+# HOW BIG A ZONE'S NAME IS DRAWN ON THE MAP: a multiple of one cell, and a ceiling in pixels. The
+# size follows the zoom so the name stays legible when the map is small, but left uncapped it grew
+# past the block it names - MEASURED at 26 px against 12 px cells on a 53x56 map (the user: "the font
+# is way too big"). The selected zone's is one step bigger, which is how it is told apart on the map.
+LABEL_PX = 0.85
+SELECTED_LABEL_PX = 1.15
+LABEL_MAX_PX = 13
+SELECTED_LABEL_MAX_PX = 17
+
+# ... AND THE LEGEND CHIP, the small square under the map panel that names the same zones. A chip is
+# sized to its own TEXT, because the labels are not all one letter: every water zone ends in "WATER"
+# and the event zones in "SPECIAL", and a fixed 22 px square with the window's own font cuts both of
+# them off - the user: "in the legend, labels like WATER don't fit the small square at the top".
+CHIP_FONT_PX = 11
+CHIP_MIN_WIDTH = 20
+CHIP_HEIGHT = 17
+
+# HOW THE MAP PICTURE IS SCALED. The picture is the game's own tiles at 16 px a cell and the pane
+# draws it at `_map_scale` px a cell - usually BELOW 1:1 (a 97x70 map is 1552 px wide against a ~430 px
+# column), and there nearest neighbour tears the tile grid into moire. Zoomed IN past 1:1 the two swap
+# over: the game itself draws its map with integer nearest neighbour, which is what keeps pixel art
+# crisp. So it is the user's choice, ticked on the map panel and remembered like the dex scale.
+MAP_SMOOTH_KEY = "map_smooth"
+MAP_SMOOTH_DEFAULT = True
+
 # A map is FITTED to the pane, but the fit itself is never blown up past this: a small map filling a
 # maximised window is all block, and the patches stop being readable.
 #

@@ -564,23 +564,10 @@ class GrindTab(QWidget):
 
     def _show_map_head(self):
         self.map_head.setText(self.map.headline)
-        while self.legend_box.count():
-            item = self.legend_box.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for (letter, colour, selected) in self.map.legend:
-            chip = QLabel(letter)
-            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            chip.setFixedWidth(22)
-            # the selected zone is the solid one, so the legend shows which chip that is - the
-            # same rule the map draws by, which is why the legend comes from the map's own plan
-            chip.setStyleSheet("background: %s; color: #ffffff; border: %s;"
-                               % (colour, "1px solid #ffffff" if selected else "none"))
-            chip.setToolTip("the selected zone" if selected else "")
-            self.legend_box.addWidget(chip)
-        self.legend_box.addWidget(note("same colour as the tool's map page; the selected zone "
-                                      "is the solid one"), 1)
+        # the chips come from the map's own plan, so the legend says exactly what the map drew
+        mapview.fill_legend(self.legend_box, self.map.legend,
+                            "same colour as the tool's map page; the selected zone "
+                            "wears the white outline")
 
     def show_zone_from_elsewhere(self, zone):
         """Show a zone the Coromon tab asked about: select it if it is listed, always draw it."""

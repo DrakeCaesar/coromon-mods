@@ -253,20 +253,7 @@ class MissingTab(QWidget):
         drew = self.map.set_zone(zone)
         self.map_head.setText("" if drew else self.map.headline)
         self.map_head.setVisible(not drew)
-        while self.legend_box.count():
-            item = self.legend_box.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        for (letter, colour, selected) in self.map.legend:
-            chip = QLabel(letter)
-            chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            chip.setFixedWidth(22)
-            # the selected zone is the solid one - the same rule the map draws by
-            chip.setStyleSheet("background: %s; color: #ffffff; border: %s;"
-                               % (colour, "1px solid #ffffff" if selected else "none"))
-            self.legend_box.addWidget(chip)
-        self.legend_box.addStretch(1)
+        mapview.fill_legend(self.legend_box, self.map.legend)
 
     def detail_text(self, zone):
         """The zone's headline, then ONE ROW PER COROMON still missing here - see `members_missing`."""

@@ -47,7 +47,7 @@ from coromontools import mapview                              # noqa: E402
 from coromontools import missing_tab                          # noqa: E402
 from coromontools import potential_tab                        # noqa: E402
 from coromontools import table as table_mod                  # noqa: E402
-from coromontools.table import ICON, sort_rows                # noqa: E402
+from coromontools.table import ICON, PAYLOAD, sort_rows            # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 from coromontools.widgets import mono_height                # noqa: E402
 
@@ -163,13 +163,33 @@ def main():
               selected["edge"].name() == config.SELECTED_EDGE
               and selected["fill"].alpha() == plan["patches"][0]["fill"].alpha(),
               selected["edge"].name())
+        # ... AND EVERY NAME IS WRITTEN ON A CELL OF ITS OWN BLOCK - the user: "currently we put the
+        # labels in the center of a group - but that could easily be outside of the group - we need to
+        # still put them into the group". The middle of a block's BOX is not in the block when the shape
+        # is an L, a ring, or two patches that only touch at a corner.
+        inside = []
+        named = []
+        for patch in plan["patches"]:
+            for block in patch["blocks"]:
+                cells = {(x, y) for (y, x0, x1) in block["runs"] for x in range(x0, x1)}
+                for (cx, cy, text, _big) in block["labels"]:
+                    inside.append((int(cx), int(cy)) in cells)
+                    named.append((len(cells), bool(block["labels"])))
         check("... whose blocks carry fills, merged outlines and a name each",
               all(block["runs"] and (block["outline"][0] or block["outline"][1])
                   for patch in plan["patches"] for block in patch["blocks"])
-              and all(len(block["labels"]) == 1
-                      for patch in plan["patches"] for block in patch["blocks"]),
-              "%d block(s) in the selected zone"
-              % len(next(p for p in plan["patches"] if p["selected"])["blocks"]))
+              and all(inside),
+              "%d name(s), all on their own block: %s" % (len(inside), all(inside)))
+        # A LONE MARKER CELL IS NOT NAMED: 72 of them over the shipped maps, each one a name as wide as
+        # the text over a single tile - the user: "to reduce the number of labels". The BIGGEST block of
+        # a zone is named whatever its size, so a zone can never come out nameless on the map.
+        check("... and a lone marker cell is named only when it is the zone's biggest block",
+              all(bool(block["labels"]) == (index == 0 or block["cells"] > 1)
+                  for patch in plan["patches"]
+                  for index, block in enumerate(patch["blocks"])),
+              "%d block(s) besides a zone's first: %s"
+              % (sum(len(patch["blocks"]) - 1 for patch in plan["patches"]),
+                 [block["cells"] for patch in plan["patches"] for block in patch["blocks"]][:8]))
         check("... and the map's own tiles are the ground when they could be read",
               plan["picture"] is not None
               and plan["picture"].width() == plan["size"][0] * 16,
@@ -235,26 +255,49 @@ def main():
           all(float(step).is_integer() for step in config.MAP_ZOOM_STEPS)
           and len(set(scales)) == len(scales) and scales == sorted(scales),
           "%s -> %s" % (list(config.MAP_ZOOM_STEPS), [round(value, 2) for value in scales]))
-    # ... AND THE SELECTED ZONE IS WHAT THE PANE SHOWS: scrolled to a corner of the map, picking a row
-    # has to bring that zone's block into the viewport, or the gesture says nothing. NOT "centred on
-    # it": a zone near an edge clamps at that edge, and that is the correct behaviour.
-    grind.map.centre_on((0.01, 0.01))
+    # ... AND THE VIEW STAYS WHERE IT IS, WHATEVER IS PICKED. It used to scroll the picked zone into
+    # sight, which reads well once and is wrong when you are comparing rows: the map jumps under the
+    # cursor on every click - the user: "it looks like it auto scrolls the maps to focus on the
+    # selected area - that should not happen". Zoomed in past x1 (which is the state here, and the only
+    # state in which scrolling is possible at all), scrolled to a corner, the scroll must come back
+    # UNCHANGED.
+    grind.map.centre_on((0.99, 0.99))
     pump(app, 2)
+    corner = (grind.map.horizontalScrollBar().value(), grind.map.verticalScrollBar().value())
     grind.show_zone_from_elsewhere(grind.table.current_payload())
     pump(app, 3)
-    zone_map = grind.map
-    x0, y0, x1, y1 = next(p for p in zone_map._plan["patches"]
-                          if p["selected"])["blocks"][0]["bbox"]
-    scale = zone_map._scale
-    visible = (zone_map.horizontalScrollBar().value(), zone_map.verticalScrollBar().value(),
-               zone_map.horizontalScrollBar().value() + zone_map.viewport().width(),
-               zone_map.verticalScrollBar().value() + zone_map.viewport().height())
-    block = (x0 * scale, y0 * scale, x1 * scale, y1 * scale)
-    check("... and picking a zone scrolls its block into the pane",
-          block[0] < visible[2] and block[2] > visible[0]
-          and block[1] < visible[3] and block[3] > visible[1],
-          "block %s in view %s" % (tuple(round(v) for v in block),
-                                   tuple(round(v) for v in visible)))
+    check("... and picking a zone does not move the view",
+          (grind.map.horizontalScrollBar().value(), grind.map.verticalScrollBar().value()) == corner
+          and corner[1] > 0,
+          "scroll %s -> %s" % (corner, (grind.map.horizontalScrollBar().value(),
+                                        grind.map.verticalScrollBar().value())))
+    # THE SCALING FILTER IS A TICK ON EVERY MAP PANEL AND A REMEMBERED VALUE, like the zoom: the map
+    # picture is drawn far smaller than its own pixels here, where smooth is the only readable choice,
+    # and past 1:1 nearest neighbour ("in game it's scaled integer nearest neighbour") is the crisp one.
+    filter_tick = grind.findChild(mapview.MapFilterCheck)
+    check("every map panel carries a smooth-scaling tick",
+          filter_tick is not None and filter_tick.text() == "smooth"
+          and filter_tick.isChecked() == mapview.smooth()
+          and window.missing.findChild(mapview.MapFilterCheck) is not None,
+          None if filter_tick is None else "%r, checked %s" % (filter_tick.text(),
+                                                               filter_tick.isChecked()))
+    smooth_shot = grind.map.grab().toImage()
+    filter_tick.setChecked(False)
+    pump(app, 3)
+    nearest_shot = grind.map.grab().toImage()
+    check("... and unticking it really resamples the map",
+          not mapview.smooth() and prefs.get(config.MAP_SMOOTH_KEY) is False
+          and smooth_shot != nearest_shot
+          and nearest_shot.size() == smooth_shot.size(),
+          "smooth %s, pref %s, pictures %s"
+          % (mapview.smooth(), prefs.get(config.MAP_SMOOTH_KEY),
+             "differ" if smooth_shot != nearest_shot else "identical"))
+    filter_tick.setChecked(True)
+    pump(app, 3)
+    check("... and ticking it back gives the smooth picture again",
+          mapview.smooth() and prefs.get(config.MAP_SMOOTH_KEY) is True
+          and grind.map.grab().toImage() == smooth_shot,
+          "smooth %s" % mapview.smooth())
     map_bar.fit_button.click()
     pump(app, 3)
     check("'fit' takes it back to x1, and the range closes up again",
@@ -288,6 +331,23 @@ def main():
           sorted(pair[0]) == [(4, 4, 5), (4, 5, 5), (5, 4, 6), (5, 5, 6)]
           and sorted(pair[1]) == [(4, 4, 5), (6, 4, 5)],
           "%d horizontal + %d vertical segment(s)" % (len(pair[0]), len(pair[1])))
+    # CORNER-TOUCHING GROUPS ARE ONE GROUP - the user: "if groups touch by corner - we could consider
+    # that as a single group as well, to reduce the number of labels". MEASURED on the shipped maps:
+    # `oasisCave_3`'s water zone is 367 cells in ONE block where it was three, and one-cell blocks over
+    # every zone went from 128 to 72.
+    check("... and groups that only touch at a corner are one group",
+          len(ez.components({(0, 0), (1, 1)})) == 2
+          and len(ez.components({(0, 0), (1, 1)}, diagonal=True)) == 1
+          and len(ez.components({(0, 0), (1, 1), (2, 0)}, diagonal=True)) == 1,
+          "4-connected: %d, corner-connected: %d"
+          % (len(ez.components({(0, 0), (1, 1)})),
+             len(ez.components({(0, 0), (1, 1)}, diagonal=True))))
+    _m3, _l3, cave3 = ez.zone_map("oasisCave_3")
+    cave_water = ez.zone_blocks(cave3["OASISCAVE_3_WATER"])
+    check("... which is what turns a scattered water shape into one block",
+          len(cave_water) == 1 and len(cave_water[0]) == 367,
+          "%d cell(s) -> %d block(s)"
+          % (sum(len(b) for b in cave_water), len(cave_water)))
     square = ez.block_outline({(4, 4), (5, 4), (4, 5), (5, 5)})
     check("... and a 2x2 block has no line through the middle of it",
           len(square[0]) == 4 and len(square[1]) == 4
@@ -296,6 +356,121 @@ def main():
           "%d horizontal + %d vertical segment(s)" % (len(square[0]), len(square[1])))
     check("the tiles are composited once and then reused",
           maptiles.picture("amishRoute") is maptiles.picture("amishRoute"))
+
+    # A MARKER WHOSE OWN CELL IS NOT ON ITS GRASS STILL FINDS THE PATCH IT NAMES. The tile under a
+    # marker comes from its `tileLayer` layer, and failing that from the nearest layer of the same
+    # family, and failing THAT from the cells around it - because a marker is placed ON a patch and is
+    # often standing on something else inside or beside it. This is the map the user reported: on
+    # Vermeer Grotto 3 the grass at the top came out as the single tile the marker sits on, because
+    # (35,12) says "level 1" while its grass is one layer up, (20,29) says "level 2" while its grass is
+    # one layer down, and (33,12) is one cell to the RIGHT of its 43-cell region.
+    _m3, _l3, cave3 = ez.zone_map("oasisCave_3")
+    cave_grass = cave3["OASISCAVE_3"]
+    patched = set().union(*cave_grass["patches"])
+    check("a marker whose own cell is not on its grass still finds the patch",
+          not cave_grass["unplaced"]
+          and sorted(len(p) for p in cave_grass["patches"]) == [12, 24, 29, 30, 36, 43, 44, 46]
+          and {(35, 12), (20, 29)} <= patched,
+          "%d patch(es) %s, %d marker(s) left over %s"
+          % (len(cave_grass["patches"]), sorted(len(p) for p in cave_grass["patches"]),
+             len(cave_grass["unplaced"]),
+             [why for (_x, _y, why) in cave_grass["unplaced"]]))
+    # ... AND THE WHOLE GRASS OF A MAP IS MARKED BY ONE ZONE OR ANOTHER, which is the check that says
+    # no area was left out: every cell of the grass tileset on a `level*` layer has to be inside some
+    # zone's patch (or be one of its bare marker cells), and no patch may sit anywhere else - a zone
+    # that marks the ROCK is the other half of the same complaint: "in dojo grounds, one area is
+    # marked at the rocks, not the grass". `dojoGrounds` is the map that has both: (27,64) stands on a
+    # `rockWalls` cell in the middle of a 74-cell grass region, and its zone also has six markers
+    # plainly on grass, so the rock is not what the zone is made of.
+    def grass_of(map_name):
+        """{(x, y)} where any `level*` layer holds a tile of the grass tilesets."""
+        map_d, map_layers, map_sets = ez.map_parts(ez.find_map_file(map_name))
+        ranges = [(s["lo"], s["hi"]) for s in map_sets if s["name"] in ("grass", "grass_burned")]
+        cells = set()
+        for layer_name, layer in map_layers.items():
+            if not layer_name.startswith("level"):
+                continue
+            data = layer["data"]
+            for y in range(map_d["height"]):
+                for x in range(map_d["width"]):
+                    gid = data[y * map_d["width"] + x]
+                    if any(lo <= gid < hi for (lo, hi) in ranges):
+                        cells.add((x, y))
+        return cells
+
+    for map_name, zones_on_it in (("oasisCave_3", ["OASISCAVE_3"]),
+                                  ("dojoGrounds", ["DOJOGROUNDS_A", "DOJOGROUNDS_B"])):
+        grass = grass_of(map_name)
+        marked = set()
+        _mm, _ll, entries = ez.zone_map(map_name)
+        for zone_name in zones_on_it:
+            entry = entries[zone_name]
+            if entry["patches"]:
+                marked |= set().union(*entry["patches"])
+            marked |= {(x, y) for (x, y, _why) in entry["unplaced"]}
+        left = grass - marked
+        check("every grass cell of %s is marked, and nothing but grass is" % map_name,
+              not left and not (marked - grass),
+              "%d grass cell(s), %d marked, %d left over, %d wrong "
+              "(patches %s)" % (len(grass), len(marked), len(left), len(marked - grass),
+                                [sorted((len(p) for p in entries[z]["patches"]), reverse=True)
+                                 for z in zones_on_it]))
+
+    # ... AND IT IS THE GRASS IT FOUND, NOT THE ROCK UNDER IT: `floor` is a different family of layer
+    # names, so a `level 1` marker never falls back to the wall tileset the floor is drawn from.
+    _m4, layers4, sets4 = ez.map_parts(ez.find_map_file("oasisCave_3"))
+    grass_set = next(s for s in sets4 if s["name"] == "grass")
+    level2 = layers4["level 2"]["data"]
+    found = next(tiles for tiles in cave_grass["patches"] if (35, 12) in tiles)
+    check("... and what it found is the grass, not the rock the map is built on",
+          all(grass_set["lo"] <= level2[y * _m4["width"] + x] < grass_set["hi"]
+              for (x, y) in found),
+          "%d cell(s), every one a grass tile of `level 2`" % len(found))
+
+    # A LEGEND CHIP IS WIDE ENOUGH FOR ITS OWN LABEL. "WATER" is five letters and "SPECIAL" seven,
+    # against a fixed 22 px square wearing the window's own font - which cut both of them off (the
+    # user: "in the legend, labels like WATER don't fit the small square at the top"). The chip is
+    # measured from its text now, and the font is the small print's own size.
+    keep_zone = grind.table.current_payload()
+    water_zone = next((row.get(PAYLOAD) for row in grind.table.model_.rows
+                       if row.get(PAYLOAD) is not None
+                       and row[PAYLOAD].name.endswith("_WATER")), None)
+    grind.show_zone(water_zone)
+    pump(app, 3)
+    water_chip = next((chip for chip in grind.legend_row.findChildren(QLabel)
+                       if chip.text() == "WATER"), None)
+    check("a legend chip fits the label in it",
+          water_chip is not None
+          and water_chip.width() >= water_chip.fontMetrics().horizontalAdvance(water_chip.text()) + 2
+          and water_chip.height() == config.CHIP_HEIGHT
+          and water_chip.font().pixelSize() == config.CHIP_FONT_PX,
+          None if water_chip is None else "%s in %dx%d px, text %d px, font %d"
+          % (water_chip.text(), water_chip.width(), water_chip.height(),
+             water_chip.fontMetrics().horizontalAdvance(water_chip.text()),
+             water_chip.font().pixelSize()))
+    grind.show_zone(keep_zone)
+    pump(app, 2)
+
+    # EVERY TERRAIN LAYER IS DRAWN, WHATEVER IT IS CALLED. The layers used to be picked by a NAME
+    # allow-list (`floor*`, `level*`, `aboveFloor*`), which silently left out every layer the game does
+    # not name that way - the user: "some sprites are still missing from some of the maps". MEASURED
+    # OFF THE SHIPPED MAPS with that rule: iceMountain drew 5597 of its 11900 cells (its `mountain 1`
+    # and `mountain 2` and `trees` layers were never considered), icePeak 3139 of 6794, pyramid_f4 1625
+    # of 4500 (no `innerWalls`, no `outerWalls`), templeDungeon_03 427 of 744 - 13588 cells missing
+    # across 14 of the 69 maps, and none at all on the other 55. They are picked by the GROUP they sit
+    # in now (`maptiles.DRAWN_GROUPS`), and every one of those maps fills every cell it has.
+    mountain_map, _layers, _sets = ez.map_parts(ez.find_map_file("iceMountain"))
+    drawn = maptiles.layer_names(mountain_map)
+    check("a map is drawn from every terrain layer it has, called what it may",
+          all(name in drawn for name in ("mountain 1", "mountain 2", "trees", "level 1"))
+          and not any(name.startswith("abovePlayer") for name in drawn),
+          "%d layer(s): %s" % (len(drawn), ", ".join(drawn[:4])))
+    image = maptiles.picture("iceMountain").toImage()
+    step_x, step_y = mountain_map["tilewidth"], mountain_map["tileheight"]
+    empty = [(x, y) for y in range(mountain_map["height"]) for x in range(mountain_map["width"])
+             if not image.pixelColor(x * step_x + step_x // 2, y * step_y + step_y // 2).alpha()]
+    check("... and every cell of that map comes out filled",
+          not empty, "%d empty cell(s) of %d" % (len(empty), mountain_map["width"] * mountain_map["height"]))
 
     # sorting: the numeric column opens high-first, then flips, then comes back
     # IT OPENS ON XP PER FIGHT NOW, because that is the question this tab exists to answer - the user:

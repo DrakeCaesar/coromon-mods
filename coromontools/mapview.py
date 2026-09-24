@@ -28,15 +28,18 @@ of them would be a bug (see `set_zoom`).
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import (QAbstractScrollArea, QFrame, QHBoxLayout, QLabel, QPushButton,
-                               QSizePolicy, QWidget)
+from PySide6.QtWidgets import (QAbstractScrollArea, QCheckBox, QFrame, QHBoxLayout, QLabel,
+                               QPushButton, QSizePolicy, QWidget)
 
 import encounter_zones as ez
 
 from . import mapnames, maptiles
-from .config import (EDGE_WIDTH, MAP_MAX_SCALE, MAP_ZOOM_DEFAULT, MAP_ZOOM_KEY, MAP_ZOOM_STEPS,
-                     PATCH_ALPHA, SELECTED_EDGE, SELECTED_EDGE_WIDTH, SPOTS_SHOWN)
+from .config import (CHIP_FONT_PX, CHIP_HEIGHT, CHIP_MIN_WIDTH, EDGE_WIDTH, LABEL_MAX_PX,
+                     LABEL_PX, MAP_MAX_SCALE, MAP_SMOOTH_DEFAULT, MAP_SMOOTH_KEY,
+                     MAP_ZOOM_DEFAULT, MAP_ZOOM_KEY, MAP_ZOOM_STEPS, PATCH_ALPHA, SELECTED_EDGE,
+                     SELECTED_EDGE_WIDTH, SELECTED_LABEL_MAX_PX, SELECTED_LABEL_PX, SPOTS_SHOWN)
 from .theme import FIELD, MAP_GROUND
+from .widgets import note
 
 # HOW WIDE THE -/+ BUTTONS ARE, in pixels: the theme pads a button 12 px a side, so a button is given
 # its own zero padding and a fixed size, exactly like the Database tab's dex-zoom pair.
@@ -44,24 +47,47 @@ ZOOM_BUTTON_WIDTH = 22
 
 
 class _Zoom(QObject):
-    """The window's map zoom: one value, every map watching it.
+    """The window's map state: one zoom and one scaling filter, every map watching them.
 
-    A module-level value rather than a parameter threaded through three tabs, because it IS one value -
-    the map is drawn in three places and they must agree. `ui_smoke` checks that a step moves all of
-    them.
+    Module-level values rather than parameters threaded through three tabs, because they ARE one
+    value each - the map is drawn in three places and they must agree. `ui_smoke` checks that a step
+    moves all of them.
     """
 
     changed = Signal(float)
+    filter_changed = Signal(bool)
 
 
 _ZOOM = _Zoom()
 _ZOOM_VALUE = MAP_ZOOM_DEFAULT
+# ... AND THE SCALING FILTER, on by default: the picture is usually drawn smaller than its own pixels
+# (see `config.MAP_SMOOTH_*`), where nearest neighbour is moire and smooth is the readable choice.
+_SMOOTH = MAP_SMOOTH_DEFAULT
 _MAPS = []          # every live ZoneMap, so one step redraws them all
 
 
 def zoom():
     """The current zoom factor: 1.0 is the map fitted to the pane."""
     return _ZOOM_VALUE
+
+
+def smooth():
+    """Whether the map is scaled with the smooth filter (True) or nearest neighbour (False)."""
+    return _SMOOTH
+
+
+def set_smooth(enabled):
+    """Turn the filter on or off for every map and redraw them, without touching the view.
+
+    A REDRAW, not a re-plan: the blocks are geometry and do not move - only the pixels of the map
+    picture under them are resampled.
+    """
+    global _SMOOTH
+    _SMOOTH = bool(enabled)
+    for widget in list(_MAPS):
+        widget.viewport().update()
+    _ZOOM.filter_changed.emit(_SMOOTH)
+    return _SMOOTH
 
 
 def set_zoom(factor):
@@ -149,10 +175,10 @@ class MapZoomBar(QWidget):
 
 
 def head_row(head, prefs=None):
-    """The row every map panel wears: its caption (elastic) and the zoom controls on the right.
+    """The row every map panel wears: its caption (elastic), the zoom controls and the filter tick.
 
     The caption is the map's own headline, which a tab shows only when the map could NOT draw - so it
-    is allowed to be narrower than its text and the zoom bar keeps its place either way.
+    is allowed to be narrower than its text and the controls keep their place either way.
     """
     row = QWidget()
     box = QHBoxLayout(row)
@@ -160,7 +186,86 @@ def head_row(head, prefs=None):
     head.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
     box.addWidget(head, 1)
     box.addWidget(MapZoomBar(prefs))
+    box.addWidget(MapFilterCheck(prefs))
     return row
+
+
+class MapFilterCheck(QCheckBox):
+    """The scaling-filter tick every map panel wears, and the state it writes back.
+
+    A CHECKBOX RATHER THAN A BUTTON because it is a state and not an action, and its tooltip says what
+    each state is for: the picture is usually drawn SMALLER than its own pixels, where the smooth
+    filter is the readable one, and blown up past 1:1 the nearest neighbour the game itself draws with
+    is the crisp one.
+    """
+
+    def __init__(self, prefs=None, parent=None):
+        super().__init__("smooth", parent)
+        self.prefs = prefs
+        self.setToolTip("scale the map with the smooth filter (unticked: nearest neighbour, which is "
+                        "what the game itself draws with, and crisper when zoomed in past x1)")
+        self.setChecked(smooth())
+        self.toggled.connect(self._changed)
+        _ZOOM.filter_changed.connect(self.setChecked)
+
+    def _changed(self, on):
+        set_smooth(on)
+        if self.prefs is not None:
+            self.prefs.set(MAP_SMOOTH_KEY, on)
+
+
+def fill_legend(box, legend, note_text=None):
+    """Fill a legend row from a map's `legend`: one chip per zone, then the small print.
+
+    THE CHIP IS SIZED TO ITS OWN TEXT. The labels are not all one letter - every water zone ends in
+    "WATER" and the event zones in "SPECIAL" - and a fixed 22 px square wearing the window's font cut
+    both of them off (the user: "in the legend, labels like WATER don't fit the small square at the
+    top"). The chip's font is the small print's own size, and the square stays a square for a single
+    letter because that is what the letters look like on the map.
+
+    One place for all three tabs, so a chip cannot be a different size in each of them.
+    """
+    while box.count():
+        item = box.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widget.deleteLater()
+    for (letter, colour, selected) in legend:
+        chip = QLabel(letter)
+        chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font = chip.font()
+        font.setPixelSize(CHIP_FONT_PX)
+        font.setBold(True)
+        chip.setFont(font)
+        chip.setFixedSize(max(CHIP_MIN_WIDTH, chip.fontMetrics().horizontalAdvance(letter) + 8),
+                          CHIP_HEIGHT)
+        # the selected zone's chip wears the same white border the selected block is drawn with, which
+        # is the only thing telling it apart now that every fill is translucent
+        chip.setStyleSheet("background: %s; color: #ffffff; border: %s;"
+                           % (colour, "1px solid %s" % SELECTED_EDGE if selected else "none"))
+        chip.setToolTip("the selected zone" if selected else "")
+        box.addWidget(chip)
+    if note_text:
+        box.addWidget(note(note_text), 1)
+    else:
+        box.addStretch(1)
+
+
+def label_cell(block):
+    """The cell of `block` to write the zone's name on: the one nearest the middle of its box.
+
+    THE MIDDLE OF THE BOUNDING BOX IS OFTEN NOT IN THE BLOCK. An L, a ring, or two patches that only
+    touch at a corner all leave the box's centre in a hole, and the name then floats over the map with
+    no zone under it - the user: "currently we put the labels in the center of a group - but that could
+    easily be outside of the group - we need to still put them into the group". The nearest CELL is
+    always inside it, and ties are broken by the cell's own corner so the answer is stable.
+    """
+    xs = [tile[0] for tile in block]
+    ys = [tile[1] for tile in block]
+    cx = (min(xs) + max(xs) + 1) / 2.0
+    cy = (min(ys) + max(ys) + 1) / 2.0
+    return min(block, key=lambda tile: ((tile[0] + 0.5 - cx) ** 2 + (tile[1] + 0.5 - cy) ** 2,
+                                        tile[1], tile[0]))
 
 
 class ZoneMap(QAbstractScrollArea):
@@ -247,23 +352,14 @@ class ZoneMap(QAbstractScrollArea):
         self.legend = [(name.rsplit("_", 1)[-1], ez.colour_for(name), name == zone.name)
                        for name in sorted(drawn)]
         self._update_scrollbars()
-        # A NEW ZONE SCROLLS INTO VIEW. Zoomed in, the pane shows one corner of the map, and the whole
-        # point of picking a row is to see WHERE that zone is - at x1 this is a no-op, because the
-        # whole map is on screen and the ranges are empty.
-        self.centre_on(self._selected_centre())
+        # THE VIEW DOES NOT MOVE WHEN THE SELECTION DOES. It used to scroll the picked zone's own
+        # block into sight, which reads well once and is wrong the moment you are comparing rows: the
+        # map jumps under the cursor on every click. The scroll is the user's now - the zoom buttons
+        # keep the view centred on what it was showing, and that is the only thing that moves it
+        # (the user: "it looks like it auto scrolls the maps to focus on the selected area - that
+        # should not happen").
         self.viewport().update()
         return True
-
-    def _selected_centre(self):
-        """The middle of the selected zone's biggest block, as a fraction of the map."""
-        if not self._plan:
-            return (0.0, 0.0)
-        for patch in self._plan["patches"]:
-            if patch["selected"] and patch["blocks"]:
-                x0, y0, x1, y1 = patch["blocks"][0]["bbox"]
-                width, height = self._plan["size"]
-                return ((x0 + x1) / 2.0 / width, (y0 + y1) / 2.0 / height)
-        return (0.0, 0.0)
 
     # ------------------------------------------------------------------ planning
     def _plan_map(self, m, layers, drawn, zone):
@@ -280,17 +376,25 @@ class ZoneMap(QAbstractScrollArea):
             fill.setAlpha(PATCH_ALPHA)
             edge = QColor(SELECTED_EDGE if selected else ez.colour_for(name))
             blocks = []
-            for block in ez.zone_blocks(other):
+            for index, block in enumerate(ez.zone_blocks(other)):
                 horizontal, vertical = ez.block_outline(block)
                 xs = [tile[0] for tile in block]
                 ys = [tile[1] for tile in block]
-                # EVERY BLOCK IS NAMED, so a zone that merges into several of them (a water zone's 41)
-                # is readable all over rather than being in one place and implied elsewhere.
-                labels = [((min(xs) + max(xs) + 1) / 2.0, (min(ys) + max(ys) + 1) / 2.0,
-                           name.rsplit("_", 1)[-1], selected)]
+                # EVERY AREA IS NAMED, so a zone that merges into several of them (a water zone's 41)
+                # is readable all over rather than being in one place and implied elsewhere. A BLOCK OF
+                # ONE CELL IS A MARKER, NOT AN AREA - and there are 72 of those over the shipped maps,
+                # each of them a name as wide as the text on a single tile - so only the biggest block
+                # is named whatever its size (a zone must never be nameless) and the rest have to be
+                # worth naming: the user: "to reduce the number of labels".
+                cell = label_cell(block)
+                labels = [(cell[0] + 0.5, cell[1] + 0.5, name.rsplit("_", 1)[-1], selected)] \
+                    if index == 0 or len(block) > 1 else []
                 blocks.append({"runs": ez.runs_by_row(ez.cells_by_row(block)),
                                "outline": (horizontal, vertical), "labels": labels,
-                               # the block's box in cells, for the caller that has to scroll to it
+                               # how many cells it is, and the box it occupies in cells - the first
+                               # is what decides whether a lone marker cell is worth naming, the
+                               # second is what the caller scrolls to
+                               "cells": len(block),
                                "bbox": (min(xs), min(ys), max(xs) + 1, max(ys) + 1)})
             patches.append({"fill": fill, "edge": edge, "blocks": blocks, "selected": selected})
         # unselected first, so the selected zone is never overdrawn - its white edge has to survive a
@@ -410,10 +514,10 @@ class ZoneMap(QAbstractScrollArea):
         picture = plan["picture"]
         if picture is not None:
             # THE MAP'S OWN TILES, drawn into the same rect the zone rectangles are placed in, so
-            # the two cannot drift apart. Smooth scaling because the map is usually much larger than
-            # the pane (a 97x70 map at 16 px a tile is 1552 px wide against ~430 px of column) and
-            # nearest-neighbour at that ratio tears the tile grid into moire.
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            # the two cannot drift apart. WHICH FILTER is the user's choice and it matters: the map is
+            # usually drawn much smaller than its own pixels, where smooth is the only readable one,
+            # and past 1:1 nearest neighbour is what the game itself draws with (see `smooth()`).
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, smooth())
             painter.drawPixmap(area, picture, QRectF(picture.rect()))
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
         else:
@@ -456,11 +560,16 @@ class ZoneMap(QAbstractScrollArea):
                 painter.drawLine(QPointF(x * scale, y0 * scale), QPointF(x * scale, y1 * scale))
 
     def _paint_label(self, painter, label, scale):
-        """The zone's letter, centred on the block it names."""
+        """The zone's letter, centred on the cell of its block it names."""
         cx, cy, text, big = label
         font = QFont("Consolas")
         font.setBold(True)
-        font.setPixelSize(max(7, int(scale * (2.2 if big else 1.4))))
+        # A MARKER, NOT A CAPTION: the size follows the zoom so the name stays legible on a small map,
+        # but it stops growing long before the block it names does - uncapped, the selected zone's name
+        # came out 26 px tall against 12 px cells (the user: "the font is way too big").
+        wanted = scale * (SELECTED_LABEL_PX if big else LABEL_PX)
+        font.setPixelSize(int(max(7.0, min(wanted, SELECTED_LABEL_MAX_PX if big
+                                           else LABEL_MAX_PX))))
         painter.setFont(font)
         painter.setPen(QColor("#ffffff"))
         metrics = painter.fontMetrics()

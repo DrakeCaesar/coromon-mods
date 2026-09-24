@@ -15,14 +15,35 @@ spread across the route exactly where distinct grass areas are. It is exact for 
 which are what the question is about, because grass.json is a 16 px tileset on a 16 px grid, so one
 tile is one map cell.
 
+WHICH TILE THAT IS takes three steps, because a marker's own cell is often not on its grass at all
+(`marker_tile`, `off_layer`, `nearest_tile`):
+
+  1. the tile on the layer the marker's `tileLayer` property names - and ONLY IF it is on the zone's
+     own terrain (see below). The property is an author's note and it is sometimes stale;
+  2. otherwise the nearest layer of the same FAMILY (`level 1` -> `level 2`, never `floor`) that has
+     a tile there - `oasisCave_3`'s (35,12) says "level 1" while its grass is one layer up;
+  3. otherwise the nearest cell within `NEIGHBOUR_RADIUS` that holds the zone's own terrain, because
+     markers are placed ON a patch and the cell under them can be the rock in the middle of it -
+     `dojoGrounds` (27,64) sits on a `rockWalls` cell inside a 74-cell grass region, and (7,9) sits
+     one tile ABOVE its 11-cell region.
+
+THE ZONE'S OWN TERRAIN is the tileset the most of its markers sit on (`_own_tilesets`), which is what
+keeps a stray marker off the rock: `dojoGrounds` A has six markers on `grass` and one on `rockWalls`,
+so the rock one is looked for elsewhere - before this rule that single marker drew a five-cell patch
+of rock as if it were grass (the user: "in dojo grounds, one area is marked at the rocks, not the
+grass"). A zone whose markers name no tile layer at all (every `_WATER` zone) has no terrain to look
+for and keeps its bare cells.
+
 WHERE IT DOES NOT APPLY, and the output says so rather than guessing:
   * a tileset whose tiles are bigger than the map grid (48 px trees over 16 px cells): one tile
     spans several cells, so a run of same-tileset cells is not a region.
   * water and cave markers, which carry NO `tileLayer` property at all, and often sit on a tile that
     is empty in every layer. Those are kept as bare CELLS, which is not a failure: a water zone marks
     its area with hundreds of them (`SWAMP_3_WATER` 409, `WATERROUTE_4_WATER` 170), so the cells ARE
-    the shape - `zone_blocks` merges them 4-connected into the blocks the window draws (170 cells ->
-    two blocks, 409 -> 41), and `block_outline` gives each block the border that follows it.
+    the shape - `zone_blocks` merges them, together with whatever patches resolved, into the blocks the
+    window draws (170 cells -> two blocks, 409 -> 41), CORNER-TOUCHING CELLS INCLUDED so that two
+    patches meeting at a corner are one block with one name on it, and `block_outline` gives each
+    block the border that follows it.
 
     python encounter_zones.py                 # writes encounter_zones.html
     python encounter_zones.py ICE             # only areas whose name contains ICE
@@ -31,6 +52,7 @@ The output is one self-contained page: a map per area with the patches coloured 
 the encounter table for each zone under it.
 """
 
+import collections
 import glob
 import html
 import json
@@ -45,6 +67,12 @@ OUT = os.path.join(BASE, "encounter_zones.html")
 
 TILE_PX = 6          # drawn size of one map cell
 PAD = 6
+
+# HOW FAR A MARKER MAY SIT FROM THE PATCH IT NAMES, in cells. Markers are placed ON a patch, but not
+# always on a tile OF it: `dojoGrounds` (27,64) is a marker in the middle of a 74-cell grass region
+# standing on the rock inside it, and (7,9) is one tile above its own 11-cell region. Measured over
+# the 69 maps the zones name, every marker that needed this was within two cells of its patch.
+NEIGHBOUR_RADIUS = 3
 
 
 # ==============================================================================================
@@ -160,35 +188,143 @@ def patch_tiles(layers, m, seed, tileset):
     return seen
 
 
+def family_word(name):
+    """The first word of a layer's name: `level 1` and `level 2` are one family, `floor` is not."""
+    return (name or "").split(" ")[0].split("|")[0]
+
+
+def tileset_for(sets, gid):
+    """The tileset `gid` belongs to, or None when no range covers it."""
+    return next((s for s in sets if s["lo"] <= gid < s["hi"]), None)
+
+
+def marker_tile(layers, m, sets, tx, ty, names, allowed=None):
+    """`(layer name, gid)` for the first of `names` that holds a tile at that cell, or `(None, 0)`.
+
+    `allowed` is a set of TILESET NAMES: a tile whose tileset is not in it is skipped, which is what
+    keeps a marker off the rock it happens to stand on. An empty `allowed` means "anything goes",
+    which is what a zone with no known terrain needs.
+    """
+    if not 0 <= tx < m["width"] or not 0 <= ty < m["height"]:
+        return None, 0
+    for name in names:
+        layer = layers.get(name)
+        if layer is None:
+            continue
+        gid = layer["data"][ty * m["width"] + tx]
+        if not gid:
+            continue
+        tileset = tileset_for(sets, gid)
+        if allowed and (tileset is None or tileset["name"] not in allowed):
+            continue
+        return name, gid
+    return None, 0
+
+
+def off_layer(order, layer_name):
+    """The layers to fall back on for a marker on `layer_name`: its family, NEAREST FIRST.
+
+    Nearest by the map's own draw order, below before above, and the family is the first word of the
+    name - so a `level 1` marker looks at `level 2`, `level 3`, ... and never at `floor` or `trees`.
+    """
+    family = family_word(layer_name)
+    names = [name for name in order if name != layer_name and family_word(name) == family]
+    if layer_name in order:
+        home = order.index(layer_name)
+        names.sort(key=lambda name: (abs(order.index(name) - home), order.index(name)))
+    return names
+
+
+def nearest_tile(layers, m, sets, tx, ty, names, wanted, radius=NEIGHBOUR_RADIUS):
+    """The nearest cell within `radius` holding the zone's own terrain on one of `names`.
+
+    Returns `(x, y, layer name, gid)` or None, searching ring by ring out from the marker so the
+    closest tile wins, and top-left first within a ring so the answer never wanders between runs.
+    """
+    for distance in range(1, radius + 1):
+        ring = sorted((tx + dx, ty + dy)
+                      for dx in range(-distance, distance + 1)
+                      for dy in range(-distance, distance + 1)
+                      if max(abs(dx), abs(dy)) == distance)
+        for (x, y) in ring:
+            name, gid = marker_tile(layers, m, sets, x, y, names, allowed=wanted)
+            if gid:
+                return x, y, name, gid
+    return None
+
+
+def own_tilesets(seeds, layers, m, sets):
+    """The tilesets a zone is really on: those the MOST of its markers sit on.
+
+    BY COUNT, not by "all of them": `dojoGrounds` A marks six patches on the `grass` tileset and one
+    on `rockWalls`, and that one marker is the one whose cell is the rock inside a grass patch. Taking
+    every named tileset as the zone's terrain would let it keep drawing five cells of rock as grass
+    (the user: "in dojo grounds, one area is marked at the rocks, not the grass"). A tie keeps every
+    tileset that tied, so a zone split evenly between two kinds of ground is left alone.
+    """
+    counted = collections.Counter()
+    for (tx, ty, layer_name) in seeds:
+        if not layer_name:
+            continue
+        layer = layers.get(layer_name)
+        if layer is None:
+            continue
+        tileset = tileset_for(sets, layer["data"][ty * m["width"] + tx])
+        if tileset is not None:
+            counted[tileset["name"]] += 1
+    if not counted:
+        return set()
+    most = max(counted.values())
+    return {name for name, count in counted.items() if count == most}
+
+
 def zone_patches(path):
     """(map, layers, {zone: {"patches": [set(tiles)], "unplaced": [...], "note": str|None}})"""
     m, marks = markers(path)
     _, layers, sets = map_parts(path)
+    order = [l["name"] for l in walk_layers(m.get("layers", [])) if l.get("type") == "tilelayer"]
     out = {}
     for zone, seeds in marks.items():
         entry = {"patches": [], "unplaced": [], "note": None}
+        own = own_tilesets(seeds, layers, m, sets)
         for (tx, ty, layer_name) in seeds:
-            layer = layers.get(layer_name) if layer_name else None
-            if layer is None:
+            if not layer_name:
                 entry["unplaced"].append((tx, ty, "no tileLayer named"))
                 continue
-            gid = layer["data"][ty * m["width"] + tx] if 0 <= tx < m["width"] \
-                and 0 <= ty < m["height"] else 0
-            ts = next((s for s in sets if s["lo"] <= gid < s["hi"]), None)
+            cell = (tx, ty)
+            name, gid = marker_tile(layers, m, sets, tx, ty, [layer_name], allowed=own)
+            if not gid:
+                # ... the family layers, and then the cells AROUND the marker (see `nearest_tile`)
+                family = off_layer(order, layer_name)
+                name, gid = marker_tile(layers, m, sets, tx, ty, family, allowed=own)
+                if not gid and own:
+                    # THE MARKER'S OWN LAYER IS SEARCHED TOO, and first: the rock it may be standing
+                    # on is a cell INSIDE the patch, so the grass is one cell away ON THE SAME LAYER -
+                    # `dojoGrounds` (27,64) is inside a 74-cell level-1 grass region.
+                    near = nearest_tile(layers, m, sets, tx, ty,
+                                        [layer_name] + family, own)
+                    if near is not None:
+                        tx, ty, name, gid = near
+            if not gid:
+                why = "empty tile on %s" % layer_name if cell == (tx, ty) \
+                    else "on other terrain"
+                entry["unplaced"].append((cell[0], cell[1], why))
+                continue
+            ts = tileset_for(sets, gid)
             if ts is None:
-                entry["unplaced"].append((tx, ty, "empty tile on %s" % layer_name))
+                entry["unplaced"].append((cell[0], cell[1], "empty tile on %s" % name))
                 continue
             if ts["tw"] != m["tilewidth"] or ts["th"] != m["tileheight"]:
                 entry["note"] = ("%s tiles are %sx%s on a %sx%s grid, so a region cannot be read "
                                  "off the grid" % (ts["name"], ts["tw"], ts["th"],
                                                    m["tilewidth"], m["tileheight"]))
-                entry["unplaced"].append((tx, ty, "multi-cell tile"))
+                entry["unplaced"].append((cell[0], cell[1], "multi-cell tile"))
                 continue
-            tiles = patch_tiles(layers, m, (tx, ty, layer_name), ts)
-            if tiles:
+            tiles = patch_tiles(layers, m, (tx, ty, name), ts)
+            if tiles and set(tiles) not in [set(p) for p in entry["patches"]]:
                 entry["patches"].append(tiles)
-            else:
-                entry["unplaced"].append((tx, ty, "not on %s" % ts["name"]))
+            elif not tiles:
+                entry["unplaced"].append((cell[0], cell[1], "not on %s" % ts["name"]))
         out[zone] = entry
     return m, layers, out
 
@@ -252,14 +388,22 @@ def cells_by_row(tiles):
     return rows
 
 
-def components(cells):
-    """The 4-connected groups of a cell set - one BLOCK per group.
+def components(cells, diagonal=False):
+    """The connected groups of a cell set - one BLOCK per group.
 
     WHY IT IS NEEDED, measured on the shipped maps: a zone whose markers name no tile layer marks its
     area with MANY cells - `SWAMP_3_WATER` has 409 of them, `WATERROUTE_4_WATER` 170 - and those cells
     ARE the shape. Drawn one at a time they are a field of dots; merged they are the body of water the
     player means by "the water zone" (409 cells -> 41 blocks, 170 -> 2, `DESERTTOWN_WATER`'s 96 -> 1).
+
+    `diagonal` also joins groups that only TOUCH BY A CORNER, which is how the window draws them: two
+    patches of the same zone meeting at a corner are one area to the player, and each of them would
+    otherwise carry its own copy of the zone's name (the user: "if groups touch by corner - we could
+    consider that as a single group as well, to reduce the number of labels").
     """
+    steps = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+    if diagonal:
+        steps += [(1, 1), (1, -1), (-1, 1), (-1, -1)]
     todo = set(cells)
     out = []
     while todo:
@@ -267,7 +411,8 @@ def components(cells):
         block, stack = {seed}, [seed]
         while stack:
             x, y = stack.pop()
-            for neighbour in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            for step in steps:
+                neighbour = (x + step[0], y + step[1])
                 if neighbour in todo:
                     todo.discard(neighbour)
                     block.add(neighbour)
@@ -280,10 +425,16 @@ def zone_blocks(entry):
     """The merged blocks a zone is drawn as, biggest first - its patches and its bare cells together.
 
     A patch is already a connected run of the zone's own tileset (`patch_tiles`), and a marker that
-    never resolved to one is a cell of the shape itself, so the union of the two split into 4-connected
-    groups is the zone as it should be drawn: `waterRoute_4`'s water becomes two blocks (151 and 19
-    cells) where its markers alone were 170 loose cells, and its route eight where they were 340.
+    never resolved to one is a cell of the shape itself, so the union of the two split into CONNECTED
+    (corner-touching included) groups is the zone as it should be drawn: `waterRoute_4`'s water becomes
+    two blocks (151 and 19 cells) where its markers alone were 170 loose cells, and its route eight
+    where they were 340.
     """
+    cells = set()
+    for tiles in entry["patches"]:
+        cells |= set(tiles)
+    cells |= {(x, y) for (x, y, _why) in entry["unplaced"]}
+    return sorted(components(cells, diagonal=True), key=len, reverse=True)
     cells = set()
     for tiles in entry["patches"]:
         cells |= set(tiles)

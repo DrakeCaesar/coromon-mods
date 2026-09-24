@@ -6,20 +6,33 @@ its tile layers and a list of tilesets that point at PNG sheets (`Resources/maps
 TILES, so the map view can show the map instead of a flat ground colour. Nothing here invents
 geometry: a tile is blitted at its own cell, which is the whole renderer.
 
-WHICH LAYERS ARE DRAWN, and why not all of them. Measured on `amishRoute` (97x70), the layer tree is
+WHICH LAYERS ARE DRAWN, and why not all of them. The layer tree is the same shape on every map,
+though the layers inside it differ (measured over the 69 maps the zones name):
 
-    floor/          belowFloor 1, floor, aboveFloor 1, (aboveFloor 2#MESCHER_REALM - hidden)
-    aboveFloor/     aboveFloorGenerated|level 1, |level 5
-    levels/         level 1 .. level 5, trees
-    abovePlayer/    abovePlayerGenerated|level 1..5, |trees
-    worldOverlay, aboveWorldOverlay
+    floor/          belowFloor 1, floor, floor#whileCRIMSONITE_PHASE_1, aboveFloor 1..3, aboveFloor2
+    aboveFloor/     aboveFloorGenerated|level 1..5
+    levels/         level 1 .. level 6, trees, belowInnerWalls, innerWalls, outerWalls, mountain 1/2
+    objectLayers/   area, interactObjects, locations, characters, spriteLayer (object layers)
+    abovePlayer/    abovePlayerGenerated|level 1..5, |trees, |outerWalls
+    mapExtensions/  the story's own extension objects
+    worldOverlay, aboveWorldOverlay, worldRain/SnowOverlay
 
-* the FLOOR group is the base the map is built on, so it is always drawn;
-* a `level*` layer is where the walkable ground is - every zone marker's own `tileLayer` names one of
-  them ("level 1" on `amishRoute`), which is the reason they are the layers the zones can be found in;
-* the `abovePlayer*` layers are the parts drawn OVER the player (tree tops, roofs) and
-  `worldOverlay` is the pause menu's own dimming overlay. Drawing those buries the ground the whole
-  tab is asking about, so they are skipped.
+* THE TERRAIN IS THE THREE GROUPS `floor`, `aboveFloor` and `levels`, so their leaves are what is
+drawn - including the ones whose names say nothing about the terrain: the `trees`, `outerWalls`,
+`innerWalls` and `mountain 1/2` layers live INSIDE `levels`;
+* everything else is not terrain: the `abovePlayer` layers are the parts drawn OVER the player (tree
+tops, roofs) and the `world*` layers are the pause menu's dimming and the weather. Drawing either
+buries the ground the tab is asking about, so they are left out;
+* a layer is picked by the GROUP it sits in, NOT by the name it starts with. A NAME ALLOW-LIST
+(`floor*`, `level*`) is what was here first, and it silently left out every layer the game does not
+name that way - which is why "some sprites are still missing from some of the maps" (the user): no
+trees on the nineteen maps with a `trees` layer, no walls on the ten with `outerWalls`/`innerWalls`,
+no mountains on the two with `mountain 1`;
+* THE `visible` FLAG IS IGNORED. In these files it is TILED AUTHORING STATE, saved when the map was
+last edited - the conditional layers next to a base layer ("level 1#whileEVACUATION") are marked
+hidden because that story state was not the one being worked on. The game shows one of them at a
+time and, drawing them in the file's own order, the ground that one of them fills is ground the
+others left empty; skipping the hidden ones is what leaves holes in a map.
 
 A tile may be BIGGER than the map's grid (48x48 trees on a 16x16 grid); Tiled draws such a tile with
 its BOTTOM-LEFT corner at the cell's bottom-left, which is what `_tile_target` reproduces - without it
@@ -37,9 +50,9 @@ from PySide6.QtGui import QImage, QPainter, QPixmap
 
 import encounter_zones as ez
 
-# The layer-name prefixes that are drawn, in the game's own order (the order of the map file decides,
-# these only decide WHICH layers are considered - see the module docstring for the measurements).
-DRAWN_PREFIXES = ("belowFloor", "floor", "aboveFloor", "level")
+# THE GROUPS WHOSE LAYERS ARE TERRAIN, by the name the map's own tree gives them. The order of the
+# map file decides what is drawn over what; these only decide which layers are considered.
+DRAWN_GROUPS = ("floor", "aboveFloor", "levels")
 
 # map file -> QPixmap, because a picture is thousands of blits and the pane repaints on every resize
 _PICTURE_CACHE = {}
@@ -48,23 +61,27 @@ _SHEET_CACHE = {}
 
 
 def layer_names(m):
-    """The tile layers to draw, in the map's own order."""
+    """The tile layers to draw, in the map's own order.
+
+    A layer is drawn when it sits in one of `DRAWN_GROUPS` - at any depth, and whatever it is called
+    (see the module docstring for why the name is not what decides it).
+    """
     chosen = []
-    for name, layer in _walk(m.get("layers", [])):
-        if layer.get("type") != "tilelayer" or layer.get("visible", True) is False:
+    for groups, name, layer in _walk(m.get("layers", [])):
+        if layer.get("type") != "tilelayer":
             continue
-        if name.startswith(DRAWN_PREFIXES):
+        if any(group in DRAWN_GROUPS for group in groups):
             chosen.append(name)
     return chosen
 
 
-def _walk(layers):
-    """(name, layer) for every leaf layer in the tree, groups included."""
+def _walk(layers, groups=()):
+    """`(ancestor group names, name, layer)` for every leaf in the tree."""
     for layer in layers:
         if layer.get("type") == "group":
-            yield from _walk(layer.get("layers", []))
+            yield from _walk(layer.get("layers", []), groups + (layer.get("name", ""),))
         else:
-            yield layer.get("name", ""), layer
+            yield groups, layer.get("name", ""), layer
 
 
 def _sheet(path):

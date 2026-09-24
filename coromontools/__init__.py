@@ -45,7 +45,8 @@ import skills                                                          # noqa: E
 
 from . import mapnames, state                                               # noqa: E402
 from . import mapview                                                       # noqa: E402
-from .config import MAP_ZOOM_DEFAULT, MAP_ZOOM_KEY, ON_TOP_DEFAULT   # noqa: E402
+from .config import (MAP_SMOOTH_DEFAULT, MAP_SMOOTH_KEY, MAP_ZOOM_DEFAULT, MAP_ZOOM_KEY,
+                     ON_TOP_DEFAULT)                              # noqa: E402
 from .database_tab import DatabaseTab                                  # noqa: E402
 from .grind import GrindTab, rank, zone_rows                           # noqa: E402
 from .items_tab import ItemsTab                                        # noqa: E402
@@ -71,8 +72,10 @@ class MainWindow(QMainWindow):
         # THE MAP ZOOM IS ONE VALUE FOR THE WINDOW, so it is restored here and not by a tab: three
         # tabs draw a map, and each of them applying the same saved number would be three places to
         # get it wrong. It is set BEFORE the tabs are built, because each map's zoom bar reads the
-        # value when it shows itself.
+        # value when it shows itself. THE SCALING FILTER IS THE SAME KIND OF VALUE - one flag, three
+        # maps, and a tick on each of them that writes it back.
         mapview.set_zoom(prefs.get(MAP_ZOOM_KEY, MAP_ZOOM_DEFAULT))
+        mapview.set_smooth(prefs.get(MAP_SMOOTH_KEY, MAP_SMOOTH_DEFAULT))
 
         # FIVE TABS, and they are the questions: where to grind, what the save records (with where
         # each Coromon can be caught), WHAT IS STILL MISSING AND WHERE TO GET IT - the Database tab's
