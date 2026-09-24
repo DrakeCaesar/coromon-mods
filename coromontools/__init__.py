@@ -44,7 +44,8 @@ import encounters                                                      # noqa: E
 import skills                                                          # noqa: E402
 
 from . import mapnames, state                                               # noqa: E402
-from .config import ON_TOP_DEFAULT                                     # noqa: E402
+from . import mapview                                                       # noqa: E402
+from .config import MAP_ZOOM_DEFAULT, MAP_ZOOM_KEY, ON_TOP_DEFAULT   # noqa: E402
 from .database_tab import DatabaseTab                                  # noqa: E402
 from .grind import GrindTab, rank, zone_rows                           # noqa: E402
 from .items_tab import ItemsTab                                        # noqa: E402
@@ -66,6 +67,12 @@ class MainWindow(QMainWindow):
         self.prefs = prefs
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(MIN_WIDTH, MIN_HEIGHT)
+
+        # THE MAP ZOOM IS ONE VALUE FOR THE WINDOW, so it is restored here and not by a tab: three
+        # tabs draw a map, and each of them applying the same saved number would be three places to
+        # get it wrong. It is set BEFORE the tabs are built, because each map's zoom bar reads the
+        # value when it shows itself.
+        mapview.set_zoom(prefs.get(MAP_ZOOM_KEY, MAP_ZOOM_DEFAULT))
 
         # FIVE TABS, and they are the questions: where to grind, what the save records (with where
         # each Coromon can be caught), WHAT IS STILL MISSING AND WHERE TO GET IT - the Database tab's

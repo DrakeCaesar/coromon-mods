@@ -30,6 +30,11 @@ ICON = "_icon"
 ROW_HEIGHT = 20
 ICON_PAD = 6
 
+# HOW MUCH AIR A COLUMN KEEPS ON TOP OF THE WIDEST TEXT IN IT. Qt's `sizeHintForColumn` is the text
+# plus the style's own margins, which is exactly the width at which the last letter touches the next
+# column's edge - and the header draws its sort arrow inside the section it sorts by.
+COLUMN_PAD = 8
+
 
 class Column:
     """One column: the key its value lives under, the heading, its width and its alignment.
@@ -38,6 +43,11 @@ class Column:
     declared rather than guessed from the values, because guessing gets it backwards exactly
     where it matters: "most common" is text ("Buzzlet L5-7 80%") and would open A-Z, while
     the column is only ever clicked to see the biggest share first.
+
+    `width` IS THE CEILING THE COLUMN IS MEASURED AGAINST, not the width the column keeps: every fill
+    shrinks a column to the text it actually holds (`DataTable.fit_columns`) - the user: "the tables
+    should be as narrow as possible". It is the width the column starts at and the width it can never
+    grow past, which is what keeps one long value from deciding the width of the whole table.
     """
 
     def __init__(self, key, heading, width, align="w", desc_first=False):
@@ -150,6 +160,10 @@ class DataTable(QTableView):
 
     sortChanged = Signal(str, bool)
     selectionChangedTo = Signal(object)   # the payload of the current row, or None
+    # ... AND THE WIDTH THE COLUMNS OCCUPY, reported whenever a fill re-measures them: the separator
+    # beside this table is placed from that width (`widgets.FittedPane`), so it has to know when it
+    # moves.
+    columnsChanged = Signal()
 
     def __init__(self, columns, sort_key=None, sort_desc=False, parent=None, icon_column=None):
         super().__init__(parent)
@@ -166,7 +180,11 @@ class DataTable(QTableView):
         self.setSortingEnabled(False)
         self.verticalHeader().setVisible(False)
         self.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
-        self.horizontalHeader().setStretchLastSection(True)
+        # NO STRETCHED LAST COLUMN: `setStretchLastSection` gives the last heading whatever width the
+        # pane has left over, so dragging the separator beside this table widened THAT COLUMN instead
+        # of ending where the table ends - the user: "the last column of the tables is as long as the
+        # separator is set". The columns are the table's width now, and the pane is fitted to them.
+        self.horizontalHeader().setStretchLastSection(False)
         self.horizontalHeader().setHighlightSections(False)
         self.horizontalHeader().setSectionsClickable(True)
         for i, column in enumerate(columns):
@@ -185,8 +203,54 @@ class DataTable(QTableView):
         selected zone alone should not move the selection to the top of the table.
         """
         self.model_.set_rows(sort_rows(rows, self._sort_key, self._sort_desc))
-        self._fit_icons()
+        self._reflow()
         self._select_first_or(keep_row)
+
+    def _reflow(self):
+        """Re-measure what the new rows cost: the row height (an icon, if the table has one) and the
+        width of every column. One place, because both are read by the caller that sizes a pane
+        around this table (`content_height`, `content_width`) and a fill that changed one of them has
+        changed the other.
+        """
+        self._fit_icons()
+        self.fit_columns()
+
+    def fit_columns(self):
+        """Size every column to the text it actually holds - "the tables should be as narrow as
+        possible" (the user).
+
+        THE DECLARED WIDTH IS A CEILING, NOT A TARGET: left as a target, a column keeps room its
+        values never use, and beside a splitter that unused room is what the separator ends up being
+        dragged over. A column is measured against the widest value it is holding RIGHT NOW, so a
+        sort or a filter that changes which row is the widest one changes the width - and the ceiling
+        is what keeps ONE long value (a zone listing nine species) from deciding the width of the
+        whole table on its own.
+
+        The heading counts too, so a column of short numbers is never narrower than its own label.
+        """
+        header = self.horizontalHeader()
+        changed = False
+        for i, column in enumerate(self.model_.columns):
+            asked = max(self.sizeHintForColumn(i), header.sectionSizeHint(i)) + COLUMN_PAD
+            want = min(column.width, asked)
+            if header.sectionSize(i) != want:
+                self.setColumnWidth(i, want)
+                changed = True
+        if changed:
+            self.columnsChanged.emit()
+
+    def content_width(self):
+        """The width this table needs to show every column it has, and not a pixel more.
+
+        The sum of the columns as `fit_columns` sized them, plus the frame and the vertical scrollbar a
+        long list scrolls with. The scrollbar is counted WHETHER OR NOT IT IS SHOWING: it takes its
+        width out of the viewport, so a pane fitted to the columns alone hides the last column's last
+        letter behind it - MEASURED on the Database tab's list, whose pane came out 15 px short and
+        wore a horizontal scrollbar until this was added.
+        """
+        header = self.horizontalHeader()
+        span = sum(header.sectionSize(i) for i in range(self.model_.columnCount()))
+        return span + 2 * self.frameWidth() + self.verticalScrollBar().sizeHint().width()
 
     def _fit_icons(self):
         """Size the rows and the icon box to whatever decoration the new rows carry, if any.
@@ -282,6 +346,7 @@ class DataTable(QTableView):
     def _apply_sort(self):
         keep = self.current_payload()
         self.model_.set_rows(sort_rows(self.model_.rows, self._sort_key, self._sort_desc))
+        self._reflow()
         if not (keep is not None and self.select_payload(keep)) and self.model_.rowCount():
             self.selectRow(0)
 

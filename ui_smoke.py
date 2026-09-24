@@ -39,11 +39,14 @@ import savefile                                             # noqa: E402
 
 import coromontools.state as state                          # noqa: E402
 from coromontools import MainWindow, font, icons, mapnames as mn   # noqa: E402
+from coromontools import maptiles                              # noqa: E402
 from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
 from coromontools.grind import encounter_lines                # noqa: E402
+from coromontools import mapview                              # noqa: E402
 from coromontools import missing_tab                          # noqa: E402
 from coromontools import potential_tab                        # noqa: E402
+from coromontools import table as table_mod                  # noqa: E402
 from coromontools.table import ICON, sort_rows                # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 from coromontools.widgets import mono_height                # noqa: E402
@@ -147,8 +150,152 @@ def main():
         plan = grind.map._plan
         check("plan has ground runs", len(plan["ground"]) > 0, len(plan["ground"]))
         check("plan has a selected patch", any(p["selected"] for p in plan["patches"]))
-        check("plan draws no colourless patch", all("colour" in p for p in plan["patches"]))
+        # THE ZONES ARE BLOCKS OF CELLS, each with the sides that face out of its own block. EVERY FILL
+        # IS TRANSLUCENT, the selected zone's included - the user: "some of the blocks show as opaque,
+        # they should all be semi transparent with solid edges around the zones" - and the selected one
+        # is told apart by a WHITE edge instead.
+        check("every zone fill is translucent, and every edge opaque",
+              all(p["fill"].alpha() == config.PATCH_ALPHA and p["edge"].alpha() == 255
+                  for p in plan["patches"]),
+              sorted({p["fill"].alpha() for p in plan["patches"]}))
+        selected = next(p for p in plan["patches"] if p["selected"])
+        check("... with the selected zone's edge white, and no zone's fill set apart",
+              selected["edge"].name() == config.SELECTED_EDGE
+              and selected["fill"].alpha() == plan["patches"][0]["fill"].alpha(),
+              selected["edge"].name())
+        check("... whose blocks carry fills, merged outlines and a name each",
+              all(block["runs"] and (block["outline"][0] or block["outline"][1])
+                  for patch in plan["patches"] for block in patch["blocks"])
+              and all(len(block["labels"]) == 1
+                      for patch in plan["patches"] for block in patch["blocks"]),
+              "%d block(s) in the selected zone"
+              % len(next(p for p in plan["patches"] if p["selected"])["blocks"]))
+        check("... and the map's own tiles are the ground when they could be read",
+              plan["picture"] is not None
+              and plan["picture"].width() == plan["size"][0] * 16,
+              None if plan["picture"] is None else
+              "%dx%d px" % (plan["picture"].width(), plan["picture"].height()))
         check("legend lists the zones", len(grind.map.legend) > 0, len(grind.map.legend))
+
+    # THE MAP VIEW ZOOMS, AND THE PANE SCROLLS. The value is the window's (`mapview.set_zoom`), so the
+    # same pad appears over all three maps, all of them move together, and the selected zone is scrolled
+    # into view - which is what makes a zoomed map useful rather than a corner of tiles.
+    map_bar = grind.findChild(mapview.MapZoomBar)
+    check("the map panel carries its own -/+ zoom pad", map_bar is not None
+          and map_bar.zoom_in.text() == "+" and map_bar.zoom_out.text() == "-",
+          None if map_bar is None else "%s ... %s" % (map_bar.zoom_out.text(), map_bar.zoom_in.text()))
+    # A BUTTON IS AS TALL AS A BUTTON. Measuring the row's own height while it was still empty gave 5 px,
+    # and the user saw it: the two controls stood "only as tall as the chars" beside a `fit` that had a
+    # real height. Every button of the window's theme is padding + one line of text, and these wear the
+    # same vertical padding - so the pad matches its neighbours instead of the glyphs.
+    theme_button = next(widget for widget in window.findChildren(type(map_bar.fit_button))
+                        if widget not in (map_bar.zoom_in, map_bar.zoom_out, map_bar.fit_button)
+                        and widget.isVisible())
+    check("... whose buttons are a button's height, like every other button in the window",
+          map_bar.zoom_in.height() == map_bar.fit_button.height()
+          and map_bar.zoom_in.height() >= theme_button.height()
+          and map_bar.zoom_in.width() == map_bar.zoom_out.width(),
+          "-%d/%d  +%d  fit%d  vs %s=%d" % (
+              map_bar.zoom_out.width(), map_bar.zoom_out.height(), map_bar.zoom_in.height(),
+              map_bar.fit_button.height(), theme_button.text()[:8], theme_button.height()))
+    fit_scale = grind.map._scale
+    check("... which opens fitted to the pane, with nothing to scroll",
+          mapview.zoom() == config.MAP_ZOOM_DEFAULT
+          and grind.map.horizontalScrollBar().maximum() == 0
+          and grind.map.verticalScrollBar().maximum() == 0,
+          "x%g, scale %.2f" % (mapview.zoom(), fit_scale))
+    map_bar.zoom_in.click()
+    pump(app, 3)
+    check("... and a + press scales the map up and gives the pane scrollbars",
+          mapview.zoom() > config.MAP_ZOOM_DEFAULT and grind.map._scale > fit_scale
+          and (grind.map.verticalScrollBar().maximum() > 0
+               or grind.map.horizontalScrollBar().maximum() > 0),
+          "x%g, scale %.2f -> %.2f, ranges %d/%d" % (
+              mapview.zoom(), fit_scale, grind.map._scale,
+              grind.map.horizontalScrollBar().maximum(),
+              grind.map.verticalScrollBar().maximum()))
+    # THE ZOOM BELONGS TO THE WINDOW: the Missing tab's map is a different widget with its own pad, and
+    # its pad reads the same factor because there is only one value.
+    missing_bar = window.missing.findChild(mapview.MapZoomBar)
+    check("... and every map in the window follows it",
+          missing_bar is not None and missing_bar.value.text() == map_bar.value.text()
+          and missing_bar.zoom_in.isEnabled() == map_bar.zoom_in.isEnabled(),
+          "%s vs %s" % (map_bar.value.text(),
+                         None if missing_bar is None else missing_bar.value.text()))
+    # EVERY STEP IS A WHOLE NUMBER, AND EVERY STEP MOVES THE MAP. The ladder used to run 1, 1.25, 1.75,
+    # 2.5, 4, 6 while the finished scale was clamped at `MAP_MAX_SCALE`, so from x4 up the pane drew the
+    # SAME picture while the label kept counting - the buttons were dead over half their range, which is
+    # what the user reported. Measured off a live map: one distinct drawn scale per step, growing.
+    scales = []
+    for step in config.MAP_ZOOM_STEPS:
+        mapview.set_zoom(step)
+        pump(app, 1)
+        scales.append(grind.map._scale)
+    check("... every step is a whole number, and each one draws the map bigger",
+          all(float(step).is_integer() for step in config.MAP_ZOOM_STEPS)
+          and len(set(scales)) == len(scales) and scales == sorted(scales),
+          "%s -> %s" % (list(config.MAP_ZOOM_STEPS), [round(value, 2) for value in scales]))
+    # ... AND THE SELECTED ZONE IS WHAT THE PANE SHOWS: scrolled to a corner of the map, picking a row
+    # has to bring that zone's block into the viewport, or the gesture says nothing. NOT "centred on
+    # it": a zone near an edge clamps at that edge, and that is the correct behaviour.
+    grind.map.centre_on((0.01, 0.01))
+    pump(app, 2)
+    grind.show_zone_from_elsewhere(grind.table.current_payload())
+    pump(app, 3)
+    zone_map = grind.map
+    x0, y0, x1, y1 = next(p for p in zone_map._plan["patches"]
+                          if p["selected"])["blocks"][0]["bbox"]
+    scale = zone_map._scale
+    visible = (zone_map.horizontalScrollBar().value(), zone_map.verticalScrollBar().value(),
+               zone_map.horizontalScrollBar().value() + zone_map.viewport().width(),
+               zone_map.verticalScrollBar().value() + zone_map.viewport().height())
+    block = (x0 * scale, y0 * scale, x1 * scale, y1 * scale)
+    check("... and picking a zone scrolls its block into the pane",
+          block[0] < visible[2] and block[2] > visible[0]
+          and block[1] < visible[3] and block[3] > visible[1],
+          "block %s in view %s" % (tuple(round(v) for v in block),
+                                   tuple(round(v) for v in visible)))
+    map_bar.fit_button.click()
+    pump(app, 3)
+    check("'fit' takes it back to x1, and the range closes up again",
+          mapview.zoom() == config.MAP_ZOOM_DEFAULT
+          and grind.map._scale == fit_scale
+          and grind.map.horizontalScrollBar().maximum() == 0,
+          "x%g, scale %.2f" % (mapview.zoom(), grind.map._scale))
+    map_bar.zoom_in.click()
+    pump(app, 2)
+    check("... and the factor is remembered for the next start",
+          prefs.get(config.MAP_ZOOM_KEY) == mapview.zoom(), prefs.get(config.MAP_ZOOM_KEY))
+    map_bar.fit_button.click()
+    pump(app, 2)
+
+    # THE MERGING ITSELF, measured off the shipped maps: a water zone records its shape as bare marker
+    # cells (its markers name no tile layer), and merging is what turns them into blocks -
+    # `WATERROUTE_4_WATER`'s 170 cells are TWO blocks (151 + 19), where cell by cell they were a field
+    # of dots. The borders are counted the same way, on shapes whose answer is arithmetic.
+    import encounter_zones as ez
+    _m, _layers, zone_data = ez.zone_map("waterRoute_4")
+    water = zone_data["WATERROUTE_4_WATER"]
+    water_blocks = ez.zone_blocks(water)
+    check("a water zone's bare marker cells are merged into a few blocks",
+          len(water["unplaced"]) > 100 and 1 <= len(water_blocks) <= 4
+          and sum(len(block) for block in water_blocks)
+          == len({(x, y) for (x, y, _why) in water["unplaced"]}),
+          "%d cell(s) -> %d block(s) %s" % (len(water["unplaced"]), len(water_blocks),
+                                            [len(block) for block in water_blocks]))
+    pair = ez.block_outline({(4, 4), (5, 4)})
+    check("... two adjacent cells share one border instead of drawing two",
+          sorted(pair[0]) == [(4, 4, 5), (4, 5, 5), (5, 4, 6), (5, 5, 6)]
+          and sorted(pair[1]) == [(4, 4, 5), (6, 4, 5)],
+          "%d horizontal + %d vertical segment(s)" % (len(pair[0]), len(pair[1])))
+    square = ez.block_outline({(4, 4), (5, 4), (4, 5), (5, 5)})
+    check("... and a 2x2 block has no line through the middle of it",
+          len(square[0]) == 4 and len(square[1]) == 4
+          and not any(segment[0] == 5 for segment in square[1])
+          and not any(segment[1] == 5 for segment in square[0]),
+          "%d horizontal + %d vertical segment(s)" % (len(square[0]), len(square[1])))
+    check("the tiles are composited once and then reused",
+          maptiles.picture("amishRoute") is maptiles.picture("amishRoute"))
 
     # sorting: the numeric column opens high-first, then flips, then comes back
     # IT OPENS ON XP PER FIGHT NOW, because that is the question this tab exists to answer - the user:
@@ -933,6 +1080,109 @@ def main():
     check("Reload save re-reads the same record",
           database.saved_label.text() == report and database.counts.text() == tally,
           "%s" % database.saved_label.text())
+
+    # ---------------------------------------------------------------- the separator beside a table
+    # THE USER'S OWN RULE, and it is one rule for every tab that has a table beside a separator: "the
+    # slider/separator between left and right panes is not dynamic, the last column of the tables is as
+    # long as the separator is set, instead, the tables should be as narrow as possible and the
+    # separator should be static based on that". So, per tab: no column is stretched to fill a pane,
+    # every column is only as wide as the text it is holding, and the pane is the width of the columns
+    # and nothing else - which is what puts the separator just past the last column.
+    for name, tab in (("grind", window.grind), ("database", window.database),
+                      ("missing", window.missing), ("items", window.items)):
+        window.tabs.setCurrentWidget(tab)
+        pump(app, 5)
+        fit = tab.pane_fit
+        pane = fit.splitter.widget(fit.pane)
+        check("%s: the separator is only as far out as the content in the pane" % name,
+              pane.width() <= fit.fitted_width() + 1 and fit.elastic != fit.pane,
+              "pane %d vs content %d px, elastic %d"
+              % (pane.width(), fit.fitted_width(), fit.elastic))
+        # ... AND NO COLUMN OF THE TABLE BESIDE IT IS STRETCHED, which is what the last column used to
+        # be: given whatever width the pane had left over instead of the width of its own text.
+        table = tab.findChild(table_mod.DataTable)
+        header = table.horizontalHeader()
+        asked = [max(table.sizeHintForColumn(i), header.sectionSizeHint(i)) + table_mod.COLUMN_PAD
+                 for i in range(table.model_.columnCount())]
+        check("... and no column of its table is stretched or wider than its own text",
+              not header.stretchLastSection()
+              and all(header.sectionSize(i) <= asked[i]
+                      and header.sectionSize(i) <= column.width
+                      for i, column in enumerate(table.model_.columns)),
+              "columns %s of %s asked" % (
+                  [header.sectionSize(i) for i in range(table.model_.columnCount())],
+                  [round(value) for value in asked]))
+
+    # THE DATABASE TAB'S MAP IS THE PANE THAT GROWS. Its grid is measured (its own columns, at the dex
+    # scale in use) and everything else is the map's column - the user: "the database view also has a
+    # gap before the separator making the map small", which was the panel being given the LOCATIONS
+    # LIST's width (300 px) while the grid's spare thousand pixels sat empty beside it.
+    window.tabs.setCurrentIndex(1)
+    pump(app, 6)
+    fit = window.database.pane_fit
+    check("the database tab measures the grid, and the map column takes the rest",
+          fit.pane == 0 and fit.elastic == 1
+          and window.database.split.widget(0) is window.database.scroll
+          and window.database.split.widget(1).isAncestorOf(window.database.map),
+          "pane %d, elastic %d" % (fit.pane, fit.elastic))
+    grid_want = window.database.holder.sizeHint().width()
+    grid_pane = window.database.scroll.width()
+    check("... and the grid column is never wider than the grid itself",
+          grid_pane <= fit.fitted_width() + 1
+          and fit.want() >= grid_want,
+          "grid %d px in a %d px pane (want %d)" % (grid_want, grid_pane, fit.want()))
+
+    # ... AND THE SEPARATOR FOLLOWS THE SPRITE SCALE - the user: "when I change the scale of coromon
+    # sprites, the separator should auto adjust". It did not, and the reason is worth a check of its
+    # own: the grid's `sizeHint` still reports the PREVIOUS scale until its layout has run again
+    # (MEASURED at 1897 px for a grid just scaled down to 911), so the fit is asked for one turn of the
+    # event loop later (`FittedPane.refit_later`) rather than in the same call. A WIDE window is used
+    # so the grid really is the thing setting the width - in a narrow one both scales are capped by
+    # what the map column may not lose, and the check would pass either way.
+    wide = window.width()
+    window.resize(2600, 560)
+    pump(app, 6)
+    database.set_zoom(config.ICON_ZOOM_MAX)
+    pump(app, 8)
+    big_grid = database.holder.sizeHint().width()
+    big_want, big_pane = database.pane_fit.fitted_width(), database.scroll.width()
+    database.set_zoom(config.ICON_ZOOM_MIN)
+    pump(app, 8)
+    small_grid = database.holder.sizeHint().width()
+    small_want, small_pane = database.pane_fit.fitted_width(), database.scroll.width()
+    check("... and it moves when the coromon sprite scale does",
+          big_grid > small_grid and big_pane > small_pane
+          and abs(big_pane - big_want) <= 1 and abs(small_pane - small_want) <= 1,
+          "grid %d -> %d px, column %d -> %d px (fitted %d -> %d)"
+          % (big_grid, small_grid, big_pane, small_pane, big_want, small_want))
+    database.set_zoom(start)
+    window.resize(wide, 560)
+    pump(app, 8)
+
+    # ... AND IT STAYS THERE. A wider window must widen the pane BESIDE the table, because a separator
+    # that follows the window is the thing being complained about - the columns would grow with it.
+    #
+    # THE WIDTHS ARE READ OFF THE PANES, not out of `splitter.sizes()`: those are the sizes the
+    # SPLITTER was last SET to, and they lag a layout pass - MEASURED here as [844, 556] summing to 200
+    # px more than the splitter is wide, and as [0, 0] on a splitter that is 1020 px across. The panes
+    # are what the user sees.
+    window.tabs.setCurrentIndex(3)
+    pump(app, 6)
+    fit = window.items.pane_fit
+    panes = lambda: [fit.splitter.widget(i).width() for i in range(fit.splitter.count())]  # noqa: E731
+    # THE WINDOW IS NOT 1040 px WIDE BY NOW (the Database tab's dex zoom grew its own minimum and took
+    # the window with it), so the size to come back to is read rather than assumed.
+    width, before = window.width(), panes()
+    window.resize(width + 200, 560)
+    pump(app, 8)
+    after = panes()
+    check("a wider window widens the pane beside the table, not the table",
+          after[fit.pane] == before[fit.pane] and after[fit.elastic] > before[fit.elastic],
+          "window %d -> %d, %s -> %s" % (width, window.width(), before, after))
+    window.resize(width, 560)
+    pump(app, 8)
+    check("... and it goes back when the window does", panes() == before,
+          "window %d, %s vs %s" % (window.width(), panes(), before))
 
     # ---------------------------------------------------------------- missing tab
     # THE DATABASE TAB'S COMPANION: the zones ordered by how many GROUPS are still missing there. The

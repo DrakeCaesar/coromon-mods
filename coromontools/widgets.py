@@ -3,8 +3,11 @@
 `note` is the small print that explains a number next to the number, and `mono_text` is the
 read-only monospace pane the window uses for text that is really a table: the species list,
 the skill description. Both were repeated as inline tkinter options in the Tk version.
+
+`FittedPane` is the third: the rule for where the separator beside a table goes.
 """
 
+from PySide6.QtCore import QEvent, QObject, QTimer
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QFrame, QLabel, QPlainTextEdit
 
@@ -90,3 +93,117 @@ def hline():
     line.setFrameShape(QFrame.Shape.HLine)
     line.setStyleSheet("color: %s;" % NOTE)
     return line
+
+
+class FittedPane(QObject):
+    """Keeps a splitter's separator at the width of the content in one of its panes.
+
+    THE SEPARATOR IS PLACED FROM THE CONTENT, not the other way round - the user: "the slider/separator
+    between left and right panes is not dynamic, the last column of the tables is as long as the
+    separator is set, instead, the tables should be as narrow as possible and the separator should be
+    static based on that". So the pane is given exactly the width its content occupies and the room
+    left over goes to the pane beside it - the one holding the map, in every tab that has one.
+
+    WHICH PANE HAS THE ROOM IS DECLARED (`elastic`) rather than left to a stretch factor: a window
+    made wider must widen the map, not move a boundary that was measured to the pixel.
+
+    `want` is either a `DataTable` (a pane sized to its own columns, which re-fits itself when a fill
+    re-measures them) or a CALLABLE returning the width in pixels - the Database tab's dex grid is a
+    layout rather than a table, and it re-fits itself where its scale changes instead. `floor` is the
+    smallest the fitted pane may be, and `reserve` what the other panes may not lose - both are zero
+    unless a caller needs them.
+
+    It fits itself: an event filter on the splitter re-fits on every resize, so nothing here has to
+    be called by the tab. THE FIRST FITS DO NOTHING, before the splitter has a width to divide.
+    """
+
+    def __init__(self, splitter, pane, want, elastic, floor=0, reserve=0):
+        super().__init__(splitter)
+        self.splitter = splitter
+        self.pane = pane
+        self.elastic = elastic
+        self.floor = floor
+        self._reserve = reserve
+        table = None if callable(want) else want
+        self._want = want if table is None else want.content_width
+        self._asked = None
+        # ONE TURN OF THE EVENT LOOP LATER, which is what makes the first fit land: during the resize
+        # that hands the splitter its width its panes are still the size of the last one - a splitter
+        # 1020 px wide answers [0, 0] (measured) - so the fit is asked for, not done, and the timer
+        # is a child of this object so a tab being thrown away cannot leave it armed.
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(0)
+        self._timer.timeout.connect(self.refit)
+        splitter.installEventFilter(self)
+        if table is not None:
+            table.columnsChanged.connect(self.refit)
+
+    def want(self):
+        """The width the fitted pane is being given, in pixels."""
+        return self._want()
+
+    def reserve(self):
+        """What the panes beside it may not lose, in pixels - measured on the spot when it moves with
+        the content (the Database tab's list is another Coromon's columns every time it is filled)."""
+        return self._reserve() if callable(self._reserve) else self._reserve
+
+    def fitted_width(self, span=None):
+        """`want()`, capped to what the room allows - the width the fitted pane is being given.
+
+        The cap is the whole reason `refit` and the tests agree: on a window too small for the content
+        the pane is not as wide as the content, it is as wide as the room MINUS what the panes beside
+        it may not lose.
+        """
+        if span is None:
+            span = self.splitter.width() - self.splitter.handleWidth() * (self.splitter.count() - 1)
+        return int(min(max(self.floor, self.want()), max(1, span - max(0, self.reserve()))))
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Resize:
+            self._timer.start()
+        return False
+
+    def refit_later(self):
+        """Ask for a fit AFTER the layout has run, for a caller that just changed what it measures.
+
+        MEASURING A LAYOUT THAT WAS JUST CHANGED IS MEASURING ITS LAST ANSWER: the Database tab sets
+        its grid's column widths and then wants the separator moved, and `sizeHint()` asked in the same
+        call still reports the previous scale - MEASURED at 1897 px for a grid that had just been
+        scaled down to 911, so the separator did not follow the sprite scale at all (the user: "when I
+        change the scale of coromon sprites, the separator should auto adjust"). One turn of the event
+        loop later the grid has been laid out and the number is real.
+        """
+        self._timer.start()
+
+    def refit(self):
+        """Put the separator at the fitted pane's width, the elastic pane keeping the rest.
+
+        Returns whether it could - false while there is no width to divide.
+
+        `self._asked` remembers the last (room, width) pair it could not reach, because Qt CLAMPS what
+        a splitter may be given: without it, a pane that wants more than the window has would be
+        re-asked on every resize event it caused itself, and the two would go round and round.
+        """
+        count = self.splitter.count()
+        if not 0 <= self.pane < count:
+            return False
+        span = self.splitter.width() - self.splitter.handleWidth() * (count - 1)
+        if span <= 0:
+            return False
+        want = self.fitted_width(span)
+        # turn of the event loop after the splitter was resized, so these are the widths it laid out - 
+        # and when it has not laid anything out yet (the very first pass, before the window is shown)
+        # the room is split by what each pane asks for, so the fit still lands somewhere sensible.
+        sizes = [self.splitter.widget(i).width() for i in range(count)]
+        if sum(sizes) != span:
+            asked = [max(1, self.splitter.widget(i).sizeHint().width()) for i in range(count)]
+            share = span / float(sum(asked))
+            sizes = [max(1, int(round(value * share))) for value in asked]
+        if sizes[self.pane] == want or self._asked == (span, want):
+            return True
+        self._asked = (span, want)
+        sizes[self.pane] = want
+        sizes[self.elastic] = max(1, sizes[self.elastic] + span - sum(sizes))
+        self.splitter.setSizes(sizes)
+        return True

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QLineEdit, QSplit
 import items as item_data
 
 from .table import ICON, PAYLOAD, Column, DataTable
-from .widgets import mono_height, mono_text, note
+from .widgets import FittedPane, mono_height, mono_text, note
 
 # THE SCALE THE PICTURES ARE DRAWN AT, in screen pixels per texel - TWO of them, because the list and
 # the detail pane want opposite things: the bag icons are 16x16 texels, so 4 turns them into 64x64 for
@@ -221,9 +221,12 @@ class ItemsTab(QWidget):
         split.setChildrenCollapsible(False)
         split.addWidget(self.table)
         split.addWidget(pane)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        split.setSizes([760, 460])
+        # THE TABLE IS AS WIDE AS ITS COLUMNS and the details pane takes the rest - the 760:460 this
+        # used to be given is a ratio rather than a width, so the last column stretched to fill
+        # whatever the separator was left at (see `widgets.FittedPane`).
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        self.pane_fit = FittedPane(split, 0, self.table, elastic=1)
         outer.addWidget(split, 1)
 
         self.apply_filter()

@@ -2,38 +2,177 @@
 
 The wiki lists encounter rates per area as "Grass A / Grass B / ..." and never says which patch
 each one is. The game's maps do: a patch carries a `grassArea` marker whose zoneUID IS that
-letter. So this draws the area with its zones coloured and the one selected in the ranking
-picked out.
+letter. So this draws the area - with the map's OWN TILES as the ground (`maptiles`) - and every
+zone on it as a bordered block, the selected one picked out.
+
+A ZONE IS DRAWN AS MERGED BLOCKS, not as the loose cells the map records: a grass patch is already a
+connected run of its own tileset, but a zone that names no tile layer (every `_WATER` zone, and the
+underwater routes) records its shape as hundreds of separate marker cells - drawn one at a time that
+is a field of dots, merged it is the body of water the player means (the user: "the zones just as a
+bordered blocks, merging adjanced blocks like the water etc"). `encounter_zones.zone_blocks` does the
+merging and `block_outline` the border, so the outline follows a shape of any form and two adjacent
+cells share one line.
 
 Drawn in `paintEvent`, not "when the selection changes". That is not a style choice, it removes
 two hacks: Qt only paints a widget that is on screen, so the Tk version's
 `if not canvas.winfo_ismapped(): return` guard is unnecessary, and because the scale is
 recomputed per paint, a resize redraws itself instead of needing the `update_idletasks` call
 that existed to force the canvas to have a size before it could be drawn into.
+
+THE VIEW SCROLLS AND ZOOMS. It is a `QAbstractScrollArea`, so a map drawn larger than the pane gets
+scrollbars for free; the zoom is `config.MAP_ZOOM_STEPS` - "fitted to the pane" at x1, which is what
+this always drew, and the -/+ buttons (`MapZoomBar`) walk up from there. The value belongs to the
+WINDOW rather than to a pane: three tabs draw a map, and a zoom that meant something different in each
+of them would be a bug (see `set_zoom`).
 """
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import (QAbstractScrollArea, QFrame, QHBoxLayout, QLabel, QPushButton,
+                               QSizePolicy, QWidget)
 
 import encounter_zones as ez
 
-from . import mapnames
-from .config import MAP_MAX_SCALE, PATCH_ALPHA, SPOTS_SHOWN
+from . import mapnames, maptiles
+from .config import (EDGE_WIDTH, MAP_MAX_SCALE, MAP_ZOOM_DEFAULT, MAP_ZOOM_KEY, MAP_ZOOM_STEPS,
+                     PATCH_ALPHA, SELECTED_EDGE, SELECTED_EDGE_WIDTH, SPOTS_SHOWN)
 from .theme import FIELD, MAP_GROUND
 
+# HOW WIDE THE -/+ BUTTONS ARE, in pixels: the theme pads a button 12 px a side, so a button is given
+# its own zero padding and a fixed size, exactly like the Database tab's dex-zoom pair.
+ZOOM_BUTTON_WIDTH = 22
 
-class ZoneMap(QWidget):
-    """One map, drawn with its encounter zones coloured and the selected one solid.
 
-    What will be drawn is worked out in `set_zone`, not in `paintEvent`: the patches come from
-    the map JSON and have to be turned into horizontal runs, and a resize is many repaints, so
-    doing it per paint would make dragging the window edge stutter. Painting then only scales
-    and fills rectangles.
+class _Zoom(QObject):
+    """The window's map zoom: one value, every map watching it.
 
-    `empty` is the headline for having no zone at all, and it is a parameter because TWO tabs draw
-    this map now: the first tab's map belongs to its ranking ("pick a zone on the first tab" would
-    be nonsense inside the Database tab, which is the tab it was said on).
+    A module-level value rather than a parameter threaded through three tabs, because it IS one value -
+    the map is drawn in three places and they must agree. `ui_smoke` checks that a step moves all of
+    them.
+    """
+
+    changed = Signal(float)
+
+
+_ZOOM = _Zoom()
+_ZOOM_VALUE = MAP_ZOOM_DEFAULT
+_MAPS = []          # every live ZoneMap, so one step redraws them all
+
+
+def zoom():
+    """The current zoom factor: 1.0 is the map fitted to the pane."""
+    return _ZOOM_VALUE
+
+
+def set_zoom(factor):
+    """Set the window's map zoom, snapped to the nearest step, and redraw every map.
+
+    SNAPPED, not clamped: the steps are the values the buttons walk (`config.MAP_ZOOM_STEPS`), so a
+    saved 1.37 from some earlier tune lands back on 1.25 rather than being carried as a factor nothing
+    can produce again.
+    """
+    global _ZOOM_VALUE
+    step = min(MAP_ZOOM_STEPS, key=lambda value: abs(value - float(factor)))
+    _ZOOM_VALUE = step
+    for widget in list(_MAPS):
+        widget.zoom_changed()
+    _ZOOM.changed.emit(_ZOOM_VALUE)
+    return _ZOOM_VALUE
+
+
+def step_zoom(direction):
+    """One press of + or -: the next step up or down, and the value it landed on."""
+    index = MAP_ZOOM_STEPS.index(_ZOOM_VALUE) if _ZOOM_VALUE in MAP_ZOOM_STEPS else 0
+    index = max(0, min(len(MAP_ZOOM_STEPS) - 1, index + (1 if direction > 0 else -1)))
+    return set_zoom(MAP_ZOOM_STEPS[index])
+
+
+class MapZoomBar(QWidget):
+    """The map's -/+ buttons with the factor between them, which resets the view to "fit".
+
+    One of these sits over every map; all of them show the same value and move the same zoom (see
+    `set_zoom`), which is what makes the control mean "the map" rather than "this pane".
+    """
+
+    def __init__(self, prefs=None, parent=None):
+        super().__init__(parent)
+        self.prefs = prefs
+        box = QHBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(4)
+
+        self.zoom_out = QPushButton("-")
+        self.zoom_in = QPushButton("+")
+        self.fit_button = QPushButton("fit")
+        for button, tip, direction in ((self.zoom_out, "smaller map", -1),
+                                       (self.zoom_in, "bigger map", 1)):
+            button.setToolTip(tip)
+            button.clicked.connect(lambda *_a, step=direction: self.step(step))
+        # THE THEME'S 12 px SIDE PADDING IS WIDER THAN THIS BUTTON: with it left on, Qt has no content
+        # rect and draws an empty square (the same trap the dex-zoom pair documents). Only the SIDES are
+        # dropped - the 4 px top and bottom are what make a button a button, and taking them off left the
+        # two controls standing "only as tall as the chars" against the theme's own 22 px (the user).
+        self.zoom_out.setStyleSheet("padding: 4px 0;")
+        self.zoom_in.setStyleSheet("padding: 4px 0;")
+        self.fit_button.setStyleSheet("padding: 4px 6px;")
+        self.fit_button.setToolTip("fit the map to the pane again (zoom x1)")
+        self.fit_button.clicked.connect(lambda *_a: self.step(None))
+        # AND THE THREE ARE THE SAME HEIGHT, taken from the tallest of them: a `-` next to a `fit` that
+        # is one text line taller is the kind of thing that reads as broken.
+        height = max(button.sizeHint().height()
+                     for button in (self.zoom_out, self.zoom_in, self.fit_button))
+        for button in (self.zoom_out, self.zoom_in):
+            button.setFixedSize(ZOOM_BUTTON_WIDTH, height)
+        self.fit_button.setFixedHeight(height)
+        box.addWidget(self.zoom_out)
+        box.addWidget(self.zoom_in)
+
+        self.value = QLabel("")
+        self.value.setToolTip("the map's zoom - click to fit it to the pane again")
+        box.addWidget(self.value)
+        box.addWidget(self.fit_button)
+        box.addStretch(1)
+
+        _ZOOM.changed.connect(self.show_value)
+        self.show_value(zoom())
+
+    def step(self, direction):
+        """Walk the zoom steps (or go back to fit when `direction` is None), and remember it."""
+        value = set_zoom(MAP_ZOOM_DEFAULT) if direction is None else step_zoom(direction)
+        if self.prefs is not None:
+            self.prefs.set(MAP_ZOOM_KEY, value)
+
+    def show_value(self, factor):
+        self.value.setText("x%g" % factor)
+        self.zoom_out.setEnabled(factor > MAP_ZOOM_STEPS[0])
+        self.zoom_in.setEnabled(factor < MAP_ZOOM_STEPS[-1])
+
+
+def head_row(head, prefs=None):
+    """The row every map panel wears: its caption (elastic) and the zoom controls on the right.
+
+    The caption is the map's own headline, which a tab shows only when the map could NOT draw - so it
+    is allowed to be narrower than its text and the zoom bar keeps its place either way.
+    """
+    row = QWidget()
+    box = QHBoxLayout(row)
+    box.setContentsMargins(0, 0, 0, 0)
+    head.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+    box.addWidget(head, 1)
+    box.addWidget(MapZoomBar(prefs))
+    return row
+
+
+class ZoneMap(QAbstractScrollArea):
+    """One map, drawn with its own tiles and its encounter zones as translucent bordered blocks.
+
+    What will be drawn is worked out in `set_zone`, not in `paintEvent`: the blocks come from the map
+    JSON and have to be turned into horizontal runs, and a resize is many repaints, so doing it per
+    paint would make dragging the window edge stutter. Painting then only scales and fills rectangles.
+
+    `empty` is the headline for having no zone at all, and it is a parameter because THREE tabs draw
+    this map now: the first tab's map belongs to its ranking ("pick a zone on the first tab" would be
+    nonsense inside the Database tab, which is the tab it was said on).
     """
 
     def __init__(self, parent=None, empty="pick a zone on the first tab"):
@@ -41,10 +180,33 @@ class ZoneMap(QWidget):
         self.empty = empty
         self.setMinimumSize(240, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # NO FRAME: this is a pane in a panel, not a boxed field, and a frame would inset the map by
+        # its own width on top of the scrollbars.
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.zone = None
         self.headline = empty
         self.legend = []      # [(letter, colour, is_selected)] for the tab to display
         self._plan = None
+        self._scale = 1.0     # cells -> pixels, recomputed per paint and by `_update_scrollbars`
+        _MAPS.append(self)
+        self.destroyed.connect(self._forget)
+
+    def _forget(self, *_args):
+        if self in _MAPS:
+            _MAPS.remove(self)
+
+    # ------------------------------------------------------------------ zoom
+    def zoom_changed(self):
+        """The window's zoom moved: the scroll ranges and the picture both change with it.
+
+        THE VIEW STAYS WHERE IT WAS LOOKING - the map point at the middle of the pane is the one that
+        stays under the middle, which is what every other zoom does. Without it a + press would snap the
+        view back to the top-left corner of the map and the zone being examined would leave the pane.
+        """
+        centre = self._view_centre()
+        self._update_scrollbars()
+        self.centre_on(centre)
+        self.viewport().update()
 
     # ------------------------------------------------------------------ input
     def set_zone(self, zone):
@@ -59,12 +221,14 @@ class ZoneMap(QWidget):
         self.legend = []
         if zone is None:
             self.headline = self.empty
-            self.update()
+            self._update_scrollbars()
+            self.viewport().update()
             return False
         data = ez.zone_map(zone.map_file)
         if data is None:
             self.headline = "no map file found for %s" % zone.map_file
-            self.update()
+            self._update_scrollbars()
+            self.viewport().update()
             return False
         m, layers, zones = data
         # the zones this map actually marks: the ranking can name one the map file has no marker
@@ -75,74 +239,165 @@ class ZoneMap(QWidget):
             self.headline = ("%s is not marked on the map of %s - it has %s"
                              % (zone.name, mapnames.area(zone.map_file),
                                 ", ".join(sorted(drawn)) or "no zones"))
-            self.update()
+            self._update_scrollbars()
+            self.viewport().update()
             return False
         self._plan = self._plan_map(m, layers, drawn, zone)
         self.headline = self._describe(zone, entry)
         self.legend = [(name.rsplit("_", 1)[-1], ez.colour_for(name), name == zone.name)
                        for name in sorted(drawn)]
-        self.update()
+        self._update_scrollbars()
+        # A NEW ZONE SCROLLS INTO VIEW. Zoomed in, the pane shows one corner of the map, and the whole
+        # point of picking a row is to see WHERE that zone is - at x1 this is a no-op, because the
+        # whole map is on screen and the ranges are empty.
+        self.centre_on(self._selected_centre())
+        self.viewport().update()
         return True
+
+    def _selected_centre(self):
+        """The middle of the selected zone's biggest block, as a fraction of the map."""
+        if not self._plan:
+            return (0.0, 0.0)
+        for patch in self._plan["patches"]:
+            if patch["selected"] and patch["blocks"]:
+                x0, y0, x1, y1 = patch["blocks"][0]["bbox"]
+                width, height = self._plan["size"]
+                return ((x0 + x1) / 2.0 / width, (y0 + y1) / 2.0 / height)
+        return (0.0, 0.0)
 
     # ------------------------------------------------------------------ planning
     def _plan_map(self, m, layers, drawn, zone):
         """Everything to draw, as numbers in map cells - the paint only scales it."""
-        ground = list(ez.runs_by_row(ez.cells_by_row(ez.terrain_cells(m, layers))))
         patches = []
         for name in sorted(drawn):
             other = drawn[name]
             selected = name == zone.name
-            colour = QColor(ez.colour_for(name))
-            if not selected:
-                colour.setAlpha(PATCH_ALPHA)
-            runs = []
-            labels = []
-            for index, tiles in enumerate(other["patches"]):
-                runs.extend(ez.runs_by_row(ez.cells_by_row(tiles)))
-                xs = [tile[0] for tile in tiles]
-                ys = [tile[1] for tile in tiles]
-                # the label sits at the centre of the patch it names, so a zone split into two
-                # patches is labelled twice and neither label points at the wrong one
-                labels.append(((min(xs) + max(xs) + 1) / 2.0, (min(ys) + max(ys) + 1) / 2.0,
-                               name.rsplit("_", 1)[-1], selected and index == 0))
-            patches.append({
-                "colour": colour,
-                "runs": runs,
-                "labels": labels,
-                "marks": [(x, y, QColor(ez.colour_for(name))) for (x, y, _why) in other["unplaced"]],
-                "selected": selected,
-            })
-        # unselected first, so the selected zone is never overdrawn: the legend promises it is
-        # "the solid one", and drawing it last is what keeps that true where zones overlap
+            # EVERY ZONE GETS THE SAME TRANSLUCENT FILL, the selected one included - the user: "some of
+            # the blocks show as opaque, they should all be semi transparent with solid edges around
+            # the zones". The selected zone is told apart by its edge instead (white, a little wider -
+            # see `_paint_outline`), which is also what its legend chip wears.
+            fill = QColor(ez.colour_for(name))
+            fill.setAlpha(PATCH_ALPHA)
+            edge = QColor(SELECTED_EDGE if selected else ez.colour_for(name))
+            blocks = []
+            for block in ez.zone_blocks(other):
+                horizontal, vertical = ez.block_outline(block)
+                xs = [tile[0] for tile in block]
+                ys = [tile[1] for tile in block]
+                # EVERY BLOCK IS NAMED, so a zone that merges into several of them (a water zone's 41)
+                # is readable all over rather than being in one place and implied elsewhere.
+                labels = [((min(xs) + max(xs) + 1) / 2.0, (min(ys) + max(ys) + 1) / 2.0,
+                           name.rsplit("_", 1)[-1], selected)]
+                blocks.append({"runs": ez.runs_by_row(ez.cells_by_row(block)),
+                               "outline": (horizontal, vertical), "labels": labels,
+                               # the block's box in cells, for the caller that has to scroll to it
+                               "bbox": (min(xs), min(ys), max(xs) + 1, max(ys) + 1)})
+            patches.append({"fill": fill, "edge": edge, "blocks": blocks, "selected": selected})
+        # unselected first, so the selected zone is never overdrawn - its white edge has to survive a
+        # zone that overlaps it
         patches.sort(key=lambda patch: patch["selected"])
-        return {"size": (m["width"], m["height"]), "ground": ground, "patches": patches}
+        return {"size": (m["width"], m["height"]),
+                # THE MAP'S OWN TILES, if they could be read - the ground the blocks are drawn on.
+                # `paintEvent` falls back to the flat terrain footprint when this is None.
+                "picture": maptiles.picture(zone.map_file),
+                "ground": list(ez.runs_by_row(ez.cells_by_row(ez.terrain_cells(m, layers)))),
+                "patches": patches}
 
     def _describe(self, zone, entry):
         """The one-line answer to "where is it", shown above the map."""
-        placed = sum(len(patch) for patch in entry["patches"])
-        spots = ", ".join("(%d,%d)" % (min(tile[0] for tile in patch), min(tile[1] for tile in patch))
-                          for patch in entry["patches"][:SPOTS_SHOWN])
-        if len(entry["patches"]) > SPOTS_SHOWN:
-            # a titan temple map can mark 137 patches, and the line is a label: all of them at
+        blocks = ez.zone_blocks(entry)
+        spots = ", ".join("(%d,%d)" % (min(tile[0] for tile in block), min(tile[1] for tile in block))
+                          for block in blocks[:SPOTS_SHOWN])
+        if len(blocks) > SPOTS_SHOWN:
+            # a titan temple map can mark 137 blocks, and the line is a label: all of them at
             # once is a paragraph of coordinates nobody reads
             spots += ", ..."
-        if entry["patches"]:
-            text = "%s   %d patch(es), %d tiles   at %s" % (
-                zone.name, len(entry["patches"]), placed, spots or "-")
-            if entry["unplaced"]:
-                text += "   - %d marker(s) not placed" % len(entry["unplaced"])
-            return text
-        # NOT a failure to report as one: these zones mark a tile with no layer of its own, so
-        # the tiles cannot say what shape the zone is. The marks still say where it is.
-        return ("%s   the map gives %d marker(s) with no tile layer, so only their spots are "
-                "known - they are the small squares" % (zone.name, len(entry["unplaced"])))
+        cells = sum(len(block) for block in blocks)
+        text = "%s   %d block(s), %d tiles   at %s" % (zone.name, len(blocks), cells, spots or "-")
+        # HOW MUCH OF THAT SHAPE IS A MARKER RATHER THAN A TILE REGION, said out loud: a water zone
+        # is cells the map never tied to a tile layer, and the merge is the only thing that makes a
+        # block out of them (see `encounter_zones.zone_blocks`).
+        if entry["unplaced"]:
+            text += "   - %d marker cell(s) merged" % len(entry["unplaced"])
+        return text
 
     # ------------------------------------------------------------------ painting
+    def _map_scale(self):
+        """Cells -> pixels: the map fitted to the viewport, times the window's zoom.
+
+        NEVER BELOW 1:1 (a map bigger than the pane is scrolled, not shrunk to mush - and that floor is
+        what makes the scrollbars worth having). The FIT is capped at `MAP_MAX_SCALE`, and the cap is
+        applied there - to the fit - rather than to the finished scale: capping the product capped the
+        ZOOM, so a map that fits at 2.1 px a cell drew the same picture at x4, x5 and x6 while the
+        label kept counting, and the user reported the buttons as dead. Every step now multiplies the
+        same base.
+        """
+        if not self._plan:
+            return 1.0
+        width, height = self._plan["size"]
+        if width <= 0 or height <= 0:
+            return 1.0
+        fit = min(self.viewport().width() / width, self.viewport().height() / height)
+        return max(1.0, min(fit, MAP_MAX_SCALE)) * zoom()
+
+    def _drawn_size(self):
+        """The map's size in pixels at the current scale - what the scroll ranges are laid over."""
+        if not self._plan:
+            return (0, 0)
+        width, height = self._plan["size"]
+        return (int(round(width * self._scale)), int(round(height * self._scale)))
+
+    def _view_centre(self):
+        """Where the pane is pointing, as a fraction of the whole map - so it survives a zoom."""
+        drawn_w, drawn_h = self._drawn_size()
+        if drawn_w <= 0 or drawn_h <= 0:
+            return (0.0, 0.0)
+        viewport = self.viewport()
+        return ((self.horizontalScrollBar().value() + viewport.width() / 2.0) / drawn_w,
+                (self.verticalScrollBar().value() + viewport.height() / 2.0) / drawn_h)
+
+    def centre_on(self, fraction):
+        """Scroll so that point of the map (as a fraction of it) is in the middle of the pane.
+
+        The scrollbars clamp it themselves, so asking for a point outside the map - which is what
+        centring on a zone near an edge does - lands on the edge rather than past it.
+        """
+        drawn_w, drawn_h = self._drawn_size()
+        viewport = self.viewport()
+        self.horizontalScrollBar().setValue(
+            int(round(fraction[0] * drawn_w - viewport.width() / 2.0)))
+        self.verticalScrollBar().setValue(
+            int(round(fraction[1] * drawn_h - viewport.height() / 2.0)))
+
+    def _update_scrollbars(self):
+        """Make the scroll ranges match the map at the current zoom and pane size.
+
+        Called from `set_zone`, from a resize and from a zoom change - the three things that move the
+        target - and it is also where `self._scale` is refreshed, because the paint has to use the same
+        number the scrollbars were laid out with.
+        """
+        self._scale = self._map_scale()
+        viewport = self.viewport().size()
+        drawn_w, drawn_h = self._drawn_size()
+        for bar, span, have in ((self.horizontalScrollBar(), drawn_w, viewport.width()),
+                                (self.verticalScrollBar(), drawn_h, viewport.height())):
+            bar.setRange(0, max(0, span - have))
+            bar.setPageStep(have)
+            bar.setSingleStep(max(8, have // 8))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_scrollbars()
+
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(FIELD))
+        painter = QPainter(self.viewport())
+        painter.fillRect(self.viewport().rect(), QColor(FIELD))
         plan = self._plan
         if plan is not None:
+            # THE SCROLL OFFSET, in one translate: every rectangle below is in map pixels, so the
+            # viewport shows the window of the map the scrollbars are pointing at.
+            painter.translate(-self.horizontalScrollBar().value(),
+                              -self.verticalScrollBar().value())
             self._paint_plan(painter, plan)
         painter.end()
 
@@ -150,45 +405,66 @@ class ZoneMap(QWidget):
         width, height = plan["size"]
         if width <= 0 or height <= 0:
             return
-        # at least 1:1 - a map bigger than the pane is clipped rather than shrunk to mush - and
-        # never above the cap, because a small map filling a maximised window is all block
-        scale = max(1.0, min(self.width() / width, self.height() / height, MAP_MAX_SCALE))
-        ground = QColor(MAP_GROUND)
-        for (y, x0, x1) in plan["ground"]:
-            painter.fillRect(QRectF(x0 * scale, y * scale, (x1 - x0) * scale, scale), ground)
+        scale = self._scale
+        area = QRectF(0, 0, width * scale, height * scale)
+        picture = plan["picture"]
+        if picture is not None:
+            # THE MAP'S OWN TILES, drawn into the same rect the zone rectangles are placed in, so
+            # the two cannot drift apart. Smooth scaling because the map is usually much larger than
+            # the pane (a 97x70 map at 16 px a tile is 1552 px wide against ~430 px of column) and
+            # nearest-neighbour at that ratio tears the tile grid into moire.
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawPixmap(area, picture, QRectF(picture.rect()))
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        else:
+            # NO TILES READABLE: the flat footprint the zones are found on, as this drew before.
+            ground = QColor(MAP_GROUND)
+            for (y, x0, x1) in plan["ground"]:
+                painter.fillRect(QRectF(x0 * scale, y * scale, (x1 - x0) * scale, scale), ground)
         for patch in plan["patches"]:
             painter.setPen(Qt.PenStyle.NoPen)
-            for (y, x0, x1) in patch["runs"]:
-                painter.fillRect(QRectF(x0 * scale, y * scale, (x1 - x0) * scale, scale),
-                                 patch["colour"])
-            self._paint_labels(painter, patch["labels"], scale)
-            self._paint_marks(painter, patch["marks"], scale)
+            for block in patch["blocks"]:
+                for (y, x0, x1) in block["runs"]:
+                    painter.fillRect(QRectF(x0 * scale, y * scale, (x1 - x0) * scale, scale),
+                                     patch["fill"])
+            # THE MERGED BORDER, after every fill of this zone so no fill can paint over it, and in
+            # the zone's own colour at full strength (the fill is the translucent one).
+            self._paint_outline(painter, patch, scale)
+            for block in patch["blocks"]:
+                for label in block["labels"]:
+                    self._paint_label(painter, label, scale)
 
-    def _paint_labels(self, painter, labels, scale):
-        if not labels:
-            return
-        metrics = None
-        for (cx, cy, text, big) in labels:
-            font = QFont("Consolas")
-            font.setBold(True)
-            font.setPixelSize(max(7, int(scale * (2.2 if big else 1.4))))
-            painter.setFont(font)
-            painter.setPen(QColor("#ffffff"))
-            metrics = painter.fontMetrics()
-            # Tk's create_text centres the text on the point; QPainter draws from the baseline at
-            # the left edge, so the offset is done here rather than by giving the label its own rect
-            painter.drawText(QPointF(cx * scale - metrics.horizontalAdvance(text) / 2.0,
-                                     cy * scale + metrics.ascent() / 2.0), text)
+    def _paint_outline(self, painter, patch, scale):
+        """The block borders: one line per side that faces out of its own block.
 
-    def _paint_marks(self, painter, marks, scale):
-        """The outlined squares: markers with no tile layer (water, cave), at a fixed size.
-
-        Fixed rather than scaled, because a one-tile mark at the map's own scale is a single
-        pixel, and for a cave zone these marks can be the only evidence of where it is.
+        SCREEN pixels, not cells: at 3-4 px a cell a one-cell border would be a slab that swallows the
+        block, and on a one-cell-wide water channel it would be all border. Widened a little with the
+        map so a big map's lines are not hairlines, and capped so they never grow into the fill. The
+        selected zone's edge is white and wider, which is how it is told apart now that every fill is
+        translucent.
         """
-        radius = 2
+        wanted = SELECTED_EDGE_WIDTH if patch["selected"] else EDGE_WIDTH
+        pen = QPen(patch["edge"], max(1.0, min(wanted, scale * 0.3)))
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        for (x, y, colour) in marks:
-            painter.setPen(QPen(colour, 1))
-            painter.drawRect(QRectF((x + 0.5) * scale - radius, (y + 0.5) * scale - radius,
-                                    radius * 2, radius * 2))
+        for block in patch["blocks"]:
+            horizontal, vertical = block["outline"]
+            for (x0, y, x1) in horizontal:
+                painter.drawLine(QPointF(x0 * scale, y * scale), QPointF(x1 * scale, y * scale))
+            for (x, y0, y1) in vertical:
+                painter.drawLine(QPointF(x * scale, y0 * scale), QPointF(x * scale, y1 * scale))
+
+    def _paint_label(self, painter, label, scale):
+        """The zone's letter, centred on the block it names."""
+        cx, cy, text, big = label
+        font = QFont("Consolas")
+        font.setBold(True)
+        font.setPixelSize(max(7, int(scale * (2.2 if big else 1.4))))
+        painter.setFont(font)
+        painter.setPen(QColor("#ffffff"))
+        metrics = painter.fontMetrics()
+        # Tk's create_text centres the text on the point; QPainter draws from the baseline at
+        # the left edge, so the offset is done here rather than by giving the label its own rect
+        painter.drawText(QPointF(cx * scale - metrics.horizontalAdvance(text) / 2.0,
+                                 cy * scale + metrics.ascent() / 2.0), text)

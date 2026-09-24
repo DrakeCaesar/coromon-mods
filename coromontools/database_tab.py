@@ -90,10 +90,11 @@ from . import icons, mapnames
 from .config import (HIDE_COMPLETE_KEY, ICON_ZOOM, ICON_ZOOM_KEY, ICON_ZOOM_MAX, ICON_ZOOM_MIN,
                      STATE_CAUGHT, STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
 from .grind import encounter_lines
+from . import mapview
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
 from .text import pretty
-from .widgets import mono_height, mono_text
+from .widgets import FittedPane, mono_height, mono_text
 
 try:
     import savefile
@@ -129,12 +130,11 @@ HINT = "Click a Coromon, then one of its locations, to see the area on the map."
 # nothing to draw - the first tab's default would tell this tab to go and look at the first tab.
 MAP_EMPTY = "pick one of its locations"
 
-# HOW THE TWO COLUMNS OPEN, in pixels. The WIDTHS are the real choice: the grid needs
-# `GROUPS * (stages + 1)` columns - 1955 px at the default icon scale - and the panel needs about
-# 500 to show the location list's four columns without scrolling itself. The right column's opening
-# HEIGHTS are only what the first layout pass gets: the list is then given exactly its own content
-# height by `_fit_list`, so the map takes everything below the last row it has.
-GRID_WIDTH, PANEL_WIDTH = 900, 500
+# HOW THE TWO COLUMNS OPEN. The right column's opening HEIGHTS are only what the first layout pass
+# gets: the two panes above the map are then given exactly their own content height by `_fit_column`,
+# so the map takes everything below the last row of the list. NO WIDTH IS NAMED for either column - the
+# separator is placed from the content instead (`widgets.FittedPane`): the grid gets the width its own
+# `GROUPS * (stages + 1)` columns need, and the map column takes the rest of the window.
 LIST_OPENING, SPECIES_OPENING, MAP_OPENING = 60, 90, 380
 
 # THE LOCATION LIST'S COLUMNS: where can I catch this one, as the area, the zone's own name, the
@@ -365,7 +365,9 @@ class DatabaseTab(QWidget):
         below = QWidget()
         stack = QVBoxLayout(below)
         stack.setContentsMargins(0, 0, 0, 0)
-        stack.addWidget(self.map_head)
+        # THE CAPTION ROW (`mapview.head_row`): the map's own line when it could not draw, plus the
+        # -/+ zoom buttons every map panel wears.
+        stack.addWidget(mapview.head_row(self.map_head, self.prefs))
         stack.addWidget(self.legend_row)
         stack.addWidget(self.map, 1)
 
@@ -393,13 +395,25 @@ class DatabaseTab(QWidget):
         # AND THE SLIDER BETWEEN THE COLUMNS. Not collapsible: the grid IS the tab, and a column
         # dragged to nothing would leave nothing to pick a Coromon with, which is what fills the
         # other one.
+        #
+        # THE GRID GETS ITS OWN WIDTH AND THE MAP COLUMN GETS THE REST - the user: "the database view
+        # also has a gap before the separator making the map small". The grid's own width is a real
+        # number (`_grid_width`), and the panel used to be given the width of the LOCATIONS LIST
+        # instead, which is around 300 px: on a wide window that left the grid's thousand spare pixels
+        # as an empty gap and squeezed the map into the list's width. So the grid is the pane that is
+        # MEASURED, the map column is the one that grows, and the reserve is what the map column may
+        # not lose (see `_map_column`).
         self.split = QSplitter(Qt.Orientation.Horizontal)
         self.split.setChildrenCollapsible(False)
         self.split.addWidget(self.scroll)
         self.split.addWidget(panel)
-        self.split.setStretchFactor(0, 3)
-        self.split.setStretchFactor(1, 2)
-        self.split.setSizes([GRID_WIDTH, PANEL_WIDTH])
+        self.split.setStretchFactor(0, 0)
+        self.split.setStretchFactor(1, 1)
+        self.pane_fit = FittedPane(self.split, 0, self._grid_width, elastic=1,
+                                   reserve=self._map_column)
+        # THE RESERVE MOVES WHEN THE LIST IS REFILLED (another Coromon's locations have other columns),
+        # and the grid's own width moves when the dex scale does - so both re-fit the separator.
+        self.locations.columnsChanged.connect(self.pane_fit.refit)
         outer.addWidget(self.split, 1)
 
         self.show_location(None)      # the empty map says what to do, from the start
@@ -501,6 +515,9 @@ class DatabaseTab(QWidget):
         so a new scale means resizing both. There is nothing to rebuild - the widgets stay, only
         their sizes change - but there are two places to keep in step, which is why they are done
         in one function, called by `_build` (after the cells exist) and by `set_zoom`.
+
+        THE SEPARATOR MOVES WITH THEM: the grid's own width is what the column to its left is sized
+        to, so a scale change re-fits it - "the separator should be static based on that".
         """
         size = icons.icon_size(self.zoom)
         for column in range(self.columns):
@@ -510,6 +527,37 @@ class DatabaseTab(QWidget):
                 self.grid.setColumnMinimumWidth(column, GROUP_GAP)
         for picture, _caption in self.cells.values():
             picture.setFixedSize(QSize(size[0], size[1]))
+        # ... AND THE SEPARATOR MOVES WITH THEM, which is not immediate: the grid's `sizeHint` still
+        # reports the PREVIOUS scale until its layout has run again (see `FittedPane.refit_later`).
+        self.pane_fit.refit_later()
+
+    def _grid_width(self):
+        """The width the dex grid needs to lay out every column it has, and not a pixel more.
+
+        `holder.sizeHint()` is the grid's own columns plus its margins and spacings, which is what the
+        LEFT column of the splitter is sized to - so the separator lands just past the last icon
+        instead of leaving the grid's spare width as a gap (see `widgets.FittedPane`). The trailing
+        spacer column the grid stretches is part of the layout but has no content and no minimum, so
+        it adds nothing here, which is the point.
+
+        The scroll area's own frame and padding are added on, and the vertical scrollbar WITH them -
+        it takes its width out of the viewport, so a column fitted to the grid alone would hide the
+        last icon behind it. It is counted whether or not it is needed: the grid is always taller
+        than the window, so it is always there.
+        """
+        frame = 2 * self.scroll.viewport().x()
+        bar = self.scroll.verticalScrollBar().sizeHint().width()
+        return self.holder.sizeHint().width() + frame + bar
+
+    def _map_column(self):
+        """What the map's column may not lose when the grid is fitted: its own content.
+
+        The grid is given its width only out of what is LEFT, and what has to be left for the map
+        column is the wider of the two things in it - the locations list's own columns, and the map's
+        own floor (240x180, see `ZoneMap`). On a window too narrow for both, the grid scrolls itself
+        rather than squeezing the map out of the column.
+        """
+        return max(self.locations.content_width(), self.map.minimumWidth())
 
     def set_zoom(self, zoom):
         """Change the size of every dex icon, and REMEMBER it.

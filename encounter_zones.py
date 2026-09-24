@@ -19,7 +19,10 @@ WHERE IT DOES NOT APPLY, and the output says so rather than guessing:
   * a tileset whose tiles are bigger than the map grid (48 px trees over 16 px cells): one tile
     spans several cells, so a run of same-tileset cells is not a region.
   * water and cave markers, which carry NO `tileLayer` property at all, and often sit on a tile that
-    is empty in every layer. Those are reported as unplaced.
+    is empty in every layer. Those are kept as bare CELLS, which is not a failure: a water zone marks
+    its area with hundreds of them (`SWAMP_3_WATER` 409, `WATERROUTE_4_WATER` 170), so the cells ARE
+    the shape - `zone_blocks` merges them 4-connected into the blocks the window draws (170 cells ->
+    two blocks, 409 -> 41), and `block_outline` gives each block the border that follows it.
 
     python encounter_zones.py                 # writes encounter_zones.html
     python encounter_zones.py ICE             # only areas whose name contains ICE
@@ -48,8 +51,11 @@ PAD = 6
 # READING THE MAPS
 # ==============================================================================================
 def find_map_file(name):
-    hits = glob.glob(os.path.join(MAPS, "**", name + ".json"), recursive=True)
-    return hits[0] if hits else None
+    """The map's JSON, by name - cached, because the glob walks 83 MB of map paths."""
+    if name not in _PATH_CACHE:
+        hits = glob.glob(os.path.join(MAPS, "**", name + ".json"), recursive=True)
+        _PATH_CACHE[name] = hits[0] if hits else None
+    return _PATH_CACHE[name]
 
 
 def walk_layers(layers):
@@ -58,6 +64,12 @@ def walk_layers(layers):
             yield from walk_layers(l.get("layers", []))
         else:
             yield l
+
+
+# Both of these read a file that does not change while the window is open, and the GUI reads a map
+# from several places (see `map_parts`), so the answers are kept.
+_PATH_CACHE = {}      # map name -> path or None
+_PARTS_CACHE = {}     # map path -> (map, layers, tilesets)
 
 
 def resolve_tileset(map_path, source):
@@ -82,7 +94,14 @@ def resolve_tileset(map_path, source):
 
 
 def map_parts(path):
-    """(map dict, {layer name: layer}, tileset ranges as dicts with lo/hi/name/tw/th)."""
+    """(map dict, {layer name: layer}, tileset ranges) - CACHED per path.
+
+    The GUI asks for a map several times over - `markers` reads it, `zone_patches` reads it again,
+    `maptiles` reads it once more for the tiles - and each read parses a megabyte of JSON for the same
+    answer. Nothing in here is mutated by any caller, so one read is enough.
+    """
+    if path in _PARTS_CACHE:
+        return _PARTS_CACHE[path]
     m = json.load(open(path, encoding="utf-8"))
     layers = {l["name"]: l for l in walk_layers(m.get("layers", [])) if l.get("type") == "tilelayer"}
     first = [t["firstgid"] for t in m.get("tilesets", [])] + [1 << 30]
@@ -99,7 +118,8 @@ def map_parts(path):
         sets.append({"lo": t["firstgid"], "hi": first[i + 1],
                      "name": src.replace(".json", ""),
                      "tw": ts.get("tilewidth"), "th": ts.get("tileheight")})
-    return m, layers, sets
+    _PARTS_CACHE[path] = (m, layers, sets)
+    return _PARTS_CACHE[path]
 
 
 def markers(path):
@@ -230,6 +250,66 @@ def cells_by_row(tiles):
     for (x, y) in tiles:
         rows.setdefault(y, []).append(x)
     return rows
+
+
+def components(cells):
+    """The 4-connected groups of a cell set - one BLOCK per group.
+
+    WHY IT IS NEEDED, measured on the shipped maps: a zone whose markers name no tile layer marks its
+    area with MANY cells - `SWAMP_3_WATER` has 409 of them, `WATERROUTE_4_WATER` 170 - and those cells
+    ARE the shape. Drawn one at a time they are a field of dots; merged they are the body of water the
+    player means by "the water zone" (409 cells -> 41 blocks, 170 -> 2, `DESERTTOWN_WATER`'s 96 -> 1).
+    """
+    todo = set(cells)
+    out = []
+    while todo:
+        seed = todo.pop()
+        block, stack = {seed}, [seed]
+        while stack:
+            x, y = stack.pop()
+            for neighbour in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if neighbour in todo:
+                    todo.discard(neighbour)
+                    block.add(neighbour)
+                    stack.append(neighbour)
+        out.append(block)
+    return out
+
+
+def zone_blocks(entry):
+    """The merged blocks a zone is drawn as, biggest first - its patches and its bare cells together.
+
+    A patch is already a connected run of the zone's own tileset (`patch_tiles`), and a marker that
+    never resolved to one is a cell of the shape itself, so the union of the two split into 4-connected
+    groups is the zone as it should be drawn: `waterRoute_4`'s water becomes two blocks (151 and 19
+    cells) where its markers alone were 170 loose cells, and its route eight where they were 340.
+    """
+    cells = set()
+    for tiles in entry["patches"]:
+        cells |= set(tiles)
+    cells |= {(x, y) for (x, y, _why) in entry["unplaced"]}
+    return sorted(components(cells), key=len, reverse=True)
+
+
+def block_outline(block):
+    """The sides of a block that face OUT, as segments in cells - the merged border.
+
+    Per CELL SIDE, not per cell and not per bounding box: a side whose neighbour belongs to the same
+    block is left out, so the border follows an L-shaped or holed region exactly and two adjacent cells
+    share one line instead of drawing two. Returns `(horizontal, vertical)`, each a list of
+    `(x0, y, x1)` / `(x, y0, y1)`.
+    """
+    horizontal, vertical = [], []
+    for (x, y) in block:
+        if (x, y - 1) not in block:
+            horizontal.append((x, y, x + 1))
+        if (x, y + 1) not in block:
+            horizontal.append((x, y + 1, x + 1))
+        if (x - 1, y) not in block:
+            vertical.append((x, y, y + 1))
+        if (x + 1, y) not in block:
+            vertical.append((x + 1, y, y + 1))
+    return horizontal, vertical
 
 
 def terrain_cells(m, layers):

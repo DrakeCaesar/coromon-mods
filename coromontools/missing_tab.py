@@ -27,9 +27,10 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton, QSizePolicy, QS
                                QWidget)
 
 from . import mapnames
+from . import mapview
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
-from .widgets import mono_text, note
+from .widgets import FittedPane, mono_text, note
 
 try:
     import savefile
@@ -135,14 +136,14 @@ class MissingTab(QWidget):
         self.split = QSplitter(Qt.Orientation.Horizontal)
         self.split.addWidget(left)
         self.split.addWidget(self._build_map())
-        self.split.setStretchFactor(0, 900)
-        self.split.setStretchFactor(1, 500)
-        # THE SAME OPENING RATIO AS THE DATABASE TAB (900:500), so the two tabs split their window the
-        # same way: at the size this window actually runs at (1040x560) the left column comes out about
-        # 660 px, which holds Area, Zone, to catch, of and easiest - the columns the ranking is read
-        # by - and the map still has the 240x180 it will not go under.
-        self.split.setSizes([900, 500])
+        # THE TABLE'S COLUMNS ARE THE WIDTH OF THE LEFT COLUMN and the map takes the rest: the 900:500
+        # this used to be given is a RATIO - it came out about 660 px at the size this window runs at
+        # - and a ratio is off by however much the last column then stretched to fill. See
+        # `widgets.FittedPane`.
+        self.split.setStretchFactor(0, 0)
+        self.split.setStretchFactor(1, 1)
         self.split.setChildrenCollapsible(False)
+        self.pane_fit = FittedPane(self.split, 0, self.table, elastic=1)
         outer.addWidget(self.split, 1)
 
     def _build_map(self):
@@ -156,7 +157,8 @@ class MissingTab(QWidget):
         self.legend_row = QWidget()
         self.legend_box = QHBoxLayout(self.legend_row)
         self.legend_box.setContentsMargins(0, 0, 0, 0)
-        box.addWidget(self.map_head)
+        # ... WITH THE ZOOM CONTROLS every map panel wears (`mapview.head_row`)
+        box.addWidget(mapview.head_row(self.map_head, self.prefs))
         box.addWidget(self.legend_row)
         box.addWidget(self.map, 1)
         return panel

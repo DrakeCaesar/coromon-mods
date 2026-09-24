@@ -143,8 +143,13 @@ ICON_ZOOM_KEY = "icon_zoom"
 # how that tab is being read at the time, not something to re-tick on every start.
 HIDE_COMPLETE_KEY = "hide_complete"
 
-# A map is fitted to the pane, but never blown up past this: a small map filling a maximised
-# window is all block, and the patches stop being readable.
+# A map is FITTED to the pane, but the fit itself is never blown up past this: a small map filling a
+# maximised window is all block, and the patches stop being readable.
+#
+# THE CAP IS ON THE FIT, NOT ON THE ZOOM (see `mapview._map_scale`). Capping the finished scale seems
+# the same and is not: a map that fits at 2.1 px a cell reached this ceiling by x4, so x4, x5 and x6 all
+# drew exactly the same picture while the label kept counting - the user: "the scale buttons don't do
+# anything".
 MAP_MAX_SCALE = 8.0
 
 # How many patch origins the map's headline names before it gives up and says "...". One map
@@ -154,4 +159,26 @@ SPOTS_SHOWN = 6
 # How much of a patch's colour survives when it is not the selected zone. The selected zone is
 # drawn solid, and the rest are faded so it can be picked out of six - the Tk version had no
 # alpha and had to stipple them instead.
-PATCH_ALPHA = 150
+#
+# EVERY BLOCK IS TRANSLUCENT NOW, the selected one included - the user: "some of the blocks show as
+# opaque, they should all be semi transparent with solid edges around the zones". A zone's identity is
+# its EDGE, so the fill only has to tint the map's own tiles - which is also why this is lighter than
+# it was when the ground behind it was a flat dark colour.
+PATCH_ALPHA = 110
+# ... AND THE EDGE IS AN OPAQUE COLOUR, because the map's tiles are behind the zones now: a translucent
+# edge on top of grass or water is not an edge. The SELECTED zone's edge is white and a little wider -
+# the same white border its legend chip wears - so "which one am I looking at" is answered without one
+# zone's fill differing from the rest.
+EDGE_WIDTH = 2.0
+SELECTED_EDGE = "#ffffff"
+SELECTED_EDGE_WIDTH = 3.0
+
+# THE MAP VIEW ZOOMS, and the value belongs to the whole window: the map is drawn in three tabs, and a
+# zoom that meant something different in each would be a bug rather than a feature. x1 is "fitted to the
+# pane", which is what it always was, and the buttons scale around that; above x1 the pane scrolls.
+MAP_ZOOM_KEY = "map_zoom"
+MAP_ZOOM_DEFAULT = 1
+# THE STEPS THE BUTTONS WALK, and WHOLE NUMBERS ONLY: the map is pixel art on a 16 px grid, so a factor
+# of x1.25 magnifies a tile by a fraction and no label can honestly say by how much - the user: "they
+# should be integer scaling only". Six of them, because past x6 the pane shows a couple of rooms.
+MAP_ZOOM_STEPS = (1, 2, 3, 4, 5, 6)

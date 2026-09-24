@@ -27,12 +27,12 @@ from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListW
 
 import dex
 
-from . import mapnames
+from . import mapnames, mapview
 from .config import (LEVEL_DEFAULT, MIN_SHARE_DEFAULT, ONLY_XP_DEFAULT, ON_TOP_DEFAULT,
                      SCALES_SPAN, XP_MARGIN)
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
-from .widgets import mono_text, note
+from .widgets import FittedPane, mono_text, note
 
 import items
 
@@ -71,9 +71,11 @@ NOTES = ("Shares are the game's own encounter weights, normalised. XP PER FIGHT 
          "are how you level a Coromon you are not fighting with. All four are ONE Coromon facing the "
          "whole fight (the solo case); two Coromon facing the same enemy SPLIT that enemy's reward.")
 
-MAP_NOTES = ("Patches are read from the map tiles: the marker's tile, plus the connected tiles "
-             "of the same tileset - exact for grass, whose tiles are one map cell. Water and "
-             "cave markers name no layer and show as small outlined squares.")
+MAP_NOTES = ("Zones are read from the map: a marker's own tile plus the connected tiles of its "
+             "tileset, which is exact for grass (one tile, one map cell). A marker that names no "
+             "layer - water, caves - has its CELLS as the shape instead, and those are merged into "
+             "blocks and edged. Every block is named; the selected zone is the one with the white "
+             "outline.")
 
 # THE NUMBERS COME FIRST, AND THAT IS A DELIBERATE ORDER. This window is used BESIDE a fullscreen
 # game, so it is small: measured on the shipped window state it opens at 1040x560, which leaves this
@@ -230,12 +232,14 @@ class GrindTab(QWidget):
         splitter.addWidget(self._build_areas())
         splitter.addWidget(self._build_ranking())
         splitter.addWidget(self._build_map())
-        # the ranking gets the room; the picker is a fixed-ish list and the map only has to be
-        # big enough to tell six patches apart
+        # THE RANKING PANE IS THE TABLE'S OWN WIDTH and the map takes everything else: the ranking used
+        # to be given a share of the window (660 of 1330), which is not a width anything in it asks
+        # for - it is a ratio, and a ratio moves every time the window does. The fit also means the
+        # separator lands just past the last column instead of inside it (see `widgets.FittedPane`).
         splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 0)
         splitter.setStretchFactor(2, 1)
-        splitter.setSizes([250, 660, 420])
+        self.pane_fit = FittedPane(splitter, 1, self.table, elastic=2)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 6)
@@ -334,7 +338,9 @@ class GrindTab(QWidget):
 
         self.map_head = QLabel("")
         self.map_head.setWordWrap(True)
-        box.addWidget(self.map_head)
+        # THE CAPTION ROW, which every map panel wears: the map's own line and the -/+ zoom buttons
+        # (`mapview.head_row`), so the three tabs that draw a map are laid out the same way.
+        box.addWidget(mapview.head_row(self.map_head, self.prefs))
 
         self.legend_row = QWidget()
         self.legend_box = QHBoxLayout(self.legend_row)
