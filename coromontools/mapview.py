@@ -45,9 +45,39 @@ from .widgets import note
 # its own zero padding and a fixed size, exactly like the Database tab's dex-zoom pair.
 ZOOM_BUTTON_WIDTH = 22
 
+# THE STORY-STATE STEPPER: what "no state" is called, how much room its label keeps (so the buttons
+# beside it do not shuffle as the name changes length), and how long a name may be before it is
+# shortened. The longest condition in the game is `beforeOrWhileRESTORE_EQUILIBRIUM` at 32 characters.
+VARIANT_SAVED = "as saved"
+VARIANT_LABEL_WIDTH = 92
+VARIANT_LABEL_CHARS = 16
+# The words a condition starts with when it says WHEN it applies. Stripped for the label only: the
+# map file and the tooltip keep the game's own name.
+STATE_WORDS = ("beforeOrWhile", "whileNot", "ifNot", "before", "after", "while", "not", "if",
+               "and", "Or")
+
+
+def short_state(name):
+    """A condition name without its leading `while`/`after`/..., shortened to fit the stepper.
+
+    `whileEVACUATION` reads `EVACUATION` and `beforeOrWhileRESTORE_EQUILIBRIUM` reads
+    `RESTORE_EQUILIB…`. The full name is in the tooltip and on the map's own file - this is a label,
+    and a 32 character one would push the zoom pad off the panel.
+    """
+    short = name or ""
+    changed = True
+    while changed:
+        changed = False
+        for word in STATE_WORDS:
+            if short.startswith(word) and len(short) > len(word):
+                short = short[len(word):]
+                changed = True
+    return short if len(short) <= VARIANT_LABEL_CHARS else short[:VARIANT_LABEL_CHARS - 1] + "\u2026"
+
 
 class _Zoom(QObject):
-    """The window's map state: one zoom and one scaling filter, every map watching them.
+    """The window's map state: one zoom, one scaling filter and one story variant, every map
+    watching them.
 
     Module-level values rather than parameters threaded through three tabs, because they ARE one
     value each - the map is drawn in three places and they must agree. `ui_smoke` checks that a step
@@ -56,6 +86,7 @@ class _Zoom(QObject):
 
     changed = Signal(float)
     filter_changed = Signal(bool)
+    variant_changed = Signal(object)
 
 
 _ZOOM = _Zoom()
@@ -63,6 +94,11 @@ _ZOOM_VALUE = MAP_ZOOM_DEFAULT
 # ... AND THE SCALING FILTER, on by default: the picture is usually drawn smaller than its own pixels
 # (see `config.MAP_SMOOTH_*`), where nearest neighbour is moire and smooth is the readable choice.
 _SMOOTH = MAP_SMOOTH_DEFAULT
+# ... AND THE STORY STATE the map is drawn in, `None` meaning "as the map was saved" - the map's own
+# visible layers, which is the state the game itself is in. The others are the alternatives the map
+# carries (`maptiles.variants`): a window-wide value, like the zoom, because a story moment covers
+# every map at once; a map that has no such layer simply stays as saved.
+_VARIANT = None
 _MAPS = []          # every live ZoneMap, so one step redraws them all
 
 
@@ -74,6 +110,25 @@ def zoom():
 def smooth():
     """Whether the map is scaled with the smooth filter (True) or nearest neighbour (False)."""
     return _SMOOTH
+
+
+def variant():
+    """The story state the maps are drawn in: a condition name, or None for "as saved"."""
+    return _VARIANT
+
+
+def set_variant(name):
+    """Draw every map in the story state `name` (None for as-saved) and redraw them.
+
+    A RE-PLAN, not a redraw: the variant picks a different set of layers per map
+    (`maptiles.layer_names`), so the picture the plan holds is a different picture.
+    """
+    global _VARIANT
+    _VARIANT = name or None
+    for widget in list(_MAPS):
+        widget.variant_changed()
+    _ZOOM.variant_changed.emit(_VARIANT)
+    return _VARIANT
 
 
 def set_smooth(enabled):
@@ -175,7 +230,12 @@ class MapZoomBar(QWidget):
 
 
 def head_row(head, prefs=None):
-    """The row every map panel wears: its caption (elastic), the zoom controls and the filter tick.
+    """The row every map panel wears: its caption (elastic), the zoom controls, the filter tick and
+    the story-state stepper.
+
+    RETURNS `(row, variant_bar)`, because the stepper belongs to the map rather than to the row: the
+    states to flip between are the ones THIS map carries, so the panel hands the bar to its `ZoneMap`
+    (`set_variant_bar`) and the map fills it in every time it is pointed at a zone.
 
     The caption is the map's own headline, which a tab shows only when the map could NOT draw - so it
     is allowed to be narrower than its text and the controls keep their place either way.
@@ -187,7 +247,81 @@ def head_row(head, prefs=None):
     box.addWidget(head, 1)
     box.addWidget(MapZoomBar(prefs))
     box.addWidget(MapFilterCheck(prefs))
-    return row
+    variants = MapVariantBar()
+    box.addWidget(variants)
+    return row, variants
+
+
+class MapVariantBar(QWidget):
+    """`<  as saved  >` - the story states the map on screen carries, one step at a time.
+
+    A STEPPER RATHER THAN A BUTTON PER STATE, which is what was asked for at first: the states are
+    the game's own condition names and there can be nine of them on one map (`iceTown`) and 32
+    characters long (`beforeOrWhileRESTORE_EQUILIBRIUM`), so a row of buttons would be wider than the
+    panel - and this says the same thing in the width of one label. `<` and `>` walk the list of THIS
+    map's states, with `as saved` first, and the label is the full name in the tooltip.
+
+    HIDDEN WHEN THE MAP HAS NO STATES: 46 of the 69 maps have none, and an empty control on them
+    would be a button that does nothing.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        box = QHBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(2)
+        self.back = QPushButton("<")
+        self.states_label = QLabel("")
+        self.forward = QPushButton(">")
+        for button, step, tip in ((self.back, -1, "the previous state of the story"),
+                                  (self.forward, 1, "the next state of the story")):
+            button.setToolTip(tip)
+            button.setStyleSheet("padding: 4px 0;")
+            button.clicked.connect(lambda *_a, delta=step: self.step(delta))
+        self.back.setFixedWidth(ZOOM_BUTTON_WIDTH)
+        self.forward.setFixedWidth(ZOOM_BUTTON_WIDTH)
+        height = max(button.sizeHint().height() for button in (self.back, self.forward))
+        for button in (self.back, self.forward):
+            button.setFixedHeight(height)
+        self.states_label.setMinimumWidth(VARIANT_LABEL_WIDTH)
+        box.addWidget(self.back)
+        box.addWidget(self.states_label)
+        box.addWidget(self.forward)
+        self.states = []                    # the map's own states, `None` first
+        self.setVisible(False)
+        _ZOOM.variant_changed.connect(self.show_state)
+
+    def populate(self, states):
+        """Show the states of the map on screen, and mark the one being drawn.
+
+        The label follows the MAP: a state is window-wide (`set_variant`) while a map may not have it
+        at all, and then the map is drawn as saved - which is what the label has to say.
+        """
+        self.states = [None] + list(states)
+        self.setVisible(bool(states))
+        current = variant() if variant() in states else None
+        self._show(current)
+        self.setToolTip("this map is drawn in these states of the story: %s"
+                        % ", ".join(VARIANT_SAVED if name is None else name for name in self.states))
+
+    def _show(self, state):
+        self.states_label.setText(VARIANT_SAVED if state is None else short_state(state))
+        self.back.setEnabled(len(self.states) > 1)
+        self.forward.setEnabled(len(self.states) > 1)
+
+    def step(self, direction):
+        """One press: the next state this map carries, and the window is drawn in it."""
+        if not self.states:
+            return None
+        index = self.states.index(variant()) if variant() in self.states else 0
+        index = (index + direction) % len(self.states)
+        state = self.states[index]
+        set_variant(state)
+        return state
+
+    def show_state(self, state):
+        """The window's state moved: show it, or `as saved` when this map has no such state."""
+        self._show(state if state in self.states else None)
 
 
 class MapFilterCheck(QCheckBox):
@@ -293,12 +427,28 @@ class ZoneMap(QAbstractScrollArea):
         self.legend = []      # [(letter, colour, is_selected)] for the tab to display
         self._plan = None
         self._scale = 1.0     # cells -> pixels, recomputed per paint and by `_update_scrollbars`
+        self._variant_bar = None
         _MAPS.append(self)
         self.destroyed.connect(self._forget)
 
     def _forget(self, *_args):
         if self in _MAPS:
             _MAPS.remove(self)
+
+    def set_variant_bar(self, bar):
+        """Point this map at the story-state stepper of its panel (see `head_row`)."""
+        self._variant_bar = bar
+
+    def variant_changed(self):
+        """The window's story state moved: the picture is a different one, so the plan is rebuilt.
+
+        THE VIEW IS LEFT ALONE, like a selection change: a state is a different set of layers over the
+        same map, and the cells did not move.
+        """
+        if self.zone is not None:
+            self.set_zone(self.zone)
+        else:
+            self.viewport().update()
 
     # ------------------------------------------------------------------ zoom
     def zoom_changed(self):
@@ -351,6 +501,10 @@ class ZoneMap(QAbstractScrollArea):
         self.headline = self._describe(zone, entry)
         self.legend = [(name.rsplit("_", 1)[-1], ez.colour_for(name), name == zone.name)
                        for name in sorted(drawn)]
+        if self._variant_bar is not None:
+            # THE STATES THIS MAP CARRIES, which is what the stepper walks - and it is told about
+            # them here, because the panel is built once while the map it shows is not.
+            self._variant_bar.populate(maptiles.variants(m))
         self._update_scrollbars()
         # THE VIEW DOES NOT MOVE WHEN THE SELECTION DOES. It used to scroll the picked zone's own
         # block into sight, which reads well once and is wrong the moment you are comparing rows: the
@@ -403,7 +557,7 @@ class ZoneMap(QAbstractScrollArea):
         return {"size": (m["width"], m["height"]),
                 # THE MAP'S OWN TILES, if they could be read - the ground the blocks are drawn on.
                 # `paintEvent` falls back to the flat terrain footprint when this is None.
-                "picture": maptiles.picture(zone.map_file),
+                "picture": maptiles.picture(zone.map_file, variant()),
                 "ground": list(ez.runs_by_row(ez.cells_by_row(ez.terrain_cells(m, layers)))),
                 "patches": patches}
 

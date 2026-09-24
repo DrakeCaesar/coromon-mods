@@ -218,6 +218,17 @@ def main():
           "-%d/%d  +%d  fit%d  vs %s=%d" % (
               map_bar.zoom_out.width(), map_bar.zoom_out.height(), map_bar.zoom_in.height(),
               map_bar.fit_button.height(), theme_button.text()[:8], theme_button.height()))
+    # ... AND THE STEPPER'S TWO BUTTONS ARE THE SAME BUTTON, which is why they are built the same way:
+    # their own padding, a fixed width, and their height taken from the max of the two hints. A label
+    # whose text changes length is NOT allowed to shuffle them, so it keeps a fixed width too.
+    check("the stepper's < and > are the pad's buttons, and its label keeps its room",
+          grind.variant_bar.back.width() == map_bar.zoom_in.width() == mapview.ZOOM_BUTTON_WIDTH
+          and grind.variant_bar.back.height() == grind.variant_bar.forward.height()
+          == map_bar.zoom_in.height()
+          and grind.variant_bar.states_label.minimumWidth() == mapview.VARIANT_LABEL_WIDTH,
+          "%dx%d, label >= %d px" % (grind.variant_bar.back.width(),
+                                     grind.variant_bar.back.height(),
+                                     grind.variant_bar.states_label.minimumWidth()))
     fit_scale = grind.map._scale
     check("... which opens fitted to the pane, with nothing to scroll",
           mapview.zoom() == config.MAP_ZOOM_DEFAULT
@@ -312,11 +323,79 @@ def main():
     map_bar.fit_button.click()
     pump(app, 2)
 
+    # THE STORY-STATE STEPPER. The states are the game's own condition names, and the control is two
+    # buttons around one label - `<  as saved  >` - because a row of buttons cannot hold them:
+    # `iceTown` carries NINE states and the longest name in the game is 32 characters
+    # (`beforeOrWhileRESTORE_EQUILIBRIUM`). One press walks to the next state of the map on screen and
+    # repaints every map in the window in it; `as saved` is the list's first entry and the map as the
+    # file has it.
+    ice_zone = encounters.Zone("iceTown", {"name": "ICETOWN"}, [])
+    plain_zone = encounters.Zone("waterRoute_4", {"name": "WATERROUTE_4_WATER"}, [])
+    import encounter_zones as ez
+    kept_zone = grind.map.zone
+    grind.map.set_zone(ice_zone)
+    # ZOOMED IN PAST x1, which is the only state in which a view can move at all - the check below is
+    # that flipping a state does NOT move it.
+    mapview.set_zoom(3)
+    pump(app, 3)
+    check("the stepper appears on a map that has story states",
+          grind.variant_bar is not None and grind.variant_bar.isVisible()
+          and grind.variant_bar.states[0] is None and len(grind.variant_bar.states) == 10,
+          None if grind.variant_bar is None else "%d entry(ies), first %r"
+          % (len(grind.variant_bar.states), grind.variant_bar.states[0]))
+    check("... and the label says which state, with the long name in the tooltip",
+          grind.variant_bar.states_label.text() == mapview.VARIANT_SAVED
+          and mapview.short_state("beforeOrWhileRESTORE_EQUILIBRIUM") == "RESTORE_EQUILIB\u2026"
+          and mapview.short_state("whileEVACUATION") == "EVACUATION"
+          and "whileEVACUATION" in grind.variant_bar.toolTip(),
+          "%r, %r" % (grind.variant_bar.states_label.text(),
+                      mapview.short_state("beforeOrWhileRESTORE_EQUILIBRIUM")))
+    grind.map.centre_on((0.99, 0.99))
+    pump(app, 2)
+    held = (grind.map.horizontalScrollBar().value(), grind.map.verticalScrollBar().value())
+    saved_picture = grind.map._plan["picture"]
+    saved_shot = grind.map.grab().toImage()
+    grind.variant_bar.forward.click()
+    pump(app, 3)
+    flipped = grind.map._plan["picture"]
+    check("one press flips the map to another state",
+          mapview.variant() == "afterFESTIVAL_DELIVER_CARROT"
+          and flipped is maptiles.picture("iceTown", "afterFESTIVAL_DELIVER_CARROT")
+          and flipped is not saved_picture
+          and grind.map.grab().toImage() != saved_shot
+          and grind.variant_bar.states_label.text() == "FESTIVAL_DELIVE\u2026",
+          "%r -> %r" % (None, mapview.variant()))
+    check("... which does not move the view either",
+          (grind.map.horizontalScrollBar().value(), grind.map.verticalScrollBar().value()) == held
+          and held[1] > 0,
+          "scroll %s -> %s" % (held, (grind.map.horizontalScrollBar().value(),
+                                      grind.map.verticalScrollBar().value())))
+    walked = [mapview.variant()]
+    for _press in range(len(grind.variant_bar.states) - 1):
+        grind.variant_bar.forward.click()
+        walked.append(mapview.variant())
+    check("... and the buttons cycle every state and then 'as saved'",
+          walked[-1] is None and len(set(walked)) == len(walked)
+          and set(walked) == set(grind.variant_bar.states),
+          "%d step(s) %s" % (len(walked), walked[:3]))
+    check("... and going back to 'as saved' draws the saved map again",
+          grind.map._plan["picture"] is saved_picture,
+          None if grind.map._plan["picture"] is saved_picture else "a different picture")
+    grind.map.set_zone(plain_zone)
+    pump(app, 2)
+    check("the stepper hides on a map with no story states",
+          not maptiles.variants(ez.map_parts(ez.find_map_file("waterRoute_4"))[0])
+          and not grind.variant_bar.isVisible(),
+          "%d state(s) left in the control" % (len(grind.variant_bar.states) - 1))
+    grind.map.set_zone(kept_zone)
+    mapview.set_variant(None)
+    mapview.set_zoom(config.MAP_ZOOM_DEFAULT)
+    pump(app, 3)
+
     # THE MERGING ITSELF, measured off the shipped maps: a water zone records its shape as bare marker
     # cells (its markers name no tile layer), and merging is what turns them into blocks -
     # `WATERROUTE_4_WATER`'s 170 cells are TWO blocks (151 + 19), where cell by cell they were a field
     # of dots. The borders are counted the same way, on shapes whose answer is arithmetic.
-    import encounter_zones as ez
     _m, _layers, zone_data = ez.zone_map("waterRoute_4")
     water = zone_data["WATERROUTE_4_WATER"]
     water_blocks = ez.zone_blocks(water)
@@ -367,6 +446,113 @@ def main():
     _m3, _l3, cave3 = ez.zone_map("oasisCave_3")
     cave_grass = cave3["OASISCAVE_3"]
     patched = set().union(*cave_grass["patches"])
+    # A HIDDEN LAYER IS NOT PART OF THE MAP THE GAME DRAWS, and the two the user caught say what
+    # happens when one is: `harbor`'s hidden `aboveFloor 2#MESCHER_REALM` (88 tiles of the ghost
+    # realm) drew long purple lines across the sand - "some maps like woodland harbor, have those
+    # strange lines on the ground, that are not shown in the game" - and electricTown's hidden
+    # `rainDrops` (960 drops) put white dots all over Donar Island. The flag is Tiled authoring state,
+    # but the state it records is the one the map is drawn in; the `#whileEVACUATION`, `#whileChristmas`
+    # and `#MESCHER_REALM` layers beside a base layer are ALTERNATIVES for other states.
+    # MEASURED over the 69 maps: the hidden layers draw 4781 cells, of which only 40 are cells no
+    # visible layer covers - so honouring the flag drops 4781 cells of content the game never shows.
+    for map_name, hidden_name in (("harbor", "aboveFloor 2#MESCHER_REALM"),
+                                  ("electricTown", "rainDrops"),
+                                  ("electricTown", "level 3#whileChristmas")):
+        drawn_here = maptiles.layer_names(ez.map_parts(ez.find_map_file(map_name))[0])
+        check("%s does not draw its hidden %s layer" % (map_name, hidden_name),
+              hidden_name not in drawn_here, "%d layer(s) drawn" % len(drawn_here))
+    offenders, with_hidden = [], 0
+    for map_name in grind.maps:
+        map_d, _l, _s = ez.map_parts(ez.find_map_file(map_name))
+        drawn_here = set(maptiles.layer_names(map_d))
+        hidden = {name for _g, name, layer, off in maptiles._walk(map_d.get("layers") or [])
+                  if layer.get("type") == "tilelayer" and off}
+        with_hidden += 1 if hidden else 0
+        if drawn_here & hidden:
+            offenders.append(map_name)
+    check("... and no map in the window draws a hidden layer at all",
+          not offenders and with_hidden > 0,
+          "%d map(s) have hidden layers, %d of them drawn: %s"
+          % (with_hidden, len(offenders), offenders[:4]))
+
+    # THE ALTERNATIVES ARE NOT THROWN AWAY, THEY ARE KEPT AS STATES - which is the other half of the
+    # hidden-layer question: those layers are the map as ANOTHER STORY MOMENT draws it, and the window
+    # flips between them instead of quietly dropping them (the user: "how about we keep them, with
+    # buttons in the top to flip between them, and just add a blacklist for the ones to hide - so we
+    # can see each variant separately"). A state is named by the condition after the `#`, it is the
+    # state of THIS map (a state a map does not have leaves it as saved), and choosing one draws that
+    # version of a layer INSTEAD of the plain one - not on top of it.
+    ice_map = ez.map_parts(ez.find_map_file("iceTown"))[0]
+    check("a map's story states are read off its own layers",
+          len(maptiles.variants(ice_map)) == 9
+          and "whileEVACUATION" in maptiles.variants(ice_map)
+          and maptiles.variants(ez.map_parts(ez.find_map_file("amishRoute"))[0])
+          == ["MESCHER_REALM"],
+          "iceTown has %d state(s), amishRoute %s"
+          % (len(maptiles.variants(ice_map)),
+             maptiles.variants(ez.map_parts(ez.find_map_file("amishRoute"))[0])))
+    with_states = [name for name in grind.maps
+                   if maptiles.variants(ez.map_parts(ez.find_map_file(name))[0])]
+    check("... on 23 of the 69 maps, and the rest are drawn as saved",
+          len(with_states) == 23 and len(grind.maps) == 69,
+          "%d of %d map(s): %s" % (len(with_states), len(grind.maps), with_states[:4]))
+    harbor_map = ez.map_parts(ez.find_map_file("harbor"))[0]
+    as_saved = maptiles.layer_names(harbor_map)
+    as_mescher = maptiles.layer_names(harbor_map, "MESCHER_REALM")
+    check("choosing a state draws that state's version of a layer instead of the plain one",
+          "aboveFloor 2#MESCHER_REALM" not in as_saved
+          and "aboveFloor 2#MESCHER_REALM" in as_mescher
+          and "aboveFloor 2" not in as_mescher,
+          "%d layer(s) as saved -> %d in MESCHER_REALM" % (len(as_saved), len(as_mescher)))
+    # AND THE STATE REPLACES WHAT IT HAS, AND NOTHING ELSE. Worked out from the map file itself: a
+    # state draws its own version of every base layer it has one for, and for the rest the layers the
+    # map has visible - `level 4` and `level 4#whileAnniversary` are BOTH visible on electricTown, so
+    # both are drawn, while a hidden `rainDrops` is drawn in no state at all.
+    wrong_states, unseen = [], 0
+    for map_name in with_states:
+        map_d = ez.map_parts(ez.find_map_file(map_name))[0]
+        seen = {}
+        for _g, name, layer, off in maptiles._walk(map_d.get("layers") or []):
+            if layer.get("type") == "tilelayer" and maptiles._is_terrain(_g) \
+                    and not maptiles._blacklisted(name):
+                seen.setdefault(name.partition("#")[0], []).append((name, off))
+        for picked in maptiles.variants(map_d):
+            unseen += 1
+            expected = set()
+            for base, versions in seen.items():
+                names = [name for (name, _off) in versions]
+                if base + "#" + picked in names:
+                    expected.add(base + "#" + picked)
+                else:
+                    expected.update(name for (name, off) in versions if not off)
+            if set(maptiles.layer_names(map_d, picked)) != expected:
+                wrong_states.append((map_name, picked,
+                                     sorted(set(maptiles.layer_names(map_d, picked)) ^ expected)))
+    check("... one state's version of a layer, and the saved layers everywhere else",
+          not wrong_states and unseen == 51,
+          "%d state(s) checked, %d wrong: %s" % (unseen, len(wrong_states), wrong_states[:2]))
+    # THE BLACKLIST IS FOR THE LAYERS THAT ARE NOT PART OF THE MAP AT ALL, matched by own name or by
+    # base name: `rainDrops` is 960 white dots the game draws as WEATHER, and the `worldRain*` /
+    # `worldOverlay` group are the ones the user reported as white dots on Donar Island.
+    check("the weather layers are blacklisted, whichever state they are in",
+          all(maptiles._blacklisted(name) for name in config.MAP_LAYER_BLACKLIST)
+          and maptiles._blacklisted("rainDrops#whileChristmas")
+          and not maptiles._blacklisted("level 1"),
+          ", ".join(config.MAP_LAYER_BLACKLIST))
+    stray = []
+    for map_name in grind.maps:
+        map_d = ez.map_parts(ez.find_map_file(map_name))[0]
+        here = [name for name in maptiles.layer_names(map_d)
+                if name.partition("#")[0] in config.MAP_LAYER_BLACKLIST]
+        if here:
+            stray.append((map_name, here))
+    check("... and no map draws one in any state",
+          not stray, "%d map(s): %s" % (len(stray), stray[:2]))
+    check("a state is asked for by name, and the map is cached per (map, state)",
+          maptiles.picture("harbor", "MESCHER_REALM")
+          is maptiles.picture("harbor", "MESCHER_REALM")
+          and maptiles.picture("harbor", "MESCHER_REALM") is not maptiles.picture("harbor")
+          and maptiles.picture("harbor", "notMESCHER_REALM") is not maptiles.picture("harbor"))
     check("a marker whose own cell is not on its grass still finds the patch",
           not cave_grass["unplaced"]
           and sorted(len(p) for p in cave_grass["patches"]) == [12, 24, 29, 30, 36, 43, 44, 46]
@@ -566,6 +752,17 @@ def main():
     check("... and they are narrow enough to fit one together",
           sum(column.width for column in grind.table.model_.columns[:5]) <= 430,
           sum(column.width for column in grind.table.model_.columns[:5]))
+    # THE FILTER ROW IS ONE LINE AND STILL INSIDE ITS COLUMN, which is a real constraint and not a
+    # nicety: the middle column is fitted to the TABLE's width, so a control row wider than the table
+    # would push the separator out and take the width from the map. The story-states tick joined it
+    # last, and the row measures 691 px against a 719 px table at the window's real size.
+    control_row = [grind.level, grind.only_xp, grind.min_share, grind.states_tick, grind.on_top]
+    centres = sorted({widget.geometry().center().y() for widget in control_row})
+    check("the ranking's filters are one row, and the row fits the column",
+          max(centres) - min(centres) <= 2
+          and grind.on_top.geometry().right() <= grind.states_tick.parentWidget().width() - 4,
+          "centres %s, ends at %d of %d" % (centres, grind.on_top.geometry().right(),
+                                            grind.states_tick.parentWidget().width()))
     rows = grind.table.model_.rows
     # tolerance 1.5, not 1: both figures are ROUNDED for display, and the column multiplies the
     # unrounded fight, so a row can land a whole unit off (PYRAMID_F4: 1330 shown, x1.1 = 1463.0, but
@@ -687,6 +884,79 @@ def main():
           "%d hidden of %d" % (hidden, grind.area_list.count()))
     grind.search.setText("")
     pump(app)
+
+    # ... AND THE ZONES WHOSE MAP DRAWS SOMETHING ELSE IN ANOTHER STORY MOMENT CAN BE FOUND, which is
+    # what the "with story states" tick in the ranking's own control row is for: the states are a
+    # property of the MAP (`base#condition` layers, see the map section), nothing in the ranking shows
+    # them, and 23 of the 69 areas have maps like that. It narrows THE TABLE ONLY - no area's tick is
+    # touched - and the answer for all 69 maps is read on a thread of its own (36 MB of map files; the
+    # cold read cost 1.9 s of the window's 0.8 s build), so the ranking WAITS FOR IT rather than
+    # blocking, and comes back through `refresh` when it lands. The tooltip counts it either way.
+    while not grind.states_ready():
+        QTest.qWait(50)
+    check("the reader answers for every area without blocking the window",
+          len(grind.states) == len(grind.maps) == 69 and sum(grind.states.values()) == 23,
+          "%d of %d area(s) have maps with story states" % (sum(grind.states.values()),
+                                                            len(grind.maps)))
+    all_zones_shown = grind.table.model_.rowCount()
+    before_ticked = len(grind.available)
+    areas_visible = [grind.area_list.item(i).isHidden() for i in range(grind.area_list.count())]
+    grind.states_tick.setChecked(True)
+    pump(app)
+    kept = sorted({row[PAYLOAD].map_file for row in grind.table.model_.rows})
+    check("the ranking can show only the zones whose map has story states",
+          0 < len(kept) < len(grind.maps) and all(grind.states[name] for name in kept)
+          and grind.table.model_.rowCount() < all_zones_shown,
+          "%d row(s) over %d area(s): %s" % (grind.table.model_.rowCount(), len(kept), kept[:4]))
+    check("... which is the middle column's own row, not the area list's",
+          grind.table.parentWidget() is grind.states_tick.parentWidget()
+          and [grind.area_list.item(i).isHidden() for i in range(grind.area_list.count())]
+          == areas_visible
+          and len(grind.available) == before_ticked
+          and all(grind.area_items[name].checkState() == Qt.CheckState.Checked
+                  for name in grind.available),
+          "%d of %d area(s) still shown" % (sum(1 for off in areas_visible if not off),
+                                            len(areas_visible)))
+    # THE TOOLTIP'S COUNT is written by a 250 ms main-thread poll (nothing is emitted from the
+    # reader), so the harness waits the way the window does - one interval of the real event loop.
+    QTest.qWait(300)
+    check("... and the reader's own count is in the tick's tooltip",
+          ("%d of the %d areas" % (sum(grind.states.values()), len(grind.maps)))
+          in grind.states_tick.toolTip() and not grind._watch.isActive(),
+          grind.states_tick.toolTip().splitlines()[-1])
+    grind.states_tick.setChecked(False)
+    pump(app)
+    check("... and unticking it ranks every zone again",
+          grind.table.model_.rowCount() == all_zones_shown
+          and grind.prefs.get("with_states") is False,
+          "%d row(s) -> %d" % (all_zones_shown, grind.table.model_.rowCount()))
+    # AND THE SAME TICK ON AN AREA WITH NO STORY STATES SAYS SO, rather than looking like a bug: the
+    # ranking's empty hint names the filter instead of the level, which is the other reason a table
+    # can be empty.
+    grind.set_all(False)
+    grind.available = {"oasisCave_1"}
+    grind._set_checked("oasisCave_1", True)
+    grind.states_tick.setChecked(True)
+    pump(app)
+    check("... and says so when no ticked area has a map like that",
+          grind.table.model_.rowCount() == 0
+          and "story" in grind.species.toPlainText().lower()
+          and not grind.states.get("oasisCave_1", True),
+          grind.species.toPlainText().splitlines()[:1])
+    grind.states_tick.setChecked(False)
+    grind.set_all(True)
+    pump(app)
+    check("... and the whole ranking is back",
+          grind.table.model_.rowCount() == all_zones_shown,
+          grind.table.model_.rowCount())
+    # THE CHEAP READER is the one the filter uses for all 69 maps at once - it reads the bytes for a
+    # `"name": "...#..."` instead of parsing 36 MB of Tiled JSON - so it has to give the SAME answer
+    # as the parser on every map there is.
+    mismatch = [name for name in grind.maps
+                if maptiles.has_states(name) != bool(
+                    maptiles.variants(ez.map_parts(ez.find_map_file(name))[0]))]
+    check("... read off the file, and the answer is the parsed one on every map", not mismatch,
+          "%d map(s) disagree: %s" % (len(mismatch), mismatch[:4]))
 
     # CRIMSONITE SPAWNS ARE IN THE LISTINGS. The encounter data marks a slot as the crimsonite form
     # (`encounters.Zone.crimsonite`), and that form is a Coromon of its own - so a zone that spawns

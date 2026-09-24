@@ -20,21 +20,34 @@ The three caveats about the numbers, all of them also in `encounters.py`:
   their shares are counted apart - together they are the zone's 100% (see `Zone.slots`).
 """
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QPushButton, QSpinBox, QSplitter,
                                QVBoxLayout, QWidget)
 
+import threading
+
 import dex
 
-from . import mapnames, mapview
+from . import mapnames, mapview, maptiles
 from .config import (LEVEL_DEFAULT, MIN_SHARE_DEFAULT, ONLY_XP_DEFAULT, ON_TOP_DEFAULT,
-                     SCALES_SPAN, XP_MARGIN)
+                     SCALES_SPAN, STATES_ONLY_DEFAULT, XP_MARGIN)
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
 from .widgets import FittedPane, mono_text, note
 
 import items
+
+# THE ZONE RANKING'S STORY-STATES TICK: what it says, and the two tooltips - the count cannot be in
+# the first one, because the map files it is counted from are read on a thread of their own (see
+# `_read_states`).
+STORY_STATES_TIP_INITIAL = (
+    "only the zones whose map draws different tiles in another story moment\n"
+    "(the `base#condition` layers the map's own stepper flips between) - counting them now")
+STORY_STATES_TIP = (
+    "only the zones whose map draws different tiles in another story moment\n"
+    "(the `base#condition` layers the map's own stepper flips between) - %d of the %d areas "
+    "have a map like that")
 
 try:
     import savefile
@@ -216,6 +229,10 @@ class GrindTab(QWidget):
 
         saved = prefs.get("available")
         self.available = set(saved) if isinstance(saved, list) else set(self.maps)
+        # WHICH AREAS HAVE STORY STATES, filled in by `_read_states` - on its own thread, because it
+        # reads every map file (see `states_of`).
+        self.states = {}
+        self._reader = None
         self.area_items = {}
         self.selected_zone = None
         # set while the tick list is being written to programmatically, so that "All", the save
@@ -225,6 +242,58 @@ class GrindTab(QWidget):
         self._build()
         self.apply_filter()
         self.refresh()
+        # THE MAP FILES ARE READ AFTER THE WINDOW IS BUILT, on their own thread: 69 maps are 36 MB, and
+        # the first read of a session takes 1.9 s (measured cold, 0.02 s warm) - paid while the window
+        # was being built it took its start from 0.8 s to 2.7 s, and on a thread but DURING the build
+        # it still cost 0.3 s of interpreter contention. Nothing waits for it: the ranking is whole
+        # until the answer is in, and comes back through `refresh` when it lands. The main thread ASKS
+        # whether it is done rather than being signalled by it, so a window closed while the maps are
+        # still being read cannot be touched by a dying thread.
+        self._watch = QTimer(self)
+        self._watch.setInterval(250)
+        self._watch.timeout.connect(self._states_landed)
+        QTimer.singleShot(0, self._start_reading)
+
+    # ------------------------------------------------------------------ the areas' story states
+    def _start_reading(self):
+        """Start the map reader, once."""
+        if self._reader is not None:
+            return
+        self._reader = threading.Thread(target=self._read_states, name="area-states", daemon=True)
+        self._reader.start()
+        self._watch.start()
+
+    def _read_states(self):
+        """Which areas draw something else in another story moment - the answer the filter needs.
+
+        `maptiles.has_states` reads the map's bytes rather than parsing them, because parsing all 69
+        would also pin 36 MB of JSON in `map_parts`' cache for the rest of the session.
+        """
+        self.states.update({map_file: maptiles.has_states(map_file) for map_file in self.maps})
+
+    def states_ready(self):
+        """Whether the reader has answered for every area yet."""
+        if self._reader is None:
+            return False
+        return not self._reader.is_alive()
+
+    def states_of(self, map_file):
+        """Whether this area's map draws different tiles in another story moment.
+
+        FALSE WHILE THE READER IS STILL GOING, which is why the ranking only filters once
+        `states_ready` says so - a half-read answer would hide zones with no reason given.
+        """
+        return self.states.get(map_file, False)
+
+    def _states_landed(self):
+        """The reader is done: the tick can say how many areas have a map like that, and the ranking
+        it was waiting to filter is rebuilt with it."""
+        if not self.states_ready():
+            return
+        self._watch.stop()
+        self.states_tick.setToolTip(STORY_STATES_TIP % (sum(self.states.values()), len(self.maps)))
+        if self.states_tick.isChecked():
+            self.refresh()
 
     # ------------------------------------------------------------------ layout
     def _build(self):
@@ -316,6 +385,17 @@ class GrindTab(QWidget):
         self.min_share.valueChanged.connect(self._filters_changed)
         controls.addWidget(self.min_share)
 
+        # ... AND THE ZONES THAT DRAW SOMETHING ELSE IN ANOTHER STORY MOMENT, which is the only way to
+        # find them: the states are a property of the MAP (`base#condition` layers, see the map
+        # pane's stepper), nothing in the ranking shows them, and 23 of the 69 areas have maps like
+        # that. It filters THE TABLE ONLY - no area's tick is touched, so narrowing the ranking cannot
+        # untick anything, and an empty result says why instead of looking broken (`_show_empty_hint`).
+        self.states_tick = QCheckBox("with story states")
+        self.states_tick.setToolTip(STORY_STATES_TIP_INITIAL)
+        self.states_tick.setChecked(bool(self.prefs.get("with_states", STATES_ONLY_DEFAULT)))
+        self.states_tick.toggled.connect(self._filters_changed)
+        controls.addWidget(self.states_tick)
+
         controls.addStretch(1)
         self.on_top = QCheckBox("keep window on top")
         self.on_top.setChecked(bool(self.prefs.get("on_top", ON_TOP_DEFAULT)))
@@ -338,9 +418,11 @@ class GrindTab(QWidget):
 
         self.map_head = QLabel("")
         self.map_head.setWordWrap(True)
-        # THE CAPTION ROW, which every map panel wears: the map's own line and the -/+ zoom buttons
-        # (`mapview.head_row`), so the three tabs that draw a map are laid out the same way.
-        box.addWidget(mapview.head_row(self.map_head, self.prefs))
+        # THE CAPTION ROW, which every map panel wears: the map's own line, the -/+ zoom buttons and
+        # the story-state stepper (`mapview.head_row`), so the three tabs that draw a map are laid out
+        # the same way. The stepper is handed to the map, which fills it with the states THAT map has.
+        head, self.variant_bar = mapview.head_row(self.map_head, self.prefs)
+        box.addWidget(head)
 
         self.legend_row = QWidget()
         self.legend_box = QHBoxLayout(self.legend_row)
@@ -348,6 +430,7 @@ class GrindTab(QWidget):
         box.addWidget(self.legend_row)
 
         self.map = ZoneMap()
+        self.map.set_variant_bar(self.variant_bar)
         box.addWidget(self.map, 3)
 
         box.addWidget(note(MAP_NOTES, wrap=420))
@@ -438,6 +521,7 @@ class GrindTab(QWidget):
         self.prefs.set("level", self.level.value())
         self.prefs.set("min_share", float(self.min_share.value()))
         self.prefs.set("only_xp", self.only_xp.isChecked())
+        self.prefs.set("with_states", self.states_tick.isChecked())
         self.refresh()
 
     def reachable(self):
@@ -451,6 +535,11 @@ class GrindTab(QWidget):
         """Rebuild the ranking from the ticked areas and the filters."""
         picked = rank(self.reachable(), self.level.value(), self.min_share_value(),
                       self.only_xp.isChecked())
+        # THE STORY-STATES FILTER, which is about WHERE a zone is rather than how good it is. It waits
+        # for the map reader (`states_ready`) instead of blocking on it: until the answer is in the
+        # table is left whole, and `_states_landed` comes back through here when it arrives.
+        if self.states_tick.isChecked() and self.states_ready():
+            picked = [zone for zone in picked if self.states_of(zone.map_file)]
         min_share = self.min_share_value()
         # read once for the whole table: the multipliers come out of the archive, which is cached a
         # uid at a time but is not something to ask for on every row
@@ -522,6 +611,13 @@ class GrindTab(QWidget):
         if not reachable:
             text = ("Nothing is ticked, so there is nothing to rank.\n\nTick an area on the "
                     "left, or press \"What I've visited\".")
+        elif self.states_tick.isChecked() and not any(self.states_of(zone.map_file)
+                                                      for zone in reachable):
+            text = ("No zone in the ticked areas draws anything else in another story "
+                    "moment.\n\nThe story states are a property of the map - "
+                    "%d of the %d areas have a map with them - and unticking \"with story "
+                    "states\" ranks every zone again."
+                    % (sum(self.states.values()), len(self.maps)))
         else:
             best = max(reachable, key=lambda zone: max(
                 (rec["max"] for rec in zone.slots()), default=0))

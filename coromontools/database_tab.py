@@ -366,10 +366,12 @@ class DatabaseTab(QWidget):
         stack = QVBoxLayout(below)
         stack.setContentsMargins(0, 0, 0, 0)
         # THE CAPTION ROW (`mapview.head_row`): the map's own line when it could not draw, plus the
-        # -/+ zoom buttons every map panel wears.
-        stack.addWidget(mapview.head_row(self.map_head, self.prefs))
+        # -/+ zoom buttons and the story-state stepper every map panel wears.
+        head, self.variant_bar = mapview.head_row(self.map_head, self.prefs)
+        stack.addWidget(head)
         stack.addWidget(self.legend_row)
         stack.addWidget(self.map, 1)
+        self.map.set_variant_bar(self.variant_bar)
 
         # THE SLIDER BETWEEN THE THREE, so the map can be as tall as the column allows: the list and
         # the species pane are given exactly the height of their own content and the map takes

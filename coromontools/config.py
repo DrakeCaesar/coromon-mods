@@ -9,6 +9,9 @@ LEVEL_DEFAULT = 50
 MIN_SHARE_DEFAULT = 0.0
 ONLY_XP_DEFAULT = True
 ON_TOP_DEFAULT = True
+# THE ZONE RANKING'S "with story states" TICK, off by default: it is a way to FIND the maps whose
+# tiles change with the story, not a way to rank them.
+STATES_ONLY_DEFAULT = False
 
 # A zone whose species span this many levels ("Swurmy L1-99 in the titan temple") ranks high
 # on the weighted-level average and is not a grind spot, so it gets flagged.
@@ -167,6 +170,13 @@ CHIP_HEIGHT = 17
 # crisp. So it is the user's choice, ticked on the map panel and remembered like the dex scale.
 MAP_SMOOTH_KEY = "map_smooth"
 MAP_SMOOTH_DEFAULT = True
+# LAYERS THAT ARE NEVER DRAWN, by their own name or by their BASE name (the part before any `#`, so
+# one entry hides every state of it). Only the rain needs one today - `rainDrops` is 960 drop tiles
+# inside the `levels` group on Donar Island, drawn as white dots all over the town when it is not
+# raining (the user: "donor island also has those strange white dots"). The `world*` overlays are
+# outside the terrain groups already; they are named here so that one list answers "what is not drawn".
+MAP_LAYER_BLACKLIST = ("rainDrops", "worldRain", "worldRainOverlay", "worldSnowOverlay",
+                       "worldOverlay", "aboveWorldOverlay")
 
 # A map is FITTED to the pane, but the fit itself is never blown up past this: a small map filling a
 # maximised window is all block, and the patches stop being readable.

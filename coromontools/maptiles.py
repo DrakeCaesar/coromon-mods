@@ -28,11 +28,25 @@ buries the ground the tab is asking about, so they are left out;
 name that way - which is why "some sprites are still missing from some of the maps" (the user): no
 trees on the nineteen maps with a `trees` layer, no walls on the ten with `outerWalls`/`innerWalls`,
 no mountains on the two with `mountain 1`;
-* THE `visible` FLAG IS IGNORED. In these files it is TILED AUTHORING STATE, saved when the map was
-last edited - the conditional layers next to a base layer ("level 1#whileEVACUATION") are marked
-hidden because that story state was not the one being worked on. The game shows one of them at a
-time and, drawing them in the file's own order, the ground that one of them fills is ground the
-others left empty; skipping the hidden ones is what leaves holes in a map.
+* A HIDDEN LAYER IS NOT DRAWN IN THE STATE THE MAP IS SAVED IN, and neither is a layer inside a
+hidden GROUP. The flag is Tiled authoring state, but the state it records IS the one the map is
+drawn in, and the layers next to a base layer are ALTERNATIVES for other states of the story:
+`harbor`'s hidden `aboveFloor 2#MESCHER_REALM` (88 tiles of the ghost realm) put long purple lines
+across the sand and electricTown's hidden `rainDrops` (960) put white drops all over Donar Island -
+neither is in the game (the user: "some maps like woodland harbor, have those strange lines on the
+ground, that are not shown in the game ... and donor island also has those strange white dots").
+MEASURED over the 69 maps: the hidden layers draw 4781 cells and only 40 of them are cells no visible
+layer covers - so the saved state removes 4781 cells of content the game never shows and leaves 40
+cells of background, which is what the game has there too;
+* ... BUT THEY ARE THE ALTERNATIVES THE STORY SWITCHES BETWEEN, so they are not thrown away: a layer
+named `base#condition` is kept as a VARIANT (`variants`, 28 conditions over 23 of the 69 maps, up to
+nine on iceTown) and `layer_names(m, "whileEVACUATION")` draws Ice Town as it looks while the town
+is evacuated - one version PER BASE NAME, the chosen condition where it exists and the saved state
+everywhere else (the user: "how about we keep them, with buttons in the top to flip between them").
+The `saved` variant (the default, `variant=None`) is the visible set;
+* AND A FEW LAYERS ARE NOT DRAWN IN ANY OF THE STATES - `config.MAP_LAYER_BLACKLIST`, matched by own
+name or base name: the rain tiles are weather rather than terrain, and the `world*` overlays are the
+pause menu's dimming.
 
 A tile may be BIGGER than the map's grid (48x48 trees on a 16x16 grid); Tiled draws such a tile with
 its BOTTOM-LEFT corner at the cell's bottom-left, which is what `_tile_target` reproduces - without it
@@ -44,44 +58,119 @@ selection and every resize.
 
 import json
 import os
+import re
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QImage, QPainter, QPixmap
 
 import encounter_zones as ez
 
+from .config import MAP_LAYER_BLACKLIST
+
 # THE GROUPS WHOSE LAYERS ARE TERRAIN, by the name the map's own tree gives them. The order of the
 # map file decides what is drawn over what; these only decide which layers are considered.
 DRAWN_GROUPS = ("floor", "aboveFloor", "levels")
 
-# map file -> QPixmap, because a picture is thousands of blits and the pane repaints on every resize
+# (map file, variant) -> QPixmap, because a picture is thousands of blits and the pane repaints on
+# every resize
 _PICTURE_CACHE = {}
 # tileset image path -> QImage, shared by every map that uses the sheet
 _SHEET_CACHE = {}
+# map path -> whether its FILE names a story state, for `has_states`
+_STATE_FILE_CACHE = {}
+# a layer name in the Tiled JSON: `"name": "base#condition"`. Only the NAME has to be read - the
+# question is whether the file has any at all.
+_STATE_NAME = re.compile(rb'"name"\s*:\s*"([^"]*)#([^"]*)"')
 
 
-def layer_names(m):
-    """The tile layers to draw, in the map's own order.
+def has_states(map_file):
+    """Whether this map carries story states, read off the FILE rather than parsed into it.
 
-    A layer is drawn when it sits in one of `DRAWN_GROUPS` - at any depth, and whatever it is called
-    (see the module docstring for why the name is not what decides it).
+    THE AREA LIST IS FILTERED BY THIS, which has to answer for all 69 maps at once. Parsing them
+    costs 1.0 s of CPU - and `encounter_zones.map_parts` CACHES what it parses, so it would also pin
+    all 36 MB of JSON in memory for the rest of the session. Reading the bytes for a
+    `"name": "...#..."` (which is all a layer name is) answers the same thing in 0.02 s with warm
+    page cache and keeps 69 booleans, and `ui_smoke` checks the two agree on every shipped map.
+    `variants()` is still the reader of WHAT the states ARE - this only says yes or no.
     """
-    chosen = []
-    for groups, name, layer in _walk(m.get("layers", [])):
-        if layer.get("type") != "tilelayer":
+    path = ez.find_map_file(map_file)
+    if not path:
+        return False
+    if path not in _STATE_FILE_CACHE:
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            _STATE_FILE_CACHE[path] = False
+            return False
+        found = False
+        for match in _STATE_NAME.finditer(data):
+            if not _blacklisted(match.group(1).decode("utf-8", "replace")):
+                found = True
+                break
+        _STATE_FILE_CACHE[path] = found
+    return _STATE_FILE_CACHE[path]
+
+
+def variants(m):
+    """The story conditions this map has alternative layers for, sorted - the states to flip between."""
+    found = set()
+    for groups, name, layer, _hidden in _walk(m.get("layers", [])):
+        if layer.get("type") != "tilelayer" or not _is_terrain(groups) or _blacklisted(name):
             continue
-        if any(group in DRAWN_GROUPS for group in groups):
-            chosen.append(name)
-    return chosen
+        _base, _, condition = name.partition("#")
+        if condition:
+            found.add(condition)
+    return sorted(found)
 
 
-def _walk(layers, groups=()):
-    """`(ancestor group names, name, layer)` for every leaf in the tree."""
-    for layer in layers:
-        if layer.get("type") == "group":
-            yield from _walk(layer.get("layers", []), groups + (layer.get("name", ""),))
+def layer_names(m, variant=None):
+    """The tile layers to draw for `variant`, in the map's own order.
+
+    A layer is a candidate when it sits in one of `DRAWN_GROUPS` (at any depth, whatever it is
+    called) and is not blacklisted. Candidates are then taken ONE VERSION PER BASE NAME - the part
+    before any `#` is what the versions of a layer share - which is what makes a variant a STATE
+    rather than another stack of tiles: choosing `whileEVACUATION` draws Ice Town's evacuated floors
+    INSTEAD of the plain ones, and the chosen condition where it exists, the saved state everywhere
+    else. `variant=None` is the map as saved, i.e. what is visible in it.
+    """
+    chosen = set()
+    versions = {}
+    order = []
+    for groups, name, layer, hidden in _walk(m.get("layers", [])):
+        if layer.get("type") != "tilelayer" or not _is_terrain(groups) or _blacklisted(name):
+            continue
+        base = name.partition("#")[0]
+        if base not in versions:
+            versions[base] = []
+            order.append(base)
+        versions[base].append((name, hidden))
+    for base in order:
+        wanted = base + "#" + variant if variant else None
+        names = [name for (name, _hidden) in versions[base]]
+        if wanted in names:
+            chosen.add(wanted)
         else:
-            yield groups, layer.get("name", ""), layer
+            chosen.update(name for (name, hidden) in versions[base] if not hidden)
+    return [name for groups, name, layer, _h in _walk(m.get("layers", [])) if name in chosen]
+
+
+def _is_terrain(groups):
+    return any(group in DRAWN_GROUPS for group in groups)
+
+
+def _blacklisted(name):
+    return name in MAP_LAYER_BLACKLIST or name.partition("#")[0] in MAP_LAYER_BLACKLIST
+
+
+def _walk(layers, groups=(), hidden=False):
+    """`(ancestor group names, name, layer, hidden)` for every leaf in the tree."""
+    for layer in layers:
+        off = hidden or layer.get("visible", True) is False
+        if layer.get("type") == "group":
+            yield from _walk(layer.get("layers", []), groups + (layer.get("name", ""),), off)
+        else:
+            yield groups, layer.get("name", ""), layer, off
 
 
 def _sheet(path):
@@ -112,18 +201,19 @@ def _tile_target(m, tileset, x, y):
                  tileset["th"] or th)
 
 
-def picture(map_file):
+def picture(map_file, variant=None):
     """The composited map as a QPixmap, or None when the map or its sheets cannot be read.
 
-    Cached, and cached as a PIXMAP rather than as a QImage: this is drawn once per paint per tab.
+    Cached PER (map, variant), and cached as a PIXMAP rather than as a QImage: this is drawn once per
+    paint per tab, and flipping the state has to be instant when it flips back.
     """
-    if map_file in _PICTURE_CACHE:
-        return _PICTURE_CACHE[map_file]
-    _PICTURE_CACHE[map_file] = _build(map_file)
-    return _PICTURE_CACHE[map_file]
+    key = (map_file, variant)
+    if key not in _PICTURE_CACHE:
+        _PICTURE_CACHE[key] = _build(map_file, variant)
+    return _PICTURE_CACHE[key]
 
 
-def _build(map_file):
+def _build(map_file, variant=None):
     path = ez.find_map_file(map_file)
     if not path:
         return None
@@ -134,7 +224,7 @@ def _build(map_file):
     # the tilesets' own metadata (columns, tile size) is not in the map's reference - it is in the
     # tileset file, which `map_parts` already resolved
     sets = [_with_columns(path, s) for s in sets]
-    drawn = [layers[name] for name in layer_names(m) if name in layers]
+    drawn = [layers[name] for name in layer_names(m, variant) if name in layers]
     if not drawn or "width" not in m:
         return None
     image = QImage(m["width"] * m["tilewidth"], m["height"] * m["tileheight"],

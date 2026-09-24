@@ -157,10 +157,13 @@ class MissingTab(QWidget):
         self.legend_row = QWidget()
         self.legend_box = QHBoxLayout(self.legend_row)
         self.legend_box.setContentsMargins(0, 0, 0, 0)
-        # ... WITH THE ZOOM CONTROLS every map panel wears (`mapview.head_row`)
-        box.addWidget(mapview.head_row(self.map_head, self.prefs))
+        # ... WITH THE ZOOM CONTROLS every map panel wears (`mapview.head_row`), and the stepper of
+        # the story states this map carries
+        head, self.variant_bar = mapview.head_row(self.map_head, self.prefs)
+        box.addWidget(head)
         box.addWidget(self.legend_row)
         box.addWidget(self.map, 1)
+        self.map.set_variant_bar(self.variant_bar)
         return panel
 
     # ------------------------------------------------------------------ the save
