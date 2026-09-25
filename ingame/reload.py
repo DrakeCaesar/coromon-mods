@@ -725,7 +725,16 @@ local function qrUnregisterPrompt(btn, bg)
   local did = {}
   for _, o in ipairs({ btn, bg }) do
     if o ~= nil then
-      for _, name in ipairs({ 'removeTouchable', 'removeMouseHoverable', 'removeTouchableOverlay' }) do
+      -- 1.5.5 renamed this family too: it dropped `removeMouseHoverable` and split it into
+      -- `releaseMouseHoverable` + `detachMouseHoverable`, exposed together as
+      -- `releaseAndDetachMouseHoverable` (proto lines 1137-1140, two calls and nothing else).
+      -- So the 1.5.5 name is the complete replacement for the 1.5.4 one. Every name here is
+      -- type-checked, which is why the rename was SILENT: the missing ones were simply skipped
+      -- and the mouse-hoverable teardown this function exists for stopped happening. `removeTouchable`
+      -- survives both builds; `removeTouchableOverlay` exists in neither now, and is kept only so a
+      -- future build that brings it back is picked up without a change here.
+      for _, name in ipairs({ 'removeTouchable', 'releaseAndDetachMouseHoverable',
+                              'removeMouseHoverable', 'removeTouchableOverlay' }) do
         if type(ih[name]) == 'function' then
           if pcall(function() ih[name](ih, o) end) then did[#did + 1] = name end
         end
@@ -919,7 +928,10 @@ local function qrPruneOffstageInput()
   end
   local calls = 0
   for _, o in ipairs(strays) do
-    for _, name in ipairs({ 'removeTouchable', 'removeMouseHoverable', 'removeTouchableOverlay' }) do
+    -- the same name list as qrUnregisterPrompt, and for the same reason: 1.5.4's names plus the
+    -- 1.5.5 replacement for the removed `removeMouseHoverable` (see the note there).
+    for _, name in ipairs({ 'removeTouchable', 'releaseAndDetachMouseHoverable',
+                            'removeMouseHoverable', 'removeTouchableOverlay' }) do
       if type(ih[name]) == 'function' then
         if pcall(function() ih[name](ih, o) end) then calls = calls + 1 end
       end

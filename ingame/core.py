@@ -63,6 +63,55 @@ local function uv(fn, name)
   end
 end
 
+-- IS THIS BUTTON DOWN RIGHT NOW, asked of the GAME rather than of a listener of our own. The answer
+-- follows the player's in-game remapping and the device the game has resolved, and it cannot go
+-- stale the way a listener's own flag can - a key-up missed while the window has no focus would leave
+-- a listener believing the button is still down, which in the turn feature would mean never walking
+-- again.
+--
+-- RESOLVED BY NAME, BECAUSE 1.5.5 RENAMED THE WHOLE FAMILY. 1.5.4 spells it `isButtonActuallyPressed`
+-- and 1.5.5 spells it `isMappedButtonActuallyPressed`, with the rest of the family following
+-- (`isButtonPressed` -> `isMappedButtonPressed`, `pressedButtonUIDsNonFake` ->
+-- `actuallyPressedMappedButtonUIDs`, `getLastDirectionNonFake` ->
+-- `getLastActuallyPressedMappedDirection`). Nothing about the CALL changed - both builds' bodies are
+-- the same one line, `return <table>[name]`, verified in the disassembly - so the name is the only
+-- difference, and hard-coding either one is what makes a feature stop working on the other build.
+--
+-- The failure is silent, which is why it is worth a helper: every caller pcall's the poll, so a name
+-- that no longer exists reads as "the button is up" and the feature simply does nothing.
+local function inputButtonName()
+  local h = _G.inputHelper
+  if type(h) ~= 'table' then return nil end
+  if type(h.isMappedButtonActuallyPressed) == 'function' then return 'isMappedButtonActuallyPressed' end
+  if type(h.isButtonActuallyPressed) == 'function' then return 'isButtonActuallyPressed' end
+end
+
+-- The button's UID while it is down and nil while it is not, so nil and false are both "up".
+local function inputButtonDown(button)
+  local h = _G.inputHelper
+  local name = inputButtonName()
+  if not h or not name then return false end
+  local ok, v = pcall(h[name], h, button)
+  if not ok or v == nil or v == false then return false end
+  return true
+end
+
+-- Every logical button name the game holds down right now. The table it reads exists only as an
+-- UPVALUE of the getter, and it was renamed with the getter, so it cannot be looked up by name -
+-- but the SHAPE did not change: the getter has one upvalue and it is that table. Read-only; the turn
+-- report uses it to turn "my button does nothing" into a list of what the game says is down.
+local function inputButtonsDown()
+  local h = _G.inputHelper
+  local name = inputButtonName()
+  if not h or not name then return nil end
+  if type(debug) ~= 'table' or type(debug.getupvalue) ~= 'function' then return nil end
+  for i = 1, 8 do
+    local n, v = debug.getupvalue(h[name], i)
+    if not n then return nil end
+    if type(v) == 'table' then return v end
+  end
+end
+
 -- MTE, whichever way it is reachable: the old item and zoom tools each picked a different
 -- one (_G.MTE and package.loaded), and both exist. Accept either rather than repeat that
 -- split here.

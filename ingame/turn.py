@@ -20,7 +20,7 @@ Everything that starts a step lives inside it:
       ...                                        -- and re-assert the facing
     else
       ...
-      if amountOfFramesHoldingSameDirection >= 4 or self.direction ~= direction then
+      if amountOfFramesHoldingSameDirection >= 4 or self.direction == direction then
         self:setNextStep(direction, self:shouldRun() and 'fast' or 'normal')
         self:startGridMove()
       end
@@ -59,11 +59,17 @@ WHAT WAS MEASURED ON THE LIVE GAME, rather than assumed:
 
 WHAT IS DELIBERATELY NOT DONE:
 
-  * no key listener and no held-state of our own. The button is polled through
-    `inputHelper:isButtonActuallyPressed(name)`, the game's own layer, so the answer follows the
-    player's in-game remapping and the device the game has resolved - and it cannot go stale the
-    way a listener's own flag can (a key-up missed while the window has no focus would leave a
-    listener believing the button is still down, which here would mean never walking again).
+  * no key listener and no held-state of our own. The button is polled through the game's own
+    layer, so the answer follows the player's in-game remapping and the device the game has
+    resolved - and it cannot go stale the way a listener's own flag can (a key-up missed while the
+    window has no focus would leave a listener believing the button is still down, which here would
+    mean never walking again).
+  * the poll names the getter in BOTH spellings the game has used, because 1.5.5 renamed the button
+    family (`isButtonActuallyPressed` -> `isMappedButtonActuallyPressed`). core's `inputButtonDown`
+    is that lookup. It matters more here than anywhere else: this feature's whole read of the button
+    is one pcall'd poll, so under a name the build does not have it would read "button up", delegate
+    everything to the game, and simply stop turning - which is exactly how it failed on the beta
+    build.
   * the button is a LOGICAL game button, not the pad's key name. `BACK` is what the controller's
     B is bound to, verified in `classes.configs.defaultInputDeviceConfigs`, which calls
     `setButton('BACK', 'buttonB')` for the standard pad. So the setting is a name the game knows,
@@ -122,11 +128,11 @@ end
 --
 -- The getter answers the button's UID (truthy) while it is down and NIL while it is not, so nil
 -- and false are both "up" and everything else is "down". It is a plain table lookup inside
--- `inputHelper` (`pressedButtonUIDsNonFake[name]`), so polling it costs nothing.
+-- `inputHelper` (one upvalue - `pressedButtonUIDsNonFake[name]` in 1.5.4,
+-- `actuallyPressedMappedButtonUIDs[name]` in 1.5.5), so polling it costs nothing. core's
+-- inputButtonDown is what knows BOTH names: see the note on the rename there.
 local function turnHeld()
-  local ok, v = pcall(function() return inputHelper:isButtonActuallyPressed(__BUTTON__) end)
-  if not ok or v == nil or v == false then return false end
-  return true
+  return inputButtonDown(__BUTTON__)
 end
 
 -- Our feature table, or nil when the feature is not installed.
@@ -144,17 +150,15 @@ local function turnPass(orig, self, direction)
   if type(orig) == 'function' then return orig(self, direction) end
 end
 
--- The LOGICAL button names the game currently has down, read out of inputHelper's own table
--- (`pressedButtonUIDsNonFake`, which is upvalue 1 of the getter above, reached the same way the
--- reload tool reads the input level). --report uses it to turn "my B button does nothing" into
--- "the game reports this button as ...", which is the difference between a guess and an answer.
+-- The LOGICAL button names the game currently has down, read out of the table the getter itself
+-- reads. That table was renamed WITH the getter (`pressedButtonUIDsNonFake` ->
+-- `actuallyPressedMappedButtonUIDs`), so core's inputButtonsDown finds it by the getter's SHAPE
+-- rather than by name. --report uses the list to turn "my B button does nothing" into "the game
+-- reports this button as ...", which is the difference between a guess and an answer.
 local function turnPressedNames()
   local names = {}
-  local ok, t = pcall(function()
-    local _, v = debug.getupvalue(inputHelper.isButtonActuallyPressed, 1)
-    return v
-  end)
-  if not ok or type(t) ~= 'table' then return names end
+  local t = inputButtonsDown()
+  if type(t) ~= 'table' then return names end
   for k in pairs(t) do names[#names + 1] = tostring(k) end
   table.sort(names)
   return names

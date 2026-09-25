@@ -4,7 +4,9 @@ dialog.py - make a held button stop running through a conversation.
 
 THE PROBLEM. Coromon does not advance dialogue from key EVENTS, it POLLS the input helper:
 
-    inputHelper:isButtonActuallyPressed('USE')      -- 'USE' is the game's button name
+    inputHelper:isMappedButtonActuallyPressed('USE')     -- 'USE' is the game's button name
+
+(1.5.4 spells that `isButtonActuallyPressed`; 1.5.5 renamed it. See THE NAME below.)
 
 from the typewriter (so a press finishes the line early) and again from the wait for the
 next line, in `classes.interface.dialog.abstractDialogOverlayBuilder`. That call reports
@@ -14,14 +16,22 @@ long as the finger is down. A press that is still on its way back up after finis
 line is therefore already advancing the next one, which is what makes a line vanish before
 it can be read.
 
-THE FIX. While a conversation is open, `isButtonActuallyPressed` is replaced with an
-edge-triggered version: it reports the button exactly once, on the frame it goes down, and
-nil afterwards. So a press finishes the typing, and only the NEXT press advances - holding
-does nothing. Everything the game already does with that call keeps working; it just stops
-repeating while a button is held.
+THE FIX. While a conversation is open, that getter is replaced with an edge-triggered
+version: it reports the button exactly once, on the frame it goes down, and nil afterwards.
+So a press finishes the typing, and only the NEXT press advances - holding does nothing.
+Everything the game already does with that call keeps working; it just stops repeating while
+a button is held.
 
-WHY IT IS SCOPED, AND HOW. `isButtonActuallyPressed` is used by six modules, `mainCharacter`
-among them, so replacing it globally would change walking and interacting everywhere. It is
+THE NAME. 1.5.4 calls the getter `isButtonActuallyPressed` and 1.5.5 renamed the whole
+button family, so this resolves the field name from the input helper itself (`core.inputButtonName`)
+and falls back to the 1.5.4 spelling. That matters MORE here than in the other user of
+this helper, because this feature WRITES to the table: assigning `h.isButtonActuallyPressed`
+on a build that reads `h.isMappedButtonActuallyPressed` would add a field nothing polls - the
+swap would look installed, report itself as installed, and silently do nothing.
+
+WHY IT IS SCOPED, AND HOW. Four modules name that getter - `inputHelper` defines it, and
+`mainCharacter`, the main dialogue overlay and the battle action panel poll it - so replacing
+it globally would change walking and interacting everywhere. It is
 only swapped while `classes.interface.dialog.dialog:isCreated()` says a conversation is on
 screen, and put back the moment it is not - and the swap is on the input table itself, which
 the dialogue looks up at call time (GETGLOBAL inputHelper, then SELF), so the dialogue picks
@@ -55,10 +65,10 @@ SETTINGS = [
 def lua(cfg):
     """Shared helpers, so --status and the report can describe it too."""
     return r"""
--- The game's input helper, if it is loaded.
+-- The game's input helper, if it is loaded AND it still has a button getter we know about.
 local function dialogInput()
   local h = _G.inputHelper
-  if type(h) == 'table' and type(h.isButtonActuallyPressed) == 'function' then return h end
+  if type(h) == 'table' and inputButtonName() then return h end
 end
 
 -- Is a conversation on screen? This is the game's own main dialogue module.
@@ -71,8 +81,9 @@ end
 
 local function dialogSwapped()
   local h = dialogInput()
-  return (h ~= nil) and (type(h.__hudDialogEdge) == 'function')
-     and (h.isButtonActuallyPressed == h.__hudDialogEdge)
+  local name = inputButtonName()
+  return (h ~= nil) and (name ~= nil) and (type(h.__hudDialogEdge) == 'function')
+     and (h[name] == h.__hudDialogEdge)
 end
 """
 
@@ -85,7 +96,7 @@ do
   local f = makeFeature('dialog', 200)
   f.edges = 0          -- presses the dialogue has been handed
 
-  local base            -- the game's own isButtonActuallyPressed, kept for the swap back
+  local base            -- the game's own button getter, kept for the swap back
   local held, seen = {}, {}
 
   -- True only on the frame a button goes down. `base` reports the button for as long as it is
@@ -120,12 +131,19 @@ do
     end
   end
 
+  -- The FIELD NAME is resolved on every swap rather than once, because 1.5.5 renamed it
+  -- (isButtonActuallyPressed -> isMappedButtonActuallyPressed) and this is the feature that WRITES
+  -- to that field: writing the name a build does not have would install a field nothing polls, so
+  -- the dialogue would keep using the game's own getter and the swap would look installed while
+  -- doing nothing.
   local function wrap()
     local h = dialogInput()
-    if not h or h.isButtonActuallyPressed == edge then return end
-    if type(base) ~= 'function' then base = h.isButtonActuallyPressed end
+    local name = inputButtonName()
+    if not h or not name or h[name] == edge then return end
+    if type(base) ~= 'function' then base = h[name] end
     held, seen = {}, {}
-    h.isButtonActuallyPressed = edge
+    h[name] = edge
+    h.__hudDialogName = name
     h.__hudDialogEdge = edge
     h.__hudDialogBase = base
   end
@@ -133,10 +151,11 @@ do
   local function unwrap()
     local h = dialogInput()
     if not h then return end
-    if h.isButtonActuallyPressed == h.__hudDialogEdge then
-      h.isButtonActuallyPressed = h.__hudDialogBase
+    local name = inputButtonName()
+    if name and h[name] == h.__hudDialogEdge then
+      h[name] = h.__hudDialogBase
     end
-    h.__hudDialogEdge, h.__hudDialogBase = nil, nil
+    h.__hudDialogName, h.__hudDialogEdge, h.__hudDialogBase = nil, nil, nil
     held, seen = {}, {}
   end
 
@@ -214,13 +233,14 @@ def report(cfg):
   out[#out + 1] = string.format('  the swap is in      = %s', tostring(dialogSwapped()))
   local f = _G.__hud and _G.__hud.feats.dialog
   if f then out[#out + 1] = string.format('  presses passed on   = %d', f.edges or 0) end
-  local ok, v = pcall(function() return h:isButtonActuallyPressed('USE') end)
-  out[#out + 1] = string.format("  isButtonActuallyPressed('USE') right now = %s",
+  local name = inputButtonName() or 'isButtonActuallyPressed'
+  local ok, v = pcall(function() return h[name](h, 'USE') end)
+  out[#out + 1] = string.format('  %s(\'USE\') right now = %s', name,
     tostring(ok and v or 'ERR'))
   out[#out + 1] = '  the game does not advance dialogue from key events: it polls this one call'
   out[#out + 1] = '  from the typewriter and from the wait for the next line, every frame - so'
   out[#out + 1] = '  while the button reads as down it keeps advancing. It is replaced with an'
-  out[#out + 1] = '  edge-triggered version only while a conversation is on screen, because'
-  out[#out + 1] = '  six modules use it and mainCharacter is one of them.'
+  out[#out + 1] = '  edge-triggered version only while a conversation is on screen, because other'
+  out[#out + 1] = '  modules poll it too and mainCharacter is one of them (1.5.5 renamed the field).'
   return table.concat(out, '\n')
 end)()"""
