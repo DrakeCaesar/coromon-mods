@@ -12,7 +12,8 @@ each potential level". So the controls are exactly the inputs the game's roll re
     x1.5 and x2 are worth the same one flag and a three-way control would offer a choice that does
     not exist (the user: "make the checkboxes like speed > 1, no need for a dropdown if the effect
     change is bianry"); which multiplier the game really has is in the tooltip
-  * "Show encounter animations" (the game's own wording) - it costs one flag while it is OFF
+  * "Show encounter animations" - it costs one flag while it is OFF, so the tick on the panel reads
+    "encounter animations off" (the flag itself, unchecked by default), not the setting
   * the Potent Scent - not a setting at all: it is the item (`SCENT_ADD_POTENTIAL_ROLL`) that runs
     for six minutes and takes the best of THREE picks instead of one
 
@@ -167,11 +168,16 @@ class PotentialTab(QWidget):
         controls.addWidget(self.overworld)
 
         controls.addSpacing(12)
-        self.animations = QCheckBox("encounter animations")
+        # THE TICK IS THE FLAG ITSELF, NOT THE SETTING: the game's key is "Show encounter animations"
+        # and the roll counts it while it is OFF, so an unticked box here means the animations are ON -
+        # which is the game's own default and the baseline the other two ticks are read against (the
+        # user: "reverse the encounter animations checkbox, make it say encounter animations off - so the
+        # baseline is unchecked").
+        self.animations = QCheckBox("encounter animations off")
         self.animations.setToolTip(
-            "The settings screen's \"Show encounter animations\".\n"
-            "It costs a speed-up flag while it is OFF, so untick it only if you want the faster\n"
-            "encounters: it is worth about 6.5% of your potent rate.\n"
+            "Tick this when the settings screen's \"Show encounter animations\" is OFF.\n"
+            "An OFF costs one speed-up flag: the encounter wastes no time, so it is worth about\n"
+            "6.5% LESS of your potent rate - see the table.\n"
             "\"Show weather animations\" is a different setting and is not read at all.")
         self.animations.toggled.connect(self._changed)
         controls.addWidget(self.animations)
@@ -277,7 +283,9 @@ class PotentialTab(QWidget):
             tick.setToolTip("%s - your game has x%g.\nAnything ABOVE x1 costs one speed-up flag, so "
                             "x1.5 and x2 are the same here." % (what, value))
             tick.blockSignals(False)
-        for tick, value in ((self.animations, animations), (self.scent, False)):
+        # THE ANIMATIONS TICK IS THE FLAG, so it is ticked when the game has them OFF: a game that shows
+        # them (the default) leaves it, and the baseline, unchecked.
+        for tick, value in ((self.animations, not animations), (self.scent, False)):
             tick.blockSignals(True)
             tick.setChecked(bool(value))
             tick.blockSignals(False)
@@ -287,11 +295,13 @@ class PotentialTab(QWidget):
         """`(speed-ups, scent)` as the controls have them - the one place that reads the controls.
 
         The two multipliers are passed as the tick's own value, where 1 means x1 (off) and 2 means
-        "above x1" (on) - which is all `potential.speed_ups` can tell apart anyway.
+        "above x1" (on) - which is all `potential.speed_ups` can tell apart anyway. The animations tick
+        is the opposite way round from the game's setting (`not`), because it names the FLAG: an
+        unticked "encounter animations off" means they are on, which costs nothing.
         """
         count = potential.speed_ups(2 if self.battle.isChecked() else 1,
                                     2 if self.overworld.isChecked() else 1,
-                                    self.animations.isChecked())
+                                    not self.animations.isChecked())
         return count, self.scent.isChecked()
 
     def _changed(self, *_args):

@@ -2020,10 +2020,12 @@ def main():
     check("the tab opened on the game's own settings",
           pot.battle.isChecked() == bool(battle > 1)
           and pot.overworld.isChecked() == bool(overworld > 1)
-          and pot.animations.isChecked() == bool(animations)
+          # THE ANIMATIONS TICK NAMES THE FLAG, so it is ticked when the game has them OFF
+          and pot.animations.isChecked() == (not animations)
           and not pot.scent.isChecked(),
-          "battle x%s, game x%s, encounter animations %s"
-          % (battle, overworld, "on" if animations else "off"))
+          "battle x%s, game x%s, encounter animations %s -> the tick %s"
+          % (battle, overworld, "on" if animations else "off",
+             "ticked" if pot.animations.isChecked() else "unticked"))
     # A TICK EACH, not a picker: the game's own test is `> 1`, so the multiplier's SIZE cannot matter
     # and a three-way control would offer a difference that does not exist.
     check("... with a tick per multiplier, because only 'above x1' is a difference",
@@ -2174,10 +2176,12 @@ def main():
                                           pot.reroll_table.model_.rows[18]["fraction"]))
     pot.scent.setChecked(False)
 
-    # THE TWO TICKS: each one is a flag, and there is nothing in between to choose.
+    # THE TWO TICKS: each one is a flag, and there is nothing in between to choose. The animations tick
+    # NAMES THE FLAG - "encounter animations off" - so the baseline (nothing sped up) is it UNTICKED,
+    # which is also the state a game with the animations on opens in.
     pot.battle.setChecked(False)
     pot.overworld.setChecked(False)
-    pot.animations.setChecked(True)
+    pot.animations.setChecked(False)
     pump(app)
     plain = pot.configuration()[0]
     plain_rows = potential_rows()
@@ -2197,9 +2201,9 @@ def main():
           "table %d -> %d, perfect %s -> %s"
           % (potential.total(plain), potential.total(both), plain_rows[21][3],
              potential_rows()[21][3]))
-    pot.animations.setChecked(False)
+    pot.animations.setChecked(True)
     pump(app)
-    check("encounter animations OFF is the third flag",
+    check("ticking 'encounter animations off' is the third flag",
           pot.configuration()[0] == both + 1 == potential.MAX_SPEED_UPS,
           pot.configuration()[0])
     # ... AND THE POTENTIFLATOR'S TABLE FOLLOWS THE SAME FLAGS: its fraction's denominator is the
@@ -2218,9 +2222,9 @@ def main():
     check("'From the game' puts the controls back on the game's settings",
           pot.battle.isChecked() == bool(battle > 1)
           and pot.overworld.isChecked() == bool(overworld > 1)
-          and pot.animations.isChecked() == bool(animations)
+          and pot.animations.isChecked() == (not animations)
           and not pot.scent.isChecked(),
-          "battle x%s -> %s, game x%s -> %s, encounter animations -> %s"
+          "battle x%s -> %s, game x%s -> %s, encounter animations off -> %s"
           % (battle, pot.battle.isChecked(), overworld, pot.overworld.isChecked(),
              pot.animations.isChecked()))
     check("... and says in the tooltip which multiplier the game really has",
