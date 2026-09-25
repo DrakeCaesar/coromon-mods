@@ -45,16 +45,18 @@ WHERE IT DOES NOT APPLY, and the output says so rather than guessing:
     patches meeting at a corner are one block with one name on it, and `block_outline` gives each
     block the border that follows it.
 
-    python encounter_zones.py                 # writes encounter_zones.html
+    python encounter_zones.py                 # every area, as text
     python encounter_zones.py ICE             # only areas whose name contains ICE
 
-The output is one self-contained page: a map per area with the patches coloured and lettered, and
-the encounter table for each zone under it.
+THE CLI PRINTS TEXT AND NOTHING ELSE. It used to write a self-contained `encounter_zones.html` -
+inline SVG of every map with the patches coloured and lettered, plus the encounter tables. That page
+is gone: the window draws the same maps from the game's own tiles, merged into blocks with the labels
+inside their block and the encounter tables in the pane beside it, so the page was a second renderer
+of one thing - and 2.1 MB of generated HTML committed to the repository.
 """
 
 import collections
 import glob
-import html
 import json
 import os
 import sys
@@ -63,10 +65,6 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 RES = os.path.join(os.path.dirname(BASE), "Resources")
 ZONES_JSON = os.path.join(RES, "data", "json", "encounterZones.json")
 MAPS = os.path.join(RES, "maps")
-OUT = os.path.join(BASE, "encounter_zones.html")
-
-TILE_PX = 6          # drawn size of one map cell
-PAD = 6
 
 # HOW FAR A MARKER MAY SIT FROM THE PATCH IT NAMES, in cells. Markers are placed ON a patch, but not
 # always on a tile OF it: `dojoGrounds` (27,64) is a marker in the middle of a 74-cell grass region
@@ -347,25 +345,12 @@ def colour_for(zone):
     return "#8a8a8a"
 
 
-def span_path(rows_of_x, scale):
-    """One SVG path for a set of cells, built from horizontal runs.
-
-    RUNS, NOT CELLS, and it is not a micro-optimisation: drawn one `<rect>` per cell the first
-    version of this page came to 110 MB, because a grass region is thousands of cells and every map
-    has several. As runs it is one `<path>` per zone, and the page is small enough to open.
-    """
-    d = []
-    for (y, x0, x1) in runs_by_row(rows_of_x):
-        w = (x1 - x0) * scale
-        d.append("M%g %gh%gv%gh-%gz" % (x0 * scale, y * scale, w, scale, w))
-    return "".join(d)
-
-
 def runs_by_row(cells_per_row):
     """[(y, x0, x1)] - horizontal runs in a {y: [x, ...]} map.
 
-    Shared with the GUI, which draws the same shapes on a Tk canvas: a leaky second copy of "how a
-    cell set becomes rectangles" is how the page and the window end up disagreeing about a patch.
+    Shared with the GUI, which draws each block as one rectangle per run (`mapview._plan_map`): a
+    leaky second copy of "how a cell set becomes rectangles" is how two renderers end up disagreeing
+    about a patch.
     """
     out = []
     for y in sorted(cells_per_row):
@@ -494,50 +479,8 @@ def zone_map(map_file):
     return _MAP_CACHE[map_file]
 
 
-def svg_for(m, layers, zones, width_limit=TILE_PX * 220):
-    w, h = m["width"], m["height"]
-    scale = TILE_PX
-    while w * scale > width_limit and scale > 1:
-        scale -= 1
-    W, H = w * scale, h * scale
-    parts = ['<svg viewBox="0 0 %d %d" width="%d" height="%d" '
-             'xmlns="http://www.w3.org/2000/svg" style="background:#15171a">' % (W, H, W, H)]
-
-    # the ground: every filled cell of every level layer, as one path
-    parts.append('<path fill="#2a2f36" d="%s"/>'
-                 % span_path(cells_by_row(terrain_cells(m, layers)), scale))
-
-    for zone, entry in sorted(zones.items()):
-        colour = colour_for(zone)
-        letter = zone.rsplit("_", 1)[-1]
-        every = set()
-        for tiles in entry["patches"]:
-            every |= tiles
-        if every:
-            parts.append('<path fill="%s" opacity="0.75" d="%s"/>'
-                         % (colour, span_path(cells_by_row(every), scale)))
-        # a letter on every patch, so a zone that owns several of them is still identifiable, and a
-        # bigger one on the first patch of each zone
-        for i, tiles in enumerate(entry["patches"]):
-            xs = [t[0] for t in tiles]
-            ys = [t[1] for t in tiles]
-            cx = (min(xs) + max(xs) + 1) / 2 * scale
-            cy = (min(ys) + max(ys) + 1) / 2 * scale
-            size = max(9, scale * (2.4 if i == 0 else 1.6))
-            parts.append('<text x="%.0f" y="%.0f" font-family="monospace" font-size="%.0f" '
-                         'font-weight="bold" fill="#fff" stroke="#000" stroke-width="0.6" '
-                         'text-anchor="middle" dominant-baseline="middle">%s</text>'
-                         % (cx, cy, size, html.escape(letter)))
-        for (x, y, why) in entry["unplaced"]:
-            parts.append('<rect x="%d" y="%d" width="%d" height="%d" fill="none" stroke="%s" '
-                         'stroke-width="2"><title>%s</title></rect>'
-                         % (x * scale, y * scale, scale, scale, colour, html.escape(why)))
-    parts.append("</svg>")
-    return "".join(parts)
-
-
 # ==============================================================================================
-# THE TABLES
+# THE ENCOUNTER TABLES
 # ==============================================================================================
 def zone_rows(entry):
     """The encounter table for one zone, as (share, steps, monsters)."""
@@ -559,10 +502,17 @@ def zone_rows(entry):
 
 
 def main():
+    """Print every area's zones and their encounter tables, as text.
+
+    THE ONE THING THIS DOES NOT DO IS DRAW. The window does that (see the module docstring), and what
+    is left here is the part a GUI is bad at: the whole atlas in one scrollback, greppable, and
+    usable over a pipe. `python encounter_zones.py ICE` narrows it by area name.
+    """
     contains = sys.argv[1].upper() if len(sys.argv) > 1 else None
     data = json.load(open(ZONES_JSON, encoding="utf-8"))
 
-    sections, index = [], []
+    areas = 0
+    zones_seen = 0
     for area in sorted(data):
         zone_list = data[area]
         if not zone_list:
@@ -575,62 +525,31 @@ def main():
             continue
         m, layers, zones = zone_patches(path)
         drawn = {z: v for z, v in zones.items() if v["patches"] or v["unplaced"]}
-        index.append((area, path, len(drawn)))
-
-        rows = []
+        areas += 1
+        print("\n%s  (%s)  %d zone(s) drawn" % (area, map_file, len(drawn)))
         for z in zone_list:
             name = z["name"]
             entry = zones.get(name, {"patches": [], "unplaced": [], "note": None})
-            colour = colour_for(name)
             placed = sum(len(p) for p in entry["patches"])
-            spots = ", ".join("(%d,%d)" % (p[0], p[1]) for tiles in entry["patches"]
-                              for p in [(min(t[0] for t in tiles), min(t[1] for t in tiles))])
-            table = "".join(
-                "<tr><td>%s</td><td>%s</td><td>%s</td><td>%.1f%%</td><td>%.1f%%</td></tr>"
-                % (html.escape(e_name or "-"), steps, "<br>".join(html.escape(x) for x in mons),
-                   share, each)
-                for (share, each, steps, e_name, mons) in zone_rows(z))
-            rows.append(
-                "<h3 style=\"color:%s\">%s <span class=sub>%d patch(es), %d tiles%s</span></h3>"
-                "%s%s<table class=t><tr><th>slot</th><th>weight</th><th>monsters</th>"
-                "<th>slot share</th><th>each</th></tr>%s</table>"
-                % (colour, html.escape(name), len(entry["patches"]), placed,
-                   (" - at " + spots) if spots else "",
-                   ("<p class=warn>not placed: %s</p>" % html.escape(
-                       "; ".join("(%d,%d) %s" % (tx, ty, why)
-                                 for tx, ty, why in entry["unplaced"]))
-                    if entry["unplaced"] else ""),
-                   ("<p class=warn>%s</p>" % html.escape(entry["note"])) if entry["note"] else "",
-                   table or "<tr><td colspan=6>-</td></tr>"))
-
-        sections.append(
-            "<section><h2 id=\"%s\">%s <span class=sub>%s</span></h2>%s%s</section>"
-            % (html.escape(area), html.escape(area), html.escape(map_file),
-               svg_for(m, layers, drawn), "".join(rows)))
-
-    page = """<!doctype html><meta charset="utf-8"><title>Coromon encounter zones</title>
-<style>
- body{background:#101216;color:#ddd;font:13px/1.5 system-ui,sans-serif;margin:0;padding:16px}
- h1{font-size:18px} h2{font-size:15px;border-bottom:1px solid #333;padding-top:14px;margin-bottom:6px}
- h3{font-size:13px;margin:16px 0 4px}
- .sub{color:#888;font-weight:400;font-size:12px}
- .warn{color:#e0a33a;margin:4px 0}
- table.t{border-collapse:collapse;margin:4px 0 0}
- table.t th,table.t td{border:1px solid #2c3138;padding:2px 6px;text-align:left}
- table.t th{background:#191d23;color:#aaa;font-weight:600}
- nav a{color:#7fb2ff;margin-right:10px;text-decoration:none}
-</style>
-<h1>Coromon encounter zones - which grass is which</h1>
-<p class=sub>The letter in each coloured patch is the zone's own name (the wiki's &quot;Grass B&quot;
-is the game's <code>_B</code>). Patch shapes are read from the map tiles; see the tool for how.</p>
-<nav>%s</nav>%s
-""" % ("".join('<a href="#%s">%s</a>' % (html.escape(a), html.escape(a)) for a, _, _ in index),
-       "".join(sections))
-
-    open(OUT, "w", encoding="utf-8").write(page)
-    print("wrote %s - %d areas, %.1f KB" % (OUT, len(index), os.path.getsize(OUT) / 1024.0))
-    for area, path, n in index:
-        print("   %-22s %-46s %d zones" % (area, os.path.relpath(path, RES), n))
+            spots = ", ".join("(%d,%d)" % (min(t[0] for t in tiles), min(t[1] for t in tiles))
+                              for tiles in entry["patches"])
+            zones_seen += 1
+            print("  %-26s %-9s %2d patch(es) %4d tile(s)%s"
+                  % (name, name.rsplit("_", 1)[-1], len(entry["patches"]), placed,
+                     ("  at " + spots) if spots else ""))
+            if entry["unplaced"]:
+                print("      not placed: %s"
+                      % "; ".join("(%d,%d) %s" % (x, y, why) for x, y, why in entry["unplaced"]))
+            if entry["note"]:
+                print("      %s" % entry["note"])
+            rows = zone_rows(z)
+            if not rows:
+                print("      (no encounters)")
+            for (share, each, steps, e_name, mons) in rows:
+                print("      %-22s weight %-4s %5.1f%%  each %5.1f%%  %s"
+                      % (e_name or "-", steps, share, each, ", ".join(mons)))
+    print("\n%d area(s), %d zone(s)%s"
+          % (areas, zones_seen, " matching %r" % contains if contains else ""))
     return 0
 
 
