@@ -25,6 +25,7 @@ if "--geometry" not in sys.argv:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtCore import QSettings, QSize, Qt                    # noqa: E402
+from PySide6.QtGui import QFontMetrics                   # noqa: E402
 from PySide6.QtTest import QTest                                  # noqa: E402
 from PySide6.QtWidgets import QApplication, QCheckBox, QLabel        # noqa: E402
 
@@ -47,6 +48,7 @@ from coromontools import mapview                              # noqa: E402
 from coromontools import missing_tab                          # noqa: E402
 from coromontools import potential_tab                        # noqa: E402
 from coromontools import table as table_mod                  # noqa: E402
+from coromontools import theme                                # noqa: E402
 from coromontools.table import ICON, PAYLOAD, sort_rows            # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 from coromontools.widgets import mono_height                # noqa: E402
@@ -1960,6 +1962,57 @@ def main():
               for count in sorted(potential.TABLES)),
           [potential.weights(3)[level - 1] for level in (1, 5, 17, 21)])
 
+    # THE SAME NUMBERS AS EXACT FRACTIONS, the way the wiki writes its odds tables: one pick of
+    # potential 9 is `320/3194`, the perfect weight is `1/3194`, and with the scent's THREE picks the
+    # denominator is 3194 ** 3 = 32584025384 - which is the very number the wiki's own scent column
+    # shows, so the two agree on the shape of the arithmetic as well as on the weights.
+    check("... and the wiki's own exact fractions fall out of the same weights",
+          potential.fraction(0, 1, 9) == (320, 3194)
+          and potential.fraction(0, 1, 21) == (1, 3194)
+          and potential.fraction(0, 3, 21)[1] == 3194 ** 3 == 32584025384,
+          "one pick of 9: %d/%d, three picks of 21: %d/%d"
+          % (potential.fraction(0, 1, 9) + potential.fraction(0, 3, 21)))
+    check("... which are the model's own chances, exactly",
+          all(abs(numerator / denominator - potential.chances(count, picks)[level - 1]) < 1e-12
+              for count in sorted(potential.TABLES) for picks in (1, 3)
+              for level, (numerator, denominator) in
+              ((level, potential.fraction(count, picks, level)) for level in (1, 9, 19, 21))))
+
+    # THE POTENTIFLATOR - the machine Oleg runs - IS THE SAME ROLL TAKEN TO 21. `Monster:
+    # rerollPotential` takes the best of `amountOfRerollsByPotentialValue[potential]` FULL
+    # `rollPotential()` draws and adds the Coromon's own potential, so it can never come out lower, and
+    # a 20 or 21 is 21 with no draw at all. THE DRAW COUNTS ARE THE WIKI'S OWN NUMERATOR COLUMN
+    # (`3/3194` ... `19/3194`, then `30/3194` and `60/3194`, and `3194/3194` at 20), which is what
+    # makes the tab checkable against it - as does its fraction being `draws / total`.
+    check("the Potentiflator's draws are the wiki's own numerator column",
+          potential.REROLL_DRAWS == tuple(list(range(3, 20)) + [30, 60])
+          and potential.reroll_draws(1) == 3 and potential.reroll_draws(19) == 60
+          and potential.reroll_draws(20) is None,
+          [potential.reroll_draws(level) for level in (1, 17, 18, 19, 20)])
+    check("... and its fraction is the draws over the weight of 21, unsimplified like the wiki's",
+          potential.reroll_fraction(19, 0) == "60/3194"
+          and potential.reroll_fraction(20, 0) == "3194/3194"
+          and potential.reroll_fraction(19, 2) == "60/3863",
+          potential.reroll_fraction(19, 0))
+    # THE EXACT CHANCE IS THE WIKI'S FRACTION CORRECTED for the draws being INDEPENDENT: `1 -
+    # (1 - p) ** draws`, with `p` one draw's own chance of a 21 (a draw is 1 pick without a scent).
+    # It reads a hair BELOW the wiki's linear `draws / total` (1.861% against 1.879% for a 19), so the
+    # tab shows both and its tooltip says which is which.
+    exact = 1 - (1 - potential.single(0, 21)) ** 60
+    check("... and the exact chance of it, which the wiki's fraction slightly overstates",
+          abs(potential.reroll_chance(19, 0) - exact) < 1e-12
+          and potential.reroll_chance(19, 0) < 60 / 3194.0
+          and potential.reroll_chance(20, 0) == 1.0
+          and potential.reroll_chance(19, 0, True) > potential.reroll_chance(19, 0),
+          "exact %.3f%% vs the wiki's %.3f%%" % (100 * potential.reroll_chance(19, 0),
+                                                 100 * 60 / 3194.0))
+    check("... and both readings are in the report --selftest prints",
+          "320/3194" in potential.report(0) and "60/3194" in potential.report(0)
+          # 21 level rows + the Potentiflator's 20, plus 3 heading/summary lines for the first table
+          # and 2 for the second one
+          and len(potential.report(0).splitlines()) == 21 + 20 + 5,
+          len(potential.report(0).splitlines()))
+
     # THE CONTROLS OPEN ON THE GAME'S OWN SETTINGS, which is the whole point of the tab: `from_game`
     # reads them out of the game's preferences, so what it shows before anything is touched is what
     # the game will really do. Nothing here may be saved - see the tab's own docstring.
@@ -2002,13 +2055,46 @@ def main():
           all(rows[level][3] == potential.percent(potential.chances(count, picks)[level - 1])
               for level in potential.LEVELS),
           [(level, rows[level][3]) for level in (11, 17, 21)])
+    # ... AND THE SAME NUMBERS AS FRACTIONS, the wiki's own form, from the same weights.
+    check("... each with the exact fraction beside it, the way the wiki writes odds",
+          all(pot.table.model_.rows[level - 1]["fraction"]
+              == "%d/%d" % potential.fraction(count, picks, level)
+              for level in potential.LEVELS),
+          [pot.table.model_.rows[level - 1]["fraction"] for level in (1, 9, 21)])
     check("... summing to exactly 100% of the levels",
           abs(sum(potential.chances(count, picks)) - 1.0) < 1e-12)
-    check("the bar is drawn for every level and is longest at the table's peak",
-          all(row["bar"] for row in pot.table.model_.rows)
-          and max(len(row["bar"]) for row in pot.table.model_.rows)
-          == potential_tab.BAR,
-          [len(row["bar"]) for row in pot.table.model_.rows][:6])
+    # THE DISTRIBUTION BARS ARE DRAWN, AND PROPORTIONALLY - not a count of block characters, which can
+    # only change length one glyph at a time and turned the tail of this table into a staircase (the
+    # user: "we could have them show real proportional bars, not those staggered ones"). The value in
+    # the cell is the level's own share of the peak and the delegate paints exactly that much of the
+    # cell, so the check is the MEASUREMENT: two rows whose values are 1.00 and 0.14 draw bars in that
+    # ratio, to the pixel.
+    bar_column = [column.key for column in pot.table.model_.columns].index("bar")
+    bars = [row["bar"] for row in pot.table.model_.rows]
+    check("the distribution column is a bar per level, its length the level's share of the peak",
+          isinstance(pot.table.itemDelegateForColumn(bar_column), table_mod.BarDelegate)
+          and abs(max(bars) - 1.0) < 1e-12 and min(bars) > 0
+          and all(abs(value - potential.chances(count, picks)[level - 1] / max(potential.chances(
+              count, picks))) < 1e-12 for level, value in zip(potential.LEVELS, bars)),
+          [round(value, 4) for value in bars[:4]])
+    drawn = []
+    shot = pot.table.viewport().grab().toImage()
+    bar_left = sum(pot.table.columnWidth(i) for i in range(bar_column))
+    bar_width = pot.table.columnWidth(bar_column)
+    tint = theme.BAR.lstrip("#")
+    wanted = (int(tint[0:2], 16), int(tint[2:4], 16), int(tint[4:6], 16))
+    for row_index in (10, 4):                       # the peak, and a level at ~1/7 of it
+        y = row_index * 20 + 10
+        drawn.append(sum(1 for x in range(bar_left, bar_left + bar_width)
+                         if all(abs(channel - want) < 12 for channel, want in
+                                zip((shot.pixelColor(x, y).red(), shot.pixelColor(x, y).green(),
+                                     shot.pixelColor(x, y).blue()), wanted))))
+    peak, small = drawn
+    check("... and the pixels it draws are in that ratio, not rounded to whole blocks",
+          peak == bar_width - 2 * table_mod.BarDelegate.INSET
+          and abs(small - bars[4] * peak) <= 1,
+          "peak %d px, 1/7 level %.4f -> %d px (expected %.1f)"
+          % (peak, bars[4], small, bars[4] * peak))
 
     kinds = potential.kind_chances(count, picks)
     check("the header says which table and how many picks",
@@ -2023,6 +2109,43 @@ def main():
     check("... with the perfect odds said as '1 in N' as well",
           potential.one_in(kinds["C"]) in pot.odds.text(),
           potential.one_in(kinds["C"]))
+
+    # THE POTENTIFLATOR'S OWN TABLE beside it: every potential a Coromon can be handed over at, the
+    # game's number of draws, the wiki's fraction (`draws / total`) and the exact chance. It is the
+    # SAME roll, so the four controls move it too - which is why it shares the tab.
+    def reroll_rows():
+        """The Potentiflator's table as `{from: (draws, fraction, chance)}`, straight off the model."""
+        return {int(row["from"]): (row["draws"], row["fraction"], row["chance"])
+                for row in pot.reroll_table.model_.rows}
+
+    rrows = reroll_rows()
+    check("the Potentiflator is a table of its own, one row per potential it starts from",
+          sorted(rrows) == list(range(1, potential.REROLL_CERTAIN + 1)), len(rrows))
+    check("... with the game's own number of draws, and 'always' where it is a guarantee",
+          all(rrows[level][0] == ("always" if potential.reroll_draws(level) is None
+                                  else "%d" % potential.reroll_draws(level))
+              for level in rrows),
+          [(level, rrows[level][0]) for level in (1, 17, 18, 19, 20)])
+    check("... the draws over the weight of 21 as the fraction, exactly as the wiki writes it",
+          all(rrows[level][1] == potential.reroll_fraction(level, count) for level in rrows)
+          and rrows[20][1] == "%d/%d" % (potential.total(count), potential.total(count)),
+          [rrows[level][1] for level in (1, 19, 20)])
+    check("... and the exact chance beside it",
+          all(rrows[level][2]
+              == potential.percent(potential.reroll_chance(level, count, scented))
+              for level in rrows)
+          and rrows[20][2] == potential.percent(1.0)
+          and float(rrows[19][2].rstrip("%")) > float(rrows[17][2].rstrip("%")),
+          [(level, rrows[level][2]) for level in (17, 19, 20)])
+    check("... and the wild table sits straight after it, with no separator between them",
+          pot.reroll_table.parentWidget() is pot.table.parentWidget()
+          and pot.table.x() == pot.reroll_table.x() + pot.reroll_table.width() + 10
+          and pot.table.y() == pot.reroll_table.y()
+          and pot.table.width() == pot.table.content_width()
+          and pot.reroll_table.width() == pot.reroll_table.content_width(),
+          "Potentiflator %d..%d, wild %d..%d" % (pot.reroll_table.x(),
+                                                 pot.reroll_table.x() + pot.reroll_table.width(),
+                                                 pot.table.x(), pot.table.x() + pot.table.width()))
 
     # THE SCENT: the picks go from 1 / 3 and nothing else moves - so every level's chance changes,
     # and it is the TOP of the table that gains and the middle that pays for it.
@@ -2040,6 +2163,15 @@ def main():
           % (rows[21][3], scented_rows[21][3], rows[11][3], scented_rows[11][3]))
     check("... while the weights it draws from are untouched",
           all(scented_rows[level][1] == rows[level][1] for level in potential.LEVELS))
+    # ... AND THE MACHINE MOVES WITH IT, because it rolls the same distribution: the fraction stays
+    # `draws / weight` (a scent does not change how many draws), and the chance to perfect climbs.
+    check("... and the Potentiflator's chance to perfect climbs with the scent too",
+          int(pot.reroll_table.model_.rows[18]["draws"]) == 60
+          and float(pot.reroll_table.model_.rows[18]["chance"].rstrip("%"))
+          > float(rrows[19][2].rstrip("%")),
+          "19: %s -> %s (fraction %s)" % (rrows[19][2],
+                                          pot.reroll_table.model_.rows[18]["chance"],
+                                          pot.reroll_table.model_.rows[18]["fraction"]))
     pot.scent.setChecked(False)
 
     # THE TWO TICKS: each one is a flag, and there is nothing in between to choose.
@@ -2070,6 +2202,14 @@ def main():
     check("encounter animations OFF is the third flag",
           pot.configuration()[0] == both + 1 == potential.MAX_SPEED_UPS,
           pot.configuration()[0])
+    # ... AND THE POTENTIFLATOR'S TABLE FOLLOWS THE SAME FLAGS: its fraction's denominator is the
+    # weight table those flags pick, and it is the Wiki's own three-digit numbers the wiki's table
+    # prints under different defaults - so the tab is checkable against it in either state.
+    check("... and the Potentiflator's fractions follow the same flags",
+          pot.reroll_table.model_.rows[18]["fraction"] == "60/%d" % potential.total(3)
+          == "60/4567"
+          and pot.reroll_table.model_.rows[0]["fraction"] == "3/%d" % potential.total(3),
+          [pot.reroll_table.model_.rows[i]["fraction"] for i in (0, 18, 19)])
     check("a missing setting reads as the game's own default (nothing sped up)",
           potential.speed_ups(None, None, None) == 0, potential.speed_ups(None, None, None))
 
@@ -2098,6 +2238,31 @@ def main():
           potle.content_height() <= potle.viewport().height() + 2,
           "needs %d px, has %d" % (potle.content_height(),
                                    potle.viewport().height()))
+    # ... AND SO DOES THE POTENTIFLATOR'S, which is why the two tables are SIDE BY SIDE: stacked, each
+    # would be half as tall and both would scroll.
+    check("... and the Potentiflator's table fits beside it",
+          pot.reroll_table.content_height() <= pot.reroll_table.viewport().height() + 2,
+          "needs %d px, has %d" % (pot.reroll_table.content_height(),
+                                   pot.reroll_table.viewport().height()))
+    # BOTH TABLES WANT THEIR WIDTH, though, and this is where that is measured. THE WINDOW IS MADE WIDER
+    # FOR IT than the 1040 it opens at, and that is not a fudge: THIS PLATFORM HAS NO REAL FONT, so every
+    # string measures about 30% wider here than in the window the user runs (measured: the pair needs
+    # 1371 px offscreen against 989 px with the real font, where it fits 1040 and 1278 both). What is
+    # checked is the property that does not depend on the font: neither table scrolls sideways when the
+    # room is there, and each is exactly as wide as its columns ask.
+    window.resize(1420, 760)
+    pot.scent.setChecked(True)
+    pump(app, 4)
+    check("... and neither scrolls sideways when there is room, scent and all",
+          not potle.horizontalScrollBar().isVisible()
+          and not pot.reroll_table.horizontalScrollBar().isVisible()
+          and potle.width() >= potle.content_width()
+          and pot.reroll_table.width() >= pot.reroll_table.content_width(),
+          "wild %d of %d needed, reroll %d of %d"
+          % (potle.width(), potle.content_width(), pot.reroll_table.width(),
+             pot.reroll_table.content_width()))
+    pot.scent.setChecked(False)
+    pump(app, 4)
     # ... AND SO DOES THE CONTROL ROW, which is five widgets on one line: the four switches and the
     # button. Measured the way the Database tab's row is (all centres level), plus the one thing that
     # row cannot ask - that the last widget's right edge is still inside the tab.
@@ -2109,6 +2274,51 @@ def main():
                                             pot.width()))
     window.resize(1420, 760)
     pump(app, 4)
+
+    # THE COLUMNS THE SWITCHES MOVE KEEP ONE WIDTH, whatever they are set to - the user: "so that the
+    # table column there does not change so much when flipping the checkboxes, could you make it so it's
+    # always the width it would show when the longest fractions are calculated? that would be the
+    # everything on, but animations off". Each is measured ONCE at its widest (all three flags = the
+    # 4567-weight table, plus the scent's three picks = a ten-digit numerator over `total ** 3`) and
+    # pinned, so neither table can jump sideways - nor the table beside it, which sits after it.
+    def table_widths():
+        return (pot.table.content_width(), pot.reroll_table.content_width(),
+                tuple(pot.table.columnWidth(i) for i in range(pot.table.model_.columnCount())),
+                tuple(pot.reroll_table.columnWidth(i)
+                      for i in range(pot.reroll_table.model_.columnCount())))
+
+    metrics = QFontMetrics(pot.table.font())
+    before = table_widths()
+    seen = {before}
+    reaches = {key: 0 for key in potential_tab.PINNED}
+    for combo in ((False, False, False, False), (True, False, False, False),
+                  (False, True, False, False), (False, False, True, False),
+                  (False, False, False, True), (True, True, True, True),
+                  (True, True, True, False)):
+        for tick, on in zip((pot.scent, pot.battle, pot.overworld, pot.animations), combo):
+            tick.setChecked(on)
+        pump(app, 2)
+        seen.add(table_widths())
+        for row in pot.table.model_.rows:
+            for key in reaches:
+                reaches[key] = max(reaches[key], metrics.horizontalAdvance(row[key]))
+    check("the columns the switches move keep ONE width, however they are set",
+          len(seen) == 1,
+          "%d distinct width set(s) over 7 settings, wild %d px, reroll %d px"
+          % (len(seen), before[0], before[1]))
+    check("... and their widest value still fits, so nothing is ever elided",
+          all(reaches[key] + table_mod.COLUMN_PAD
+              <= pot.table.columnWidth([column.key for column
+                                        in pot.table.model_.columns].index(key))
+              for key in reaches),
+          {key: (reaches[key], pot.table.columnWidth([column.key for column
+                                                      in pot.table.model_.columns].index(key)))
+           for key in reaches})
+    for tick, on in zip((pot.scent, pot.battle, pot.overworld, pot.animations),
+                        (False, False, False, True)):
+        tick.setChecked(on)
+    pot.reload_button.click()
+    pump(app, 3)
 
     # ---------------------------------------------------------------- saved state
     check("tab index saved", prefs.get("tab") == 5, prefs.get("tab"))

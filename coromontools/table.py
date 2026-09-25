@@ -19,7 +19,11 @@ returned for every column would put the same picture in all of them.
 """
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSize, Qt, Signal
-from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHeaderView, QStyle,
+                               QStyledItemDelegate, QTableView)
+
+from .theme import BAR
 
 PAYLOAD = "_payload"
 ICON = "_icon"
@@ -48,14 +52,26 @@ class Column:
     shrinks a column to the text it actually holds (`DataTable.fit_columns`) - the user: "the tables
     should be as narrow as possible". It is the width the column starts at and the width it can never
     grow past, which is what keeps one long value from deciding the width of the whole table.
+
+    `bar` marks a column whose cell is not text but a BAR: the row's value under that key is a
+    fraction of the cell's width (0..1) and `BarDelegate` paints it, so the length is proportional
+    instead of a count of block characters. Such a column keeps its declared width when the table is
+    fitted, because there is no text to measure.
+
+    `fixed` is a column that keeps its declared width for the opposite reason: it is TEXT, but text the
+    user changes while they watch (the Potential tab's odds, whose fraction is twice as long with a
+    scent running). A column that re-measures with every toggle makes the whole table jump sideways, so
+    the caller measures it ONCE at its widest case and pins it here.
     """
 
-    def __init__(self, key, heading, width, align="w", desc_first=False):
+    def __init__(self, key, heading, width, align="w", desc_first=False, bar=False, fixed=False):
         self.key = key
         self.heading = heading
         self.width = width
         self.align = align
         self.desc_first = desc_first
+        self.bar = bar
+        self.fixed = fixed
 
     @property
     def qt_align(self):
@@ -150,6 +166,41 @@ class TableModel(QAbstractTableModel):
         return self.rows[row] if 0 <= row < len(self.rows) else None
 
 
+class BarDelegate(QStyledItemDelegate):
+    """Paints a cell as a bar whose length is EXACTLY the value in it (a fraction of the cell).
+
+    THE VALUE IS A NUMBER, NOT BLOCKS OF TEXT. A text bar ("██████") can only change length one
+    character at a time, so a distribution that rises smoothly still came out as a staircase of five
+    or six lengths - the user: "we could have them show real proportional bars, not those staggered
+    ones". Here the bar is a filled rectangle as wide as the value says, to the pixel.
+
+    The cell's own background is drawn first (the style's item panel), so the alternating row colours
+    survive - a delegate that returns without painting it leaves the chart on bars of bare window.
+    """
+
+    # Air on each side, so a bar at 1.0 does not touch the next column's edge.
+    INSET = 3
+
+    def paint(self, painter, option, index):
+        style = option.widget.style() if option.widget is not None else QApplication.style()
+        style.drawPrimitive(QStyle.PrimitiveElement.PE_PanelItemViewItem, option, painter,
+                            option.widget)
+        try:
+            fraction = float(index.data(Qt.ItemDataRole.DisplayRole) or 0.0)
+        except (TypeError, ValueError):
+            return
+        fraction = max(0.0, min(1.0, fraction))
+        box = option.rect.adjusted(self.INSET, self.INSET, -self.INSET, -self.INSET)
+        pixels = int(round(box.width() * fraction))
+        # A LEVEL THE TABLE GIVES WEIGHT TO IS NEVER DRAWN AS NOTHING: the two rarest levels are 0.2% of
+        # the peak, which is under half a pixel, and an empty cell would read as "impossible".
+        if fraction > 0 and pixels < 1:
+            pixels = 1
+        box.setWidth(pixels)
+        if pixels > 0:
+            painter.fillRect(box, QColor(BAR))
+
+
 class DataTable(QTableView):
     """A sortable single-selection table, with the sort reported so a tab can save it.
 
@@ -189,6 +240,8 @@ class DataTable(QTableView):
         self.horizontalHeader().setSectionsClickable(True)
         for i, column in enumerate(columns):
             self.setColumnWidth(i, column.width)
+            if column.bar:
+                self.setItemDelegateForColumn(i, BarDelegate(self))
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._sort_key = sort_key or (columns[0].key if columns else None)
         self._sort_desc = sort_desc
@@ -231,13 +284,36 @@ class DataTable(QTableView):
         header = self.horizontalHeader()
         changed = False
         for i, column in enumerate(self.model_.columns):
-            asked = max(self.sizeHintForColumn(i), header.sectionSizeHint(i)) + COLUMN_PAD
-            want = min(column.width, asked)
+            # A BAR COLUMN KEEPS ITS DECLARED WIDTH: there is no text in it to measure, and measuring
+            # the number the delegate paints ("0.59") would leave the chart 25 px wide. A `fixed`
+            # column keeps it because its caller has already measured the WIDEST value it can hold
+            # (see `Column.fixed`) - re-measuring it on every fill is what makes a table jump about
+            # when a checkbox is flipped.
+            if column.bar or column.fixed:
+                want = column.width
+            else:
+                asked = max(self.sizeHintForColumn(i), header.sectionSizeHint(i)) + COLUMN_PAD
+                want = min(column.width, asked)
             if header.sectionSize(i) != want:
                 self.setColumnWidth(i, want)
                 changed = True
         if changed:
+            # ... and the LAYOUT is told, because `sizeHint` is the columns' own width now and a
+            # re-measure can change it (the scent grows the potential tab's fraction column by 80 px).
+            self.updateGeometry()
             self.columnsChanged.emit()
+
+    def sizeHint(self):
+        """The width these columns need, so a layout beside this table gives it that and no more.
+
+        QT'S OWN HINT IS A GUESS AT A "NICE" TABLE - measured, 256 px whatever the columns are - which
+        is why a table in a layout with an elastic neighbour comes out squeezed. The Potential tab's
+        Potentiflator table has to sit RIGHT AFTER the wild one with no separator between them, and
+        that only reads as one table beside another when each takes exactly what its columns ask for.
+        Height is left to Qt: a table's height is its container's business.
+        """
+        hint = super().sizeHint()
+        return QSize(self.content_width(), hint.height())
 
     def content_width(self):
         """The width this table needs to show every column it has, and not a pixel more.

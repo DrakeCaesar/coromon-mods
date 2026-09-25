@@ -18,6 +18,9 @@ DIM = "#3a3d41"         # borders and hover
 ACCENT = "#3d6ea8"      # selection
 NOTE = "#9aa0a6"        # the small print
 MAP_GROUND = "#101114"  # the solid ground the zone colours sit on
+# THE BARS DRAWN INSIDE A TABLE CELL (`table.BarDelegate`). Lighter than ACCENT on purpose: a selected
+# row is painted in ACCENT, and a bar in the same colour would vanish into it.
+BAR = "#5b8fc7"
 
 _STYLESHEET = """
 QWidget { color: %(fg)s; }

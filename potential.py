@@ -79,6 +79,26 @@ SCENT_ROLLS = 2
 SCENT_ITEM = "SCENT_ADD_POTENTIAL_ROLL"
 SCENT_MINUTES = 6
 
+# THE POTENTIFLATOR - the 1000-step machine Oleg runs. `classes.world.effects.world.
+# potentialRerollWorldEffect.lu` (lines 14-16) is the handover and it calls `Monster:rerollPotential`
+# (`classes.monsters.Monster.lu`, lines 1404-1413), which is:
+#
+#     if self.potential == 20 or self.potential == 21 then return 21 end
+#     local values = array.constructByFunction(amountOfRerollsByPotentialValue[self.potential],
+#                                              function() return monsterUtility:rollPotential() end)
+#     values[#values + 1] = self.potential
+#     return array.findMax(values)
+#
+# so it is the BEST OF `REROLL_DRAWS[potential]` FULL rolls of exactly the distribution this module
+# models - the same `rollPotential()`, so every switch below affects it too - with the Coromon's own
+# potential added to the pool, which is why the result can never be LOWER than it was. Potentials 20
+# and 21 come back as 21 outright (`REROLL_CERTAIN`), which is the wiki's `3194/3194` row.
+# MEASURED off that table literal: 3 draws at potential 1, one more per potential up to 19 at 17, then
+# 30 at 18 and 60 at 19 - which is exactly the numerator of each fraction in the wiki's "To Perfect"
+# table, and the reason the tab can be checked against it.
+REROLL_DRAWS = (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 30, 60)
+REROLL_CERTAIN = 20
+
 
 def speed_ups(battle=SPEED_DEFAULT, overworld=SPEED_DEFAULT, animations=ANIMATIONS_DEFAULT):
     """How many of the three flags are on - the key into `TABLES`, 0..3.
@@ -157,6 +177,65 @@ def level_kind(level):
     return KINDS[-1][0]
 
 
+def fraction(count, picks=1, level=1):
+    """`(numerator, denominator)` of the EXACT chance the final potential is exactly `level`.
+
+    `chances` gives the same numbers as floats; this is the arithmetic behind them, exactly:
+    `C(v) ** picks - C(v-1) ** picks` over `total ** picks`, where C is the cumulative weight. The
+    pair is NOT reduced, because the wiki prints it that way - `320/3194` for one pick of level 9,
+    and `32584025384` (= 3194 ** 3) under the scent's three.
+    """
+    table = weights(count)
+    tot = sum(table)
+    below = sum(table[:level])
+    previous = sum(table[:level - 1])
+    return below ** picks - previous ** picks, tot ** picks
+
+
+def reroll_draws(from_potential):
+    """How many full rolls the Potentiflator takes the best of, or None when it is a guarantee."""
+    if from_potential >= REROLL_CERTAIN:
+        return None
+    return REROLL_DRAWS[from_potential - 1]
+
+
+def reroll_chance(from_potential, count, scent=False):
+    """The chance the Potentiflator brings a Coromon AT `from_potential` to a perfect 21.
+
+    THE DRAWS ARE INDEPENDENT, so the chance is `1 - (1 - p) ** draws`, where `p` is one draw's own
+    chance of landing on 21 - and a draw is itself the best of `rolls(scent)` picks. THE WIKI PRINTS
+    THE FRACTION `draws / total` INSTEAD, which is the EXPECTED NUMBER OF HITS: it reads a hair high
+    (1.879% where the real chance is 1.861% for a Coromon at 19), which is why the tab shows both and
+    says which is which. A Coromon already at 20 or 21 does not roll at all.
+    """
+    draws = reroll_draws(from_potential)
+    if draws is None:
+        return 1.0
+    p = 1.0 - (1.0 - 1.0 / total(count)) ** rolls(scent)
+    return 1.0 - (1.0 - p) ** draws
+
+
+def reroll_fraction(from_potential, count):
+    """The wiki's own fraction for the reroll: `draws / total`, unsimplified (e.g. "60/3194")."""
+    draws = reroll_draws(from_potential)
+    tot = total(count)
+    return "%d/%d" % (tot if draws is None else draws, tot)
+
+
+def reroll_rows(count, scent=False):
+    """The Potentiflator as rows: one per potential a Coromon can be handed over at (1..20)."""
+    rows = []
+    for level in range(1, REROLL_CERTAIN + 1):
+        draws = reroll_draws(level)
+        rows.append({
+            "from": "%d" % level,
+            "draws": "always" if draws is None else "%d" % draws,
+            "fraction": reroll_fraction(level, count),
+            "chance": percent(reroll_chance(level, count, scent)),
+        })
+    return rows
+
+
 def percent(value):
     """A probability as a percentage, with the digits the row is worth.
 
@@ -212,16 +291,23 @@ def report(count, scent=False):
     base = chances(count, 1)
     lines = ["potential table: %d speed-up(s), %d-weight table, %d pick(s)%s"
              % (count, total(count), picks, " (Potent Scent)" if scent else "")]
-    lines.append("  level  category  weight     1 pick    %s"
+    lines.append("  level  category  weight                 fraction     1 pick    %s"
                  % ("1 pick" if picks == 1 else "%d picks" % picks))
     for level, chance, one in zip(LEVELS, diff, base):
-        lines.append("  %5d  %-8s  %6d   %8s  %8s"
+        lines.append("  %5d  %-8s  %6d  %22s  %8s  %8s"
                      % (level, KIND_NAMES[level_kind(level)], weights(count)[level - 1],
-                        percent(one), percent(chance)))
+                        "%d/%d" % fraction(count, picks, level), percent(one),
+                        percent(chance)))
     kinds = kind_chances(count, picks)
     lines.append("  " + "  ".join(
         "%s %s%s" % (KIND_NAMES[letter], percent(kinds[letter]),
                      # "1 in N" only where it reads as odds: a 93% Standard is not "1 in 1.08"
                      " (%s)" % one_in(kinds[letter]) if kinds[letter] < 0.05 else "")
         for letter, _name, _low, _high in KINDS))
+    lines.append("potentiflator: %d-weight table, %d pick(s) per draw%s"
+                 % (total(count), picks, " (Potent Scent)" if scent else ""))
+    lines.append("  from  draws  draws/weight  chance to perfect")
+    for row in reroll_rows(count, scent):
+        lines.append("  %4s  %5s  %12s  %s"
+                     % (row["from"], row["draws"], row["fraction"], row["chance"]))
     return "\n".join(lines)
