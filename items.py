@@ -138,12 +138,21 @@ def categories(items):
 
 # ---------------------------------------------------------------------------- artwork
 def icon_path(uid):
-    """The bag icon for `uid`, or None. Tries the plain variant, then the glowing ones."""
+    """The bag icon for `uid`, or None.
+
+    TWO LAYOUTS, ONE LOOKUP. The shipped game files the icons under a VARIANT subfolder -
+    `itemIcons/withoutGlow/<UID>.png`, with a glowing copy beside it - and the beta dropped the
+    variants and put every icon straight in `itemIcons/`, 363 files and no subfolder at all. The
+    variants are tried first because a glowing icon is the better picture, and the flat folder is
+    the fallback; a `withoutGlow` file that exists still wins over a flat one, so nothing changes
+    on a machine that has both.
+    """
     for variant in VARIANTS:
         path = os.path.join(ICON_ROOT, variant, "%s.png" % uid)
         if os.path.exists(path):
             return path
-    return None
+    flat = os.path.join(ICON_ROOT, "%s.png" % uid)
+    return flat if os.path.exists(flat) else None
 
 
 def icon_size(uid):

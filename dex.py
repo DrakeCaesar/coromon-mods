@@ -79,13 +79,29 @@ CONTAINER = 17               # the type frame is SMALLER than the cell: the spri
 # `frame_offset` below for why a whole texel matters.
 FRAME_TEXELS = (CELL - CONTAINER + 1) // 2
 
-# The atlas order lives in the game's own sheet definition, which is compiled into resource.car -
-# so it is read from the extraction car_extract.py produces. Every other tool here needs it too.
-EXTRACT = os.environ.get("QR_DISASM") or os.path.join(os.path.expanduser("~"), "qr_disasm")
-ATLAS_MODULE = os.path.join(EXTRACT, "classes.modules.monsterAvatarAtlas.lu")
+# WHERE THE SHEET'S OWN DEFINITION COMES FROM. Where every cell lives and what order the Coromon
+# sit in is decided when the atlas is built, so it is not in the PNG: it is a module compiled into
+# resource.car, which car_extract.py has to have taken apart first. Every tool here needs it.
+#
+# WHICH FOLDER IS NOT A CONSTANT, and it cannot be. The definition and the picture are two files
+# that must agree, and a game update changes both: the beta re-cut the sheet from a 32x31 grid of
+# 24 px cells (768x744, `frameWidth`/`columns`/`rows`) to a LIST OF 1025 EXPLICIT RECTANGLES on a
+# 26 px pitch, 54 a row (1404x494, a `frames` array of {x, y, width, height}). Reading the older
+# module against the newer picture does not fail loudly - it returns coordinates from the wrong
+# version, a cell or two off, and crops whatever happens to be there. That is what "the Database
+# icons broke, the offsets in the atlas changed" looks like on screen.
+#
+# So the folder is chosen by SIZE: whichever candidate declares the atlas this machine actually
+# has (`sheetContentWidth`/`sheetContentHeight` against the PNG's own header - 1404x494 now,
+# 768x744 before). QR_DISASM wins when it is set, a lone extraction still works, and a machine with
+# no extraction at all falls back to the idle strips as it always did.
+EXTRACT_DIRS = tuple(d for d in (os.environ.get("QR_DISASM"),
+                                 os.path.join(os.path.expanduser("~"), "qr_disasm"),
+                                 os.path.join(os.path.expanduser("~"), "qr_disasm_beta")) if d)
+ATLAS_MODULE_NAME = "classes.modules.monsterAvatarAtlas.lu"
 # THE ORDER OF THE COROMON THAT HAVE NO DEX NUMBER, which is a second thing only the game knows:
 # see `unnumbered_order()`.
-DEX_SCREEN_MODULE = os.path.join(EXTRACT, "classes.interface.screens.monsterDatabaseScreen.lu")
+DEX_SCREEN_MODULE_NAME = "classes.interface.screens.monsterDatabaseScreen.lu"
 
 # The same order written out, for a machine with no extraction: `unnumbered_order()` falls back to
 # this when the module cannot be read, so the window shows the game's order rather than an
@@ -102,7 +118,10 @@ UNNUMBERED_FALLBACK = ("FUSEBOX", "TITAN_ELECTRIC", "TITAN_GHOST", "TITAN_SAND",
 # also ships `classes.debug.simulation.battles.coromon1`.)
 UNUSED_UIDS = ("NORMAL_SPINNER",)
 
-SPRITE_RE = __import__("re").compile(r"^[A-Z0-9][A-Za-z0-9_]*\.png$")
+# The sheet names its cells after their files, and the suffix travelled with the format: the
+# shipped version lists them as `ELECTRIC_BEETLE_1_A.png`, the beta as `ELECTRIC_BEETLE_1_A`. Both
+# match here, and the extension is dropped by the caller - the key is the sprite name either way.
+SPRITE_RE = __import__("re").compile(r"^[A-Z0-9][A-Za-z0-9_]*(?:\.png)?$")
 
 # A dex list wants the ordinary skin, and A is the one that is always there.
 VARIANT = "A"
@@ -352,7 +371,10 @@ def _dex_screen_order():
     """
     import luadis                    # only this needs the disassembly tools
 
-    root, _meta = luadis.load(DEX_SCREEN_MODULE)
+    folder = extract_dir()
+    if not folder:
+        return []                   # no extraction folder at all: the copy below is the same list
+    root, _meta = luadis.load(os.path.join(folder, DEX_SCREEN_MODULE_NAME))
     known = {m.get("UID") for m in json.load(open(MONSTERS, encoding="utf-8"))}
     best, run = [], []
     for _path, proto in luadis.walk(root):
@@ -435,6 +457,160 @@ def strip_frame(uid, variant=VARIANT):
 
 
 _SHEETS = {}      # tk root -> {"atlas": image, "containers": {type: image}}
+_EXTRACT = []     # the folder `extract_dir()` settled on, remembered for the run
+_MODULES = {}     # sheet definition path -> its parsed chunk, so it is parsed once
+_OPS = {}         # instruction name -> opcode, taken from luadis' own table
+
+
+def extract_dir():
+    """The extraction folder whose sheet definition describes the atlas this machine has, or None.
+
+    See the note at `EXTRACT_DIRS` for why this is a search rather than a constant. The comparison
+    is the definition's declared sheet size against the PNG's own header - exact for both formats,
+    and it needs to know nothing about either.
+    """
+    if _EXTRACT:
+        return _EXTRACT[0]
+    want = _png_size(ATLAS)
+    picked = None
+    for folder in EXTRACT_DIRS:
+        path = os.path.join(folder, ATLAS_MODULE_NAME)
+        if not os.path.exists(path):
+            continue
+        if picked is None:
+            picked = folder            # a lone extraction: use it even if it cannot be compared
+        try:
+            declared = _declared_sheet(path)
+        except (OSError, ValueError, IndexError, SystemExit):
+            continue
+        if want and declared and tuple(int(v) for v in declared) == tuple(want):
+            picked = folder
+            break
+    _EXTRACT.append(picked)
+    return picked
+
+
+def _declared_sheet(path):
+    """(width, height) the definition claims for the sheet - None when it does not say."""
+    got = _sheet_constants(path)
+    size = (got.get("sheetContentWidth"), got.get("sheetContentHeight"))
+    return size if all(isinstance(v, float) for v in size) else None
+
+
+def _module(path):
+    """The definition, parsed once per run: the size check and the cell map read the same file."""
+    if path not in _MODULES:
+        import luadis
+        _MODULES[path] = luadis.load(path)[0]
+    return _MODULES[path]
+
+
+def _sheet_constants(path):
+    """{key: value} for every assignment whose key AND value are constants - the whole definition.
+
+    The module is a table literal, so this is the definition itself rather than a sample of it:
+    `frameWidth`, `columns`, `sheetContentWidth` and the like all land here.
+    """
+    root = _module(path)
+    out = {}
+    for ins in root.code:
+        op, _a, key, value = _ins(ins, root)
+        if op == _op("SETTABLE") and isinstance(key, str) and isinstance(value, float):
+            out[key] = value
+    return out
+
+
+def _op(name):
+    """That instruction's opcode, read from luadis' own table rather than repeated here."""
+    if not _OPS:
+        import luadis
+        _OPS.update({n: i for i, n in enumerate(luadis.OPNAMES)})
+    return _OPS[name]
+
+
+def _ins(ins, proto):
+    """(opcode, A, the B constant, the C constant) of one instruction, constants resolved.
+
+    A tiny reader rather than a disassembler: a table literal is built out of `NEWTABLE` and
+    `SETTABLE` and nothing else. In `SETTABLE` the KEY is the B operand and the value is C.
+    """
+    def const(x):
+        return proto.k[x - 256] if x >= 256 and x - 256 < len(proto.k) else None
+
+    return (ins & 0x3F, (ins >> 6) & 0xFF,
+            const((ins >> 23) & 0x1FF), const((ins >> 14) & 0x1FF))
+
+
+def _sheet_names(root):
+    """The cell names in definition order - which is the order the sheet lays the cells out in.
+
+    The module also carries an explicit name -> index map, and it agrees: on the beta 1024 of its
+    1025 names sit at exactly their position in this list, and the one that does not is the name
+    that map skips. (On the shipped version the same list is the `filenames` array, in order.)
+    """
+    return [k[:-4] if k.endswith(".png") else k for k in root.k
+            if isinstance(k, str) and SPRITE_RE.match(k)]
+
+
+def _sheet_rows(path):
+    """(name, x, y, width, height) per cell, in sheet order - [] when the definition cannot say.
+
+    TWO FORMATS, ONE READING, and the newer one is the reason this function exists at all. The beta
+    states every cell outright: a `frames` array, one table per cell, each with x/y/width/height, on
+    a 26 px pitch with a 1 px margin (a 1404x494 sheet, 54 a row). The shipped version knows only a
+    grid - `frameWidth` apart with no gap, so a 768x744 sheet of 32 x 24 px cells - and there the
+    arithmetic IS the answer, done here and nowhere else.
+
+    A definition that disagrees with the names is no definition: the counts have to line up, or the
+    caller keeps the idle strips it would have used without an extraction at all.
+    """
+    root = _module(path)
+    names = _sheet_names(root)
+    rects = _explicit_rects(root)
+    if len(rects) != len(names):
+        rects = _grid_rects(_sheet_constants(path), len(names))
+    if not names or len(rects) != len(names):
+        return []
+    return [(name, int(r[0]), int(r[1]), int(r[2]), int(r[3]))
+            for name, r in zip(names, rects)]
+
+
+def _explicit_rects(root):
+    """The `frames` array's rectangles in order: [(x, y, width, height)], [] when there is no array.
+
+    Each entry is written as its own small table literal, so the sequence of four-field tables IS
+    the array - no need to follow the `SETLIST` that packs them, and no dependence on their line
+    numbers.
+    """
+    rects, building = [], None
+    for ins in root.code:
+        op = ins & 0x3F
+        if op == _op("NEWTABLE") and ((ins >> 14) & 0x1FF) == 4:
+            building = {}
+        elif op == _op("SETTABLE") and building is not None:
+            _op_, _a, key, value = _ins(ins, root)
+            if isinstance(key, str) and isinstance(value, float):
+                building[key] = value
+                if len(building) == 4:
+                    try:
+                        rects.append((building["x"], building["y"],
+                                      building["width"], building["height"]))
+                    except KeyError:
+                        return []
+                    building = None
+    return rects
+
+
+def _grid_rects(constants, count):
+    """The old grid format expressed as rectangles: cells `frameWidth` apart, `columns` a row."""
+    width, height = constants.get("frameWidth"), constants.get("frameHeight", constants.get(
+        "frameWidth"))
+    columns = constants.get("columns")
+    if not width or not height or not columns:
+        return []
+    width, height, columns = int(width), int(height), int(columns)
+    return [((i % columns) * width, (i // columns) * height, width, height)
+            for i in range(count)]
 
 
 def frame_offset(zoom=1):
@@ -472,10 +648,10 @@ def icon_layout(uid, category=VARIANT, zoom=1):
 
     None when the atlas order is unknown, which is the caller's cue to use the strip fallback.
     """
-    xy = avatar_cell(uid, category) or avatar_cell(uid, VARIANT)
-    if xy is None:
+    rect = avatar_rect(uid, category) or avatar_rect(uid, VARIANT)
+    if rect is None:
         return None
-    return {"cell": (xy[0], xy[1], CELL, CELL), "frame_offset": frame_offset(zoom)}
+    return {"cell": rect, "frame_offset": frame_offset(zoom)}
 
 
 def _sheets():
@@ -514,6 +690,10 @@ def build_icon(mon, zoom=1):
 
     Falls back to the idle strip when the atlas order is unavailable. `zoom` is a whole-number
     nearest-neighbour scale, the only kind Tk has - 2 gives 48 px icons for a list.
+
+    THE CELL IS COPIED AT THE SIZE THE SHEET SAYS and not clipped to the sheet's edge: Tk refuses a
+    copy that runs past the image, and the beta's three trimmed cells plus the last column sit one
+    texel from the right edge, so `CELL` would be exactly the request that fails.
     """
     import tkinter as tk
 
@@ -523,9 +703,10 @@ def build_icon(mon, zoom=1):
     if layout is not None and sheets is not None:
         try:
             sheet = sheets["atlas"]
-            x, y = layout["cell"][0], layout["cell"][1]
+            x, y, w, h = layout["cell"]
+            w, h = min(w, sheet.width() - x), min(h, sheet.height() - y)
             cell = tk.PhotoImage(width=CELL, height=CELL)
-            cell.tk.call(cell, "copy", sheet, "-from", x, y, x + CELL, y + CELL,
+            cell.tk.call(cell, "copy", sheet, "-from", x, y, x + w, y + h,
                          "-to", 0, 0, "-compositingrule", "set")
             kind = primary_type(mon)
             container = sheets["containers"].get(kind)
@@ -561,28 +742,29 @@ _ATLAS_INDEX = None
 
 
 def atlas_index():
-    """{sprite name: cell index in the avatar atlas}, read from the game's sheet definition.
+    """{sprite name: (x, y, width, height) in the avatar atlas}, from the game's sheet definition.
 
     NOTHING IN THE SHIPPED IMAGE DATA SAYS WHICH CELL IS WHICH COROMON. The atlas is pre-baked and
     the order was decided when it was built, so it is read from the module that builds it - which
     is why this needs the extracted game Lua. The order turns out to be alphabetical by sprite
-    name, which is worth knowing when reading an index: ELECTRIC_BEETLE_1_A is frame 0 and
+    name, which is worth knowing when reading a sheet: ELECTRIC_BEETLE_1_A is cell 1 and
     WATER_TURTLE_2_emerald the last one, so a dex number tells you nothing about the cell.
+
+    RECTANGLES, NOT INDICES, because the sheet is no longer one grid. Working out a cell as
+    `(index % columns) * size` is what broke when the beta re-cut the atlas; the definition says
+    where every cell is now, so it is believed instead of recomputed. `_grid_rects` still does
+    that arithmetic for the pre-beta module, which never stated a rectangle.
     """
     global _ATLAS_INDEX
     if _ATLAS_INDEX is not None:
         return _ATLAS_INDEX
-    import luadis                    # only this needs the disassembly tools
-
-    root, _meta = luadis.load(ATLAS_MODULE)
-    index, seen = {}, set()
-    for _path, proto in luadis.walk(root):
-        for k in (proto.k or []):
-            if isinstance(k, str) and SPRITE_RE.match(k) and k not in seen:
-                seen.add(k)
-                index[k[:-4]] = len(index)
-    _ATLAS_INDEX = index
-    return index
+    folder = extract_dir()
+    if not folder:
+        _ATLAS_INDEX = {}
+        return _ATLAS_INDEX
+    rows = _sheet_rows(os.path.join(folder, ATLAS_MODULE_NAME))
+    _ATLAS_INDEX = {name: (x, y, w, h) for name, x, y, w, h in rows}
+    return _ATLAS_INDEX
 
 
 _FAMILIES = None
@@ -609,20 +791,27 @@ def primary_type(mon):
     return kind if os.path.exists(os.path.join(CONTAINERS, "%s.png" % kind)) else "grey"
 
 
-def avatar_cell(uid, variant=VARIANT):
-    """(x, y) of that Coromon's avatar in the atlas, or None.
+def avatar_rect(uid, variant=VARIANT):
+    """That Coromon's cell as the sheet itself states it - (x, y, width, height), or None.
+
+    THE SIZE IS THE SHEET'S TO DECIDE, not this module's. Almost every cell is the full 24 texels,
+    but the beta's definition trims three of them by a texel (`GHOST_CAT_2_A` is 24x23 and two
+    more are 23x24), and a hard-coded 24 would read those one texel past their own edge.
 
     `variant` is the potential category (`A` standard, `B` potent, `C` perfect) or a skin
     (`gold`, `crimsonite`, ...) - they are all the same kind of entry in the sheet's own
     definition, which is why one parameter covers both.
     """
     try:
-        frame = atlas_index().get("%s_%s" % (uid, variant))
-    except (OSError, ValueError):
+        return atlas_index().get("%s_%s" % (uid, variant))
+    except (OSError, ValueError, IndexError, SystemExit):
         return None                  # no extraction: caller falls back to the sprite strips
-    if frame is None:
-        return None
-    return ((frame % 32) * CELL, (frame // 32) * CELL)
+
+
+def avatar_cell(uid, variant=VARIANT):
+    """(x, y) of that Coromon's avatar, or None - `avatar_rect` without the size."""
+    rect = avatar_rect(uid, variant)
+    return rect[:2] if rect else None
 
 
 _WHERE = None

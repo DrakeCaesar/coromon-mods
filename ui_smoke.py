@@ -98,8 +98,9 @@ def main():
     # THE COROMON TAB IS GONE - the Database tab supersedes it (see `coromontools/__init__.py`) - and
     # the Missing tab joined the set after the Database one, which it is the companion of.
     titles = [window.tabs.tabText(index).strip() for index in range(window.tabs.count())]
-    check("five tabs, in that order",
-          titles == ["Where to grind", "Database", "Missing", "Items", "Skills"], titles)
+    check("six tabs, in that order",
+          titles == ["Where to grind", "Database", "Missing", "Items", "Skills", "Potential"],
+          titles)
     check("window titled", bool(window.windowTitle()), window.windowTitle())
     check("min size kept", window.minimumWidth() == 1040 and window.minimumHeight() == 560)
 
@@ -142,7 +143,10 @@ def main():
         plan = grind.map._plan
         check("plan has ground runs", len(plan["ground"]) > 0, len(plan["ground"]))
         check("plan has a selected patch", any(p["selected"] for p in plan["patches"]))
-        check("plan draws no colourless patch", all("colour" in p for p in plan["patches"]))
+        # A PATCH PAINTS ITS OWN FILL AND EDGE (`mapview._plan_map`), so the check is those two keys
+        # and not a "colour" key that no longer exists.
+        check("plan draws every patch with a fill and an edge",
+              all("fill" in p and "edge" in p for p in plan["patches"]))
         check("legend lists the zones", len(grind.map.legend) > 0, len(grind.map.legend))
 
     # sorting: the numeric column opens high-first, then flips, then comes back
@@ -561,6 +565,20 @@ def main():
     # game does not have (`dex.UNUSED_UIDS`), so the count is now the whole list rather than one shy.
     check("every Coromon has an icon", with_icon == len(dex.monsters(with_crimsonite=True)),
           "%d of %d" % (with_icon, len(dex.monsters(with_crimsonite=True))))
+    # WHERE THE CELLS ARE IS THE SHEET'S OWN ANSWER, and this is the check that the two files agree.
+    # The beta re-cut the atlas from a 32 column grid of 24 px cells into 1025 explicit rectangles on
+    # a 26 px pitch (1404x494), and the definition describes whichever picture is shipped - so the
+    # definition found on this machine has to describe THIS PNG, and every rectangle it gives has to
+    # lie inside it. Reading the older definition against the newer picture is silent and looks like
+    # exactly one thing: sprites cropped into the Database grid.
+    if dex.extract_dir():
+        png = dex._png_size(dex.ATLAS)
+        declared = dex._declared_sheet(os.path.join(dex.extract_dir(), dex.ATLAS_MODULE_NAME))
+        check("the sheet definition describes the atlas that is shipped",
+              tuple(int(v) for v in declared) == tuple(png), "%s vs %s" % (declared, png))
+        outside = [(name, rect) for name, rect in dex.atlas_index().items()
+                   if rect[0] + rect[2] > png[0] or rect[1] + rect[3] > png[1]]
+        check("every atlas cell lies inside the sheet", not outside, outside[:3])
     # The dex number is drawn with the GAME's font, read out of resource.car at runtime - so this
     # is the check that the reading still works (see `coromontools/font.py`).
     check("the game's number font reads", font.available())
