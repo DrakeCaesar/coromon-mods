@@ -48,6 +48,10 @@ enabled = true
 show_chests = true
 # mark every item-carrying class (hidden items, chests, drill/gem spots, ground items, tree items)
 show_all_items = true
+# keep marking items that have already been collected. They are drawn dimmed, so they are still
+# told apart from the ones left on the map: with this on the markers are a map of where the items
+# ARE, not a list of what is left to pick up
+show_collected = true
 # draw the item name above each marker
 labels = true
 # label font: "small" is outline_8, "big" is outline_10_bold   (one of: big, small)

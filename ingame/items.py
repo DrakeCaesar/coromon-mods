@@ -83,6 +83,15 @@ SETTINGS = [
             "ground items, tree items)"
         ),
     ),
+    (
+        "show_collected",
+        True,
+        (
+            "keep marking items that have already been collected. They are drawn dimmed, so "
+            "they are still told apart from the ones left on the map: with this on the markers "
+            "are a map of where the items ARE, not a list of what is left to pick up"
+        ),
+    ),
     ("labels", True, "draw the item name above each marker"),
     (
         "font",
@@ -306,16 +315,25 @@ local function mergeByTile(items)
   return order
 end
 
--- What is still lying on the map, one entry per tile (collected items are dropped before
--- merging, so a picked-up item never shows up alongside a live one on the same tile).
+-- What is drawn, one entry per tile, and WHICH items are in it depends on `show_collected`:
+--
+--   off - only what is still lying there (the older behaviour), so a picked-up item never
+--         shows up alongside a live one on the same tile;
+--   ON  - everything the map defines, collected included, so the markers say where the items
+--         ARE rather than what is left. Merge still folds a tile's items into one marker.
+--
+-- The caller draws the collected ones DIMMED (see draw()), which is what makes keeping them
+-- useful: they read as a record rather than as something still to walk to.
 local function visibleByTile(items)
   local out = {}
   for _, it in ipairs(items) do
-    if not it.collected then out[#out + 1] = it end
+    if __SHOWCOLLECTED__ or not it.collected then out[#out + 1] = it end
   end
   return mergeByTile(out)
 end
-""".replace("__CLASSES__", classes)
+""".replace("__CLASSES__", classes).replace(
+    "__SHOWCOLLECTED__", "true" if cfg["show_collected"] else "false"
+)
 
 
 def section(cfg):
@@ -328,6 +346,11 @@ do
   local f = makeFeature('items', 1000)
   f.labels = __LABELS__
   f.count = 0
+
+  -- HOW MUCH ALPHA AN ALREADY-COLLECTED MARKER KEEPS (see show_collected). A live marker is 0.85
+  -- (hidden item) or 0.9 (chest), so this is the one step that separates "already taken" from
+  -- "still to walk to" - raised from 0.3, which was too faint to find the spot on the map.
+  local DIMMED = 0.6
 
   local function clear()
     drop(f.group)
@@ -348,8 +371,13 @@ do
       -- map-local pixel space: the tile's top-left corner is (tx*16, ty*16), which is
       -- exactly where the engine places a sprite's tile
       local x0, y0 = it.tx * 16, it.ty * 16
-      -- white for hidden items, amber for chests, so the two are distinguishable
-      local col = (it.kind == 'hiddenItem') and { 1, 1, 1, 0.85 } or { 1, 0.82, 0.25, 0.9 }
+      -- white for hidden items, amber for chests, so the two are distinguishable - and a
+      -- COLLECTED one keeps its hue but drops to DIMMED, which is what stops "already taken"
+      -- from looking like an item still to walk to.
+      local alpha
+      if it.kind == 'hiddenItem' then alpha = it.collected and DIMMED or 0.85
+      else alpha = it.collected and DIMMED or 0.9 end
+      local col = (it.kind == 'hiddenItem') and { 1, 1, 1, alpha } or { 1, 0.82, 0.25, alpha }
       rect(g, x0,      y0,      16, 1,  col)    -- top
       rect(g, x0,      y0 + 15, 16, 1,  col)    -- bottom
       rect(g, x0,      y0,      1,  16, col)    -- left
@@ -359,7 +387,10 @@ do
         -- just above the tile, which keeps the first item highest.
         local n = #it.lines
         for i = 1, n do
-          text(g, __FONT__, it.lines[i], x0 + 8, y0 - 2 - (n - i) * __LINE_H__)
+          local t = text(g, __FONT__, it.lines[i], x0 + 8, y0 - 2 - (n - i) * __LINE_H__)
+          -- the name dims with its marker, or a collected item's label would shout as loudly as
+          -- a live one's
+          if it.collected then pcall(function() t.alpha = DIMMED end) end
         end
       end
     end
