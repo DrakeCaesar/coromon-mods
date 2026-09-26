@@ -44,6 +44,16 @@ dividing by `stepsUntilSeenAllEncounters` gives its chance PER ROLL. The `NO_ENC
 what reconciles the two magnitudes: the weights sum to 4..95 while the field holds 10 to 4000, and
 `sum(weights) <= stepsUntilSeenAllEncounters` holds in all 101 zones - never a negative pad.
 
+THE TWO NUMBERS ARE BOTH TRUE AND THEY ANSWER DIFFERENT QUESTIONS, so the tables print both: the
+share says what you MEET when a fight happens, the chance per roll says how often that is worth
+walking for. The empty space in the bag is per ZONE, so the two can disagree by two orders of
+magnitude - measured over the shipped zones, the chance that one roll produces a fight at all runs
+from 0.72% (`DESERTROUTE_3_SPECIAL`: a 4000 entry bag holding 29 encounter entries) to 95%
+(`AMISHTOWN_WATER`), which is what `Zone.roll_chance` is and what `Zone.chance_per_roll(share)`
+scales a species' share by. The case that makes it concrete: `AMISHROUTE_B` and
+`WATERTOWN_TITANTEMPLE` BOTH print "Swurmy 100%", and one is met on 11% of steps against the
+other's 5%.
+
 WHAT A ROLL IS depends on the zone, because it is not always a step:
 
   * LAND. The grass TILES are the zone objects - `grassArea` objects in the map, each carrying a
@@ -95,6 +105,25 @@ def load():
     return zones, species
 
 
+def chance(value):
+    """A percentage (already 0..100) as text, with the digits THAT value is worth.
+
+    THE COLUMN'S RANGE IS THE PROBLEM, not the rounding: it holds 95% - a pond that rolls a fight on
+    almost every step - and 0.007%, a species in a cave whose bag rolls a fight twice in a thousand
+    steps. One format either invents a decimal place for the top of that range or rounds the bottom
+    away as "0.0%", which is the number the column exists to show. Two decimals from 0.1% up, three
+    below it, one above 10% where the second decimal is noise.
+
+    `value` is a PERCENT, unlike `potential.percent`, which reads a 0..1 probability - the two
+    modules carry the unit their own data does (a share here is already "18.2").
+    """
+    if value >= 10:
+        return "%.1f%%" % value
+    if value >= 0.1:
+        return "%.2f%%" % value
+    return "%.3f%%" % value
+
+
 class Zone:
     """One zone's encounters, with the shares worked out."""
 
@@ -132,6 +161,54 @@ class Zone:
     @property
     def water(self):
         return self.name.endswith("_WATER")
+
+    # ------------------------------------------------------------------ the bag
+    # TWO PERCENTAGES, TWO QUESTIONS, and the tool shows both because they answer different things.
+    # A SPECIES' SHARE OF THE FIGHTS ("18.2%") says what you meet WHEN a fight happens; THE SAME
+    # SPECIES' CHANCE PER ROLL says how often that is worth walking for - and the two can disagree by
+    # a factor of a hundred, because the bag's empty space is per zone and not per species. Measured
+    # over the shipped zones: the chance that one roll produces a fight at all runs from 0.72%
+    # (DESERTROUTE_3_SPECIAL, a 4000 entry bag holding 29 encounter entries) to 95% (AMISHTOWN_WATER),
+    # and two zones both print "Swurmy 100%" while rolling 11% and 5% per step (AMISHROUTE_B against
+    # WATERTOWN_TITANTEMPLE). The user: "the chance to encounter one per step is also affected by how
+    # many empty spaces are in the bag where no coromon is spawned ... it's something that should have
+    # a separate column so similar areas can be compared based on it".
+    @property
+    def bag(self):
+        """How many ENTRIES the zone's shuffle bag holds - the game's `stepsUntilSeenAllEncounters`.
+
+        One entry is consumed per roll, and the bag refills only when it is empty (see the module
+        docstring), so this is also the number of rolls in one full cycle.
+        """
+        return self.raw.get("stepsUntilSeenAllEncounters", 0) or 0
+
+    @property
+    def pad(self):
+        """How many of those entries are the NO_ENCOUNTER filler - the empty space in the bag.
+
+        `stepsUntilSeenAllEncounters` minus the encounters' weights, which is what the game itself
+        adds as NO_ENCOUNTER copies. Measured over the shipped zones it is never negative, and it is
+        the whole reason a zone with a 4000 entry bag rolls a fight 0.72% of the time.
+        """
+        return max(0, self.bag - self.weight_total)
+
+    @property
+    def roll_chance(self):
+        """The chance in % that ONE roll of this zone's bag produces a fight at all.
+
+        A roll is one bag entry drawn: one grass tile ENTERED on land, one cast on water (see the
+        module docstring for why those are the two kinds of roll). `100 - this` is the chance of
+        walking through the zone and meeting nothing.
+        """
+        return 100.0 * self.weight_total / self.bag if self.bag else 0.0
+
+    def chance_per_roll(self, share):
+        """A species' (or a line's, or an encounter's) chance per roll in %, from its share of fights.
+
+        `share` is in percent, as `slots`, `encounters` and the tables carry it, so this is
+        `share x roll_chance / 100` - the two magnitudes the tool shows side by side.
+        """
+        return share * self.weight_total / self.bag if self.bag else 0.0
 
     def rollable_encounters(self):
         """The encounters the game can actually roll a level for, weighted by their own share.
@@ -182,9 +259,11 @@ class Zone:
         both the ordinary and the crimsonite form of one species can appear here, each with the
         share it really has.
         """
-        out = [dict(rec, name=self.species.get(uid, uid), crimsonite=False)
+        out = [dict(rec, name=self.species.get(uid, uid), crimsonite=False,
+                    per_roll=self.chance_per_roll(rec["share"]))
                for uid, rec in self.monsters.items()]
-        out += [dict(rec, name="Crimsonite " + self.species.get(uid, uid), crimsonite=True)
+        out += [dict(rec, name="Crimsonite " + self.species.get(uid, uid), crimsonite=True,
+                     per_roll=self.chance_per_roll(rec["share"]))
                 for uid, rec in self.crimsonite.items()]
         return out
 
@@ -231,6 +310,7 @@ class Zone:
                                     for rec in members),
                 "members": members,
                 "share": 100.0 * enc.get("stepsWithEncounter", 0) / total,
+                "per_roll": self.chance_per_roll(100.0 * enc.get("stepsWithEncounter", 0) / total),
                 "min": min(rec["min"] for rec in members),
                 "max": max(rec["max"] for rec in members),
                 "battles": len(party),

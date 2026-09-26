@@ -42,7 +42,7 @@ from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
 from coromontools.grind import encounter_rows                  # noqa: E402
 from coromontools import missing_tab                          # noqa: E402
-from coromontools.table import ICON, sort_rows                # noqa: E402
+from coromontools.table import ICON, PAYLOAD, sort_rows                # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
 from coromontools.widgets import mono_height                # noqa: E402
 
@@ -203,6 +203,42 @@ def main():
     check("sorting back on xp restores the same first row",
           key == "xp" and desc is True and grind.table.model_.rows[0]["zone"] == top_before,
           "%s vs %s" % (grind.table.model_.rows[0]["zone"], top_before))
+
+    # A SHARE IS NOT A CHANCE PER STEP, and the PER STEP column is the other half: the zone's
+    # shuffle bag holds `stepsUntilSeenAllEncounters` entries of which only the encounters' weights
+    # ever produce a fight, so `xp / fight` x this is XP per step (see `encounters.Zone.roll_chance`).
+    # Three things are checked, because the number is only useful if all three hold: it is the zone's
+    # own rate, the bag really is bigger than the weights in every zone, and the two orders (per fight
+    # against per step) are NOT the same list - which is the reason the column exists at all.
+    zones_by_name = {zone.name: zone for zone in all_zones}
+    per_step = {row["zone"]: row["perstep"] for row in grind.table.model_.rows}
+    check("every zone's row carries its own chance per step",
+          bool(per_step) and all(
+              text == encounters.chance(zones_by_name[name].roll_chance)
+              for name, text in per_step.items()),
+          list(per_step.items())[:3])
+    check("... which is its weights over the bag's size, and the bag is never over-filled",
+          all(0 < zone.roll_chance <= 100.0 and zone.pad >= 0
+              and zone.bag == zone.weight_total + zone.pad for zone in all_zones),
+          "rates %s" % sorted({round(z.roll_chance, 1) for z in all_zones}))
+    by_fight = [row["zone"] for row in sorted(grind.table.model_.rows,
+                                              key=lambda r: -float(r["xp"]))]
+    grind.table._header_clicked(col("perstep"))
+    by_step = [row["zone"] for row in grind.table.model_.rows]
+    check("... and ranking on it is not the same order as ranking on xp per fight",
+          by_step != by_fight, "top per step %s, top per fight %s"
+          % (by_step[:2], by_fight[:2]))
+    grind.table._header_clicked(col("xp"))
+    # THE CASE THAT MAKES THE COLUMN NECESSARY, in the data rather than in an argument: two zones
+    # both print "Swurmy 100%" - it is all either of them can roll - and one is met twice as often per
+    # step as the other, because their bags hold a different amount of empty space.
+    swurmy = {zone.name: zone for zone in all_zones}
+    br_a, temple = swurmy["AMISHROUTE_B"], swurmy["WATERTOWN_TITANTEMPLE"]
+    check("... and two zones with the same 100% share are not met equally often",
+          br_a.chance_per_roll(100.0) > temple.chance_per_roll(100.0) > 0,
+          "AMISHROUTE_B %s vs WATERTOWN_TITANTEMPLE %s per step"
+          % (encounters.chance(br_a.chance_per_roll(100.0)),
+             encounters.chance(temple.chance_per_roll(100.0))))
 
     # filters: an invariant rather than a count, because the filter may legitimately remove
     # nothing at a low squad level and the check still has to mean something
@@ -828,6 +864,16 @@ def main():
     shares = [float(row["share"].rstrip("%")) for row in database.locations.model_.rows]
     check("the locations open sorted by share, biggest first",
           shares == sorted(shares, reverse=True), shares)
+    # ... AND THE PER STEP COLUMN BESIDE IT IS THE SAME ODDS READ AGAINST THAT ZONE'S OWN BAG: a
+    # share says what you meet when a fight happens, per step says how often that is. Each row is
+    # `share x its own zone's roll rate`, which is the whole reason the column exists.
+    places = database.locations.model_.rows
+    check("... and every row's per step column is its own zone's rate times its share",
+          bool(places) and all(
+              row["perstep"] == encounters.chance(
+                  row[PAYLOAD].chance_per_roll(float(row["share"].rstrip("%"))))
+              for row in places),
+          [(row["zone"], row["share"], row["perstep"]) for row in places][:3])
     # ... AND IT IS THE DEFAULT FOR EVERY COROMON, which is the check that would actually catch the
     # regression: it walks the first rows of the grid and insists every list comes up non-increasing.
     offenders = []

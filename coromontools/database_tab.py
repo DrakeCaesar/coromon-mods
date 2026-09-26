@@ -81,6 +81,7 @@ THE TOP ROW IS ALWAYS ONE LINE. Nothing on it wraps: what does not fit is ELIDED
 import time
 
 import dex
+import encounters
 from PySide6.QtCore import QEvent, QSize, Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSplitter, QVBoxLayout,
@@ -147,6 +148,12 @@ LOCATION_COLUMNS = (
     # BIGGEST SHARE FIRST on the first click, which is the only reason this column is ever clicked -
     # the same declaration the ranking's "most common" column carries (see `table.Column`).
     Column("share", "share", 65, "e", True),
+    # ... AND THE SAME CHANCE READ THE OTHER WAY - what one STEP into that area rolls THIS Coromon,
+    # which is the number "where is it most likely" is really asking about. A share alone cannot
+    # answer it: the bag's empty space is per zone, so two areas can both say 18.2% while one rolls a
+    # fight every eleventh step and the other every hundred and thirty-eighth. See
+    # `encounters.Zone.chance_per_roll` and the note in `select` below.
+    Column("perstep", "per step", 70, "e", True),
 )
 
 # HOW WIDE THE SEARCH FIELD IS ALLOWED TO GET. It used to stretch across the whole row, which was
@@ -743,12 +750,18 @@ class DatabaseTab(QWidget):
                               % mon.name)
             self.locations.set_rows([])
             return
+        # TWO WAYS OF READING THE SAME ODDS, and the list shows both: the SHARE says what you meet
+        # when a fight happens, and PER STEP says how often that fight is worth walking for. They are
+        # `share` and `share x the zone's own roll rate`, so a species that is 18% of the fights in a
+        # 4000-entry bag lands 0.13% of steps - see `encounters.Zone.chance_per_roll`. On WATER the
+        # roll is one CAST rather than one tile entered (the game fishes, it does not step).
         self.head.setText("%s   %d location(s)" % (mon.name, len(found)))
         self.locations.set_rows([{
             "area": mapnames.area(zone.map_file),
             "zone": zone.name,
             "levels": "L%s-%s" % (low, high),
             "share": "%.1f%%" % share,
+            "perstep": encounters.chance(zone.chance_per_roll(share)),
             PAYLOAD: zone,
         } for zone, low, high, share, _battles in found])
         # NO FIT CALL HERE: filling the list selects its first row, which runs `show_location` - and

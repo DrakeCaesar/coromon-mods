@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QListW
 import threading
 
 import dex
+import encounters
 
 from . import mapnames, mapview, maptiles
 from .config import (LEVEL_DEFAULT, MIN_SHARE_DEFAULT, ONLY_XP_DEFAULT, ON_TOP_DEFAULT,
@@ -74,9 +75,12 @@ NOTES = ("Shares are the game's own encounter weights, normalised. XP PER FIGHT 
          "4x (a difficulty setting), a squad splitting the reward is not in a per-fight figure, and "
          "the mean of the base stats is the one step that calls a function the shipped archive does "
          "not contain (`getMutatedBaseStats`), so read the numbers as exact to within a constant. "
-         "The reward follows the monster's level, so a zone's rank does not depend on yours, and how "
-         "often the zone rolls a fight at all (`stepsWithEncounter`, 1-4 per encounter) is NOT "
-         "weighed in - this column is per fight, not per step. An encounter the game cannot roll at "
+         "The reward follows the monster's level, so a zone's rank does not depend on yours. HOW "
+         "OFTEN THERE IS A FIGHT AT ALL is the PER STEP column, which is a different question: a zone "
+         "rolls its shuffle bag once per grass tile entered (once per CAST on water) and most of the "
+         "bag is empty, so the chance of a fight runs from 0.72% to 95% across the shipped zones - "
+         "XP PER FIGHT x that is XP per step, and it is the one number that can turn the ranking "
+         "over. An encounter the game cannot roll at "
          "all (a LEVEL RANGE THAT IS EMPTY: Pyramid F6 ships a 2725-27 typo) is left out and says "
          "so, rather than adding a level-2725 reward to the zone. The three GEM COLUMNS are the same "
          "fight with each XP gem on the holder: the Smart Gem's is for the Coromon that FIGHTS (1.1x), "
@@ -109,6 +113,14 @@ COLUMNS = (
 ) + tuple(
     Column(key, heading, 70, "e", desc_first=True) for key, heading, _uid in GEMS
 ) + (
+    # HOW OFTEN THERE IS A FIGHT AT ALL, which is the other half of what a zone is worth and the
+    # first of the descriptive columns on purpose: it must not push a gem off the 428 px the table has
+    # at the size this window opens at, and the only way to add a column without doing that is to add
+    # it after the four the tab is ranked by. `xp / fight` x this = XP per step, and the two disagree
+    # wildly between zones - the rates measured over the shipped ones run from 0.72% to 95%, so a zone
+    # with twice the XP per fight can be a third of the grind. See `encounters.Zone.roll_chance`; on
+    # WATER the roll is one CAST rather than one grass tile entered.
+    Column("perstep", "per step", 70, "e", desc_first=True),
     Column("area", "Area", 190, "w"),
     Column("explvl", "exp level", 80, "e", desc_first=True),
     Column("best", "most common", 240, "w", desc_first=True),
@@ -573,6 +585,10 @@ class GrindTab(QWidget):
                 "zone": zone.name,
                 "explvl": "%.2f" % zone.average_level,
                 "xp": "%.0f" % fight,
+                # HOW OFTEN THE WALK PAYS: one roll of the zone's shuffle bag produces a fight this
+                # often (see `encounters.Zone.roll_chance`). `xp / fight` x this is XP per step, so a
+                # zone that is not worth walking for its fights can still be worth walking through.
+                "perstep": encounters.chance(zone.roll_chance),
                 "best": ("%s L%s-%s  %.0f%%" % (best["name"], best["min"], best["max"],
                                                 best["share"]) if best else ""),
                 "flags": " ".join(self._flags(zone, species)),
