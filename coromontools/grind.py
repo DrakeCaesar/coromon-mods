@@ -34,7 +34,7 @@ from .config import (LEVEL_DEFAULT, MIN_SHARE_DEFAULT, ONLY_XP_DEFAULT, ON_TOP_D
                      SCALES_SPAN, STATES_ONLY_DEFAULT, XP_MARGIN)
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
-from .widgets import FittedPane, mono_text, note
+from .widgets import DetailPane, FittedPane, note
 
 import items
 
@@ -87,8 +87,10 @@ NOTES = ("Shares are the game's own encounter weights, normalised. XP PER FIGHT 
 MAP_NOTES = ("Zones are read from the map: a marker's own tile plus the connected tiles of its "
              "tileset, which is exact for grass (one tile, one map cell). A marker that names no "
              "layer - water, caves - has its CELLS as the shape instead, and those are merged into "
-             "blocks and edged. Every block is named; the selected zone is the one with the white "
-             "outline.")
+             "blocks and edged; where such a zone is marked by a cell or two that do not touch, the "
+             "cells are places rather than a shape, so each is read as the terrain it stands on "
+             "(Hayville's pond, Radiant Park's river). Every block is named; the selected zone is "
+             "the one with the white outline.")
 
 # THE NUMBERS COME FIRST, AND THAT IS A DELIBERATE ORDER. This window is used BESIDE a fullscreen
 # game, so it is small: measured on the shipped window state it opens at 1040x560, which leaves this
@@ -113,6 +115,25 @@ COLUMNS = (
     Column("flags", "flags", 150, "w"),
 )
 
+# THE SPAWNS PANE'S OWN COLUMNS, shared by this tab and the Database tab through `encounter_rows`:
+# the encounters of one zone, most likely first. The headings are the ones the ASCII pane printed bare
+# numbers under, so the numbers still mean what they meant - only now they can be sorted, and a long
+# Coromon name no longer moves every column beside it.
+# The ceilings leave it 555 px wide, which is what the map column of this window can spare at the size
+# it is used at (measured 1040x560 beside the game: the areas list takes 300 of it).
+SPAWN_COLUMNS = (
+    Column("name", "encounter", 170, "w"),
+    Column("level", "level", 60, "e"),
+    Column("share", "share", 55, "e", desc_first=True),
+    Column("fight", "fight", 60, "e", desc_first=True),
+) + tuple(
+    Column(key, heading, 70, "e", desc_first=True) for key, heading, _uid in GEMS
+)
+
+# WHY A ROW HAS NO FIGURES AT ALL, said once under the table rather than repeated on the row.
+NO_LEVEL = ("a row with no figure rolls no level in the game's own data, so there is nothing to "
+            "reward")
+
 
 def gem_factors():
     """`{column key: multiplier}` for the XP gems, read from the game - None when it cannot be read.
@@ -134,67 +155,61 @@ def zone_rows(zone, min_share=0.0):
             if row["share"] >= min_share]
 
 
-def encounter_lines(zone, min_share=0.0, xp_of=None):
-    """One aligned line per ENCOUNTER of `zone`, most likely first - the body of a spawns pane.
+def encounter_rows(zone, min_share=0.0, xp_of=None):
+    """One row per ENCOUNTER of `zone`, most likely first - the body of a spawns pane, as table rows.
 
     ONE FORMATTER FOR TWO TABS: this tab draws it under its map and the Database tab under its location
-    list, answering the same question ("what is in this grass?") in the same columns - which is why the
-    alignment is padded with spaces and neither pane wraps.
+    list, answering the same question ("what is in this grass?") in the same columns - which is why
+    this returns rows and `SPAWN_COLUMNS` says what the columns are, rather than the two tabs each
+    padding their own text with spaces (the user: "when we print an ascii table like this and similar
+    ... it needs to be an actual table").
 
     THE ROWS ARE ENCOUNTERS, NOT SPECIES, and that is the change the user asked for: a percentage
-    belongs to the fight the game rolls, so a triple battle is ONE line naming its party ("Armadon + 2
+    belongs to the fight the game rolls, so a triple battle is ONE row naming its party ("Armadon + 2
     Armado") at the odds of meeting it. Listing the members separately reported every one of them at
     the whole group's share and counted a repeated member twice, which is how a zone's shares came out
     summing past 100%. See `encounters.Zone.encounters`.
 
-    The heading belongs to the caller: this tab names the zone and marks a water zone, the Database tab
-    does not, because the selected row directly above the pane already names it.
-
     `xp_of` adds WHAT A FIGHT IS WORTH, and the gems with it: the ranking's whole claim is XP per
     fight, so a zone's own pane has to show where that number comes from - and the gems are the same
-    fight with one on the holder, which is the other half of "where should I grind". Four aligned
-    number columns follow the share, named by a HEADER ROW of their own (the numbers are bare so they
-    stay narrow, and a column nobody can name is unreadable):
-
-             name              level    share   fight   smart   sloth    lazy
-        Chonktoad              L55-60   20.0%    4406    4847    2203     881
+    fight with one on the holder, which is the other half of "where should I grind".
 
     `fight` is the whole fight (every body in the party), and `smart` / `sloth` / `lazy` are that
     figure with each XP gem on the holder - the Smart Gem for a Coromon that FIGHTS, the other two for
     one that does not (see `GEMS`). A group is worth every body, exactly as the column that sums them
     does. An entry whose LEVEL RANGE IS EMPTY (the game's own typo - see `Zone.rollable_encounters`)
-    gets no figure at all, because there is no level to reward: it says so instead, and the zone's
-    total leaves it out.
+    gets no figure at all, because there is no level to reward: its numbers are "-" and its `rollable`
+    flag is False, which is the pane's cue to say why.
     """
-    rows = [row for row in zone.encounters() if row["share"] >= min_share]
-    width = max([14] + [len(row["name"]) + 1 for row in rows])
-    out = []
-    if xp_of is not None:
-        # THE COLUMNS ARE NAMED ONCE, which is what lets the rows carry bare numbers: six number
-        # columns with " xp" after each would be half again as wide, and this pane is narrow (it sits
-        # in the map column of a window that is kept beside the game).
-        out.append("  %-*s %-7s %6s %6s %6s %6s %6s"
-                   % (width, "", "level", "share", "fight", "smart", "sloth", "lazy"))
     gems = gem_factors() if xp_of is not None else {}
-    for row in rows:
-        line = "  %-*s L%-3s-%-3s %5.1f%%" % (width, row["name"], row["min"], row["max"],
-                                              row["share"])
+    rows = []
+    for row in zone.encounters():
+        if row["share"] < min_share:
+            continue
+        entry = {
+            "name": row["name"],
+            "level": "L%s-%s" % (row["min"], row["max"]),
+            "share": "%.1f%%" % row["share"],
+            "rollable": row["rollable"],
+            "fight": "",
+        }
         if xp_of is not None:
             if row["rollable"]:
                 fight = zone.encounter_xp(row, xp_of)
-                line += " %6d" % fight
+                entry["fight"] = "%d" % fight
                 # ... AND THE SAME FIGHT WITH EACH GEM ON THE HOLDER. A gem whose multiplier could not
                 # be read prints "-" rather than a figure computed from a guess, exactly as the table's
                 # column goes blank - and the two must agree, they are one reading of one item class.
                 for key, _heading, _uid in GEMS:
                     factor = gems.get(key)
-                    line += (" %6d" % (fight * factor)) if factor else " %6s" % "-"
+                    entry[key] = "%d" % (fight * factor) if factor else "-"
             else:
-                # NO LEVEL, NO REWARD: four blanks and the reason, rather than a figure from a level
-                # the game cannot roll (see `Zone.rollable_encounters`).
-                line += " %6s %6s %6s %6s  (empty level range)" % ("-", "-", "-", "-")
-        out.append(line)
-    return out
+                # NO LEVEL, NO REWARD: every figure is "-", and the pane says why once.
+                entry["fight"] = "-"
+                for key, _heading, _uid in GEMS:
+                    entry[key] = "-"
+        rows.append(entry)
+    return rows
 
 
 def rank(zones, level, min_share=0.0, only_xp=True):
@@ -435,7 +450,10 @@ class GrindTab(QWidget):
 
         box.addWidget(note(MAP_NOTES, wrap=420))
 
-        self.species = mono_text(wrap=False)
+        # THE SPAWNS PANE: a headline, the encounters as a table, and a line of small print for the one
+        # thing a row cannot say (see `_fill_species`).
+        self.species = DetailPane(SPAWN_COLUMNS, tooltip="what this zone rolls, most common "
+                                                        "first - click a heading to sort")
         box.addWidget(self.species, 2)
         return panel
 
@@ -626,7 +644,9 @@ class GrindTab(QWidget):
                     "the ticked areas is L%d, in %s (%s). Untick \"still gives XP\" to rank "
                     "them anyway, or reach further areas."
                     % (self.level.value(), top, best.name, mapnames.area(best.map_file)))
-        self.species.setPlainText(text)
+        # THE WHOLE PANE IS THE SENTENCE in these cases: no headline, no table, just the note - which
+        # is what `DetailPane.fill` does with no rows.
+        self.species.fill("", [], text)
 
     # ------------------------------------------------------------------ selection
     def show_zone(self, zone):
@@ -636,27 +656,29 @@ class GrindTab(QWidget):
             self.map.set_zone(None)
             self._show_map_head()
             return
-        self.species.setPlainText(self._species_text(zone))
+        self._fill_species(zone)
         self.map.set_zone(zone)
         self._show_map_head()
 
-    def _species_text(self, zone):
-        """The selected zone: its name, WHAT A FIGHT IS WORTH THERE, and then every fight it rolls.
+    def _fill_species(self, zone):
+        """The selected zone: its name, WHAT A FIGHT IS WORTH THERE, and every fight it rolls.
 
         The headline says the number is an AVERAGE over the fights below and names the best of them,
         because on its own it looks wrong: WATERROUTE_4 reads 4840 while three of its five fights are
         worth more than that (6101, 4775, 4485) - the user: "weird it still shows the data as
         WATERROUTE_4 ... 4840 xp / fight ... 6101 xp". It is the average, weighted by the odds of
         meeting each fight, and a zone's best fight is worth knowing on its own.
+
+        THE ROWS ARE THE TABLE'S (`encounter_rows`), and the one thing they cannot say is why a row has
+        no figures at all - an encounter the game rolls no level for - so that is the note under them.
         """
         expected, best, count = zone.xp_spread(dex.xp_reward)
-        lines = ["%s  (%s)%s" % (zone.name, mapnames.area(zone.map_file),
-                                 "   water" if zone.water else ""),
-                 "%.0f xp / fight   (average of %d encounter%s, best %.0f)"
-                 % (expected, count, "" if count == 1 else "s", best),
-                 ""]
-        lines.extend(encounter_lines(zone, self.min_share_value(), xp_of=dex.xp_reward))
-        return "\n".join(lines)
+        headline = "%s  (%s)%s\n%.0f xp / fight   (average of %d encounter%s, best %.0f)" % (
+            zone.name, mapnames.area(zone.map_file), "   water" if zone.water else "",
+            expected, count, "" if count == 1 else "s", best)
+        rows = encounter_rows(zone, self.min_share_value(), xp_of=dex.xp_reward)
+        note = NO_LEVEL if any(not row["rollable"] for row in rows) else ""
+        self.species.fill(headline, rows, note)
 
     def _show_map_head(self):
         self.map_head.setText(self.map.headline)

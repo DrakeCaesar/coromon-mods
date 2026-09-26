@@ -149,9 +149,14 @@ def map_parts(path):
 
 
 def markers(path):
-    """{zone name: [(tileX, tileY, tileLayer or None)]} from the grassArea objects."""
+    """{zone name: [(tileX, tileY, tileLayer or None)]} from the grassArea objects.
+
+    A ZONE WHOSE BARE MARKERS DO NOT TOUCH EACH OTHER IS NOT A SHAPE: its markers are PLACES, and each
+    is resolved to the layer it stands on - see `layer_under`, and why only then.
+    """
     m, layers, _ = map_parts(path)
     tw = m["tilewidth"]
+    order = [l["name"] for l in walk_layers(m.get("layers", [])) if l.get("type") == "tilelayer"]
     out = {}
     for l in walk_layers(m.get("layers", [])):
         if l.get("type") != "objectgroup":
@@ -162,7 +167,47 @@ def markers(path):
                 continue
             out.setdefault(props["zoneUID"], []).append(
                 (int(o.get("x", 0)) // tw, int(o.get("y", 0)) // tw, props.get("tileLayer")))
+    for zone, seeds in out.items():
+        alone = [(x, y) for (x, y, name) in seeds if not name]
+        if not alone or touching(alone):
+            continue
+        out[zone] = [(x, y, name or layer_under(layers, m, order, x, y))
+                     for (x, y, name) in seeds]
     return m, out
+
+
+def touching(cells):
+    """Whether any two of those cells touch, corners included - i.e. whether they are a SHAPE."""
+    seen = set(cells)
+    return any((x + dx, y + dy) in seen for (x, y) in seen
+               for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx, dy) != (0, 0))
+
+
+def layer_under(layers, m, order, tx, ty):
+    """The layer a marker with no `tileLayer` stands on: the first of the map's order with a tile.
+
+    A MARKER THAT NAMES NO LAYER USED TO BE ONE CELL AND NOTHING ELSE, which is right when the zone's
+    markers spell its shape out - and 51 of the 54 zones that have such markers do exactly that
+    (measured: `CAVE_F1_A` is 701 bare markers, `WATERTOWN_WATER` 980, `SWAMP_1_WATER` 538, and in
+    every one of them all but a handful touch another marker of the same zone, so together they ARE
+    the shape). The three exceptions have ONE cell, THREE cells and ONE cell, none of them touching:
+    `amishTown`'s pond, `luxSolisRoute`'s river and the titan temple's floor. Those drew as a square
+    or three while their water runs the length of the map - the user: "the hayville and radiant park
+    water areas are still only shown as individual squares".
+
+    So ONE IS A PLACE AND MANY ARE A SHAPE: when a zone's bare markers do not touch each other at all
+    (`markers` only calls this then), each is resolved to what it is standing on - the first layer of
+    the map's own draw order that holds a tile at that cell, which for a pond or a river marker is the
+    water itself. Measured: 120 cells for the pond, 373 for the river, and the temple's 777-cell floor
+    - each matching the art exactly, against a 0-cell shape before.
+    """
+    if not 0 <= tx < m["width"] or not 0 <= ty < m["height"]:
+        return None
+    for name in order:
+        layer = layers.get(name)
+        if layer is not None and layer["data"][ty * m["width"] + tx]:
+            return name
+    return None
 
 
 def patch_tiles(layers, m, seed, tileset):

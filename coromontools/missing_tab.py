@@ -15,7 +15,8 @@ Two deliberate differences from the Database tab:
   * the ranking's numbers are counts of GROUPS, not of Coromon, because one group is one thing left to
     do: catching a stage-1 Potent finishes the line's potent group (`missing.Group`).
   * this tab has no side columns, so the table and the pane below it get the whole window width - which
-    is why the pane here can print a label, a kind, a level span and a share on one line at all.
+    is why the pane here can list a Coromon, the kinds it needs, its line, the levels and the share at
+    once.
 """
 
 import time
@@ -30,7 +31,7 @@ from . import mapnames
 from . import mapview
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
-from .widgets import FittedPane, mono_text, note
+from .widgets import DetailPane, FittedPane, note
 
 try:
     import savefile
@@ -57,6 +58,27 @@ COLUMNS = (
     Column("levels", "levels", 90, "e"),
 )
 
+# ... AND WHICH COROMON, one row per still-missing Coromon in the picked zone. THESE WERE COLUMNS OF
+# SPACES in a monospace pane until the user asked for the real thing - "when we print an ascii table
+# like this ... it needs to be an actual table" - which is what these are now: the same columns in the
+# same order, sortable, aligned by Qt and copyable per cell.
+#
+# THE CEILINGS ARE MEASURED, in the table's own font (Segoe UI 9 here), against the worst value each
+# column can hold rather than against the sample zone on screen: `needs` has to fit all four kinds -
+# "standard · potent · perfect · crimsonite", 201 px - and `member` has to fit the longest name a
+# crimsonite form brings with it, "Crimsonite Magmilus", 114 px. They add up to 600 px, which stays
+# inside the ranking's own 765 px, so the pane below it never scrolls sideways.
+DETAIL_COLUMNS = (
+    Column("member", "Coromon", 130, "w"),
+    Column("needs", "needs", 210, "w"),
+    Column("line", "line", 70, "w"),
+    Column("how", "how", 75, "w"),
+    # "L42-53" is text (the sort would rank it as one) and "share" is a percentage, which
+    # `table.rank_number` knows how to read - so the share column can be sorted biggest first.
+    Column("levels", "levels", 60, "e"),
+    Column("share", "share", 55, "e", desc_first=True),
+)
+
 # SHORT KIND LABELS, for the rank column and the pane: the full words are in `missing.KIND_NAMES`.
 SHORT = {"A": "standard", "B": "potent", "C": "perfect", "crimsonite": "crimsonite"}
 
@@ -69,11 +91,6 @@ RULE = ("A LINE IS COUNTED HERE WHENEVER ANY OF ITS MEMBERS IS MISSING, and it c
         "EVERY stage of the line has it: catching a base form and evolving it does not fill the evolved "
         "form's own entry. A line's crimsonite group is its skin unlock. An ordinary spawn can turn up "
         "any of the three potential categories; a crimsonite spawn fills the crimsonite group only.")
-
-
-def _row(text, width):
-    """One left-justified field of the pane's little table, plus its two-space gutter."""
-    return "%-*s  " % (width, text)
 
 
 class MissingTab(QWidget):
@@ -128,10 +145,7 @@ class MissingTab(QWidget):
         box.setContentsMargins(0, 0, 0, 0)
         box.addWidget(self.table, 3)
         box.addWidget(note(RULE, wrap=900))
-        # NOTHING WRAPS IN THE PANE: its columns are aligned with spaces (see `widgets.mono_text`).
-        self.detail = mono_text(wrap=False)
-        self.detail.setToolTip("the lines still short in the picked zone, and how likely each is")
-        box.addWidget(self.detail, 2)
+        box.addWidget(self._build_detail(), 2)
 
         self.split = QSplitter(Qt.Orientation.Horizontal)
         self.split.addWidget(left)
@@ -165,6 +179,18 @@ class MissingTab(QWidget):
         box.addWidget(self.map, 1)
         self.map.set_variant_bar(self.variant_bar)
         return panel
+
+    def _build_detail(self):
+        """The picked zone's still-missing Coromon, as a TABLE - see `DETAIL_COLUMNS`.
+
+        The pane is `widgets.DetailPane`, which is the same three parts the two spawns panes use: a
+        headline naming the zone, a note for the case with nothing to list, and the rows themselves.
+        """
+        self.detail = DetailPane(DETAIL_COLUMNS, tooltip="one row per Coromon still missing in this "
+                                                         "zone - click a heading to sort")
+        self.detail_head = self.detail.head
+        self.detail_note = self.detail.note
+        return self.detail
 
     # ------------------------------------------------------------------ the save
     def showEvent(self, event):
@@ -252,49 +278,51 @@ class MissingTab(QWidget):
         line ("7 patch(es), 238 tiles at ...") is shown only when it could NOT draw, which is what
         `set_zone` returning False means. The legend comes from the map's plan.
         """
-        self.detail.setPlainText(self.detail_text(zone))
+        self._fill_detail(zone)
         drew = self.map.set_zone(zone)
         self.map_head.setText("" if drew else self.map.headline)
         self.map_head.setVisible(not drew)
         mapview.fill_legend(self.legend_box, self.map.legend)
 
-    def detail_text(self, zone):
-        """The zone's headline, then ONE ROW PER COROMON still missing here - see `members_missing`."""
+    def _fill_detail(self, zone):
+        """Fill the pane from `detail_parts`: the headline, the rows, and the note when there are none."""
+        self.detail.fill(*self.detail_parts(zone))
+
+    def detail_parts(self, zone):
+        """`(headline, rows, message)` for the pane: the zone's line, its Coromon, or why it has none.
+
+        ONE ROW PER MISSING COROMON, which is what the user asked for after seeing a SWAMP_3_A row that
+        named only the line: "it doesn't list Fibio, which I don't have, but it spawns there", and then
+        "I said that if we are missing a member of line - it should still be listed". The LINE is named
+        on every row too (it is the counted slot, and the thing you evolve within), and the `how` column
+        says whether this Coromon itself spawns here or arrives by evolving one that does - which is why
+        a member with no slot of its own is listed rather than hidden.
+
+        NO ROWS IS TWO DIFFERENT THINGS and the message says which: a zone that can fill lines and has
+        filled them all, or nothing picked at all.
+        """
         if zone is None:
-            return ""
+            return "", [], ""
         row = next((r for r in self.rows if r["zone"].name == zone.name), None)
         if row is None:
-            return ""
-        missing = row["missing"]
+            return "", [], ""
         members = self._members.get(zone.name, [])
-        lines = ["%s  (%s)   %d line(s) short \u00b7 %d Coromon to catch"
-                 % (zone.name, mapnames.area(zone.map_file), len(row["missing_lines"]), len(members)),
-                 ""]
+        headline = "%s  (%s)   %d line(s) short \u00b7 %d Coromon to catch" % (
+            zone.name, mapnames.area(zone.map_file), len(row["missing_lines"]), len(members))
         if not members:
-            lines.append("  every Coromon of the lines this zone can fill is already caught.")
-            return "\n".join(lines)
-        # ONE ROW PER MISSING COROMON, which is what the user asked for after seeing a SWAMP_3_A row
-        # that named only the line: "it doesn't list Fibio, which I don't have, but it spawns there",
-        # and then "I said that if we are missing a member of line - it should still be listed". The
-        # LINE is named on every row too (it is the counted slot, and the thing you evolve within), and
-        # the `how` column says whether this Coromon itself spawns here or arrives by evolving one that
-        # does - which is why a member with no slot of its own is listed rather than hidden.
-        width = max(len(entry["member"].name) for entry in members)
-        line_width = max(len(entry["line"]) for entry in members)
-        needs = [" · ".join(SHORT[kind] for kind in entry["kinds"]) for entry in members]
-        need_width = max(len(text) for text in needs)
-        lines.append("  %s%s%s%s  %s" % (
-            _row("Coromon", width), _row("needs", need_width), _row("line", line_width),
-            _row("how", 11), "levels      share"))
-        for entry, text in zip(members, needs):
+            return headline, [], "every Coromon of the lines this zone can fill is already caught."
+        rows = []
+        for entry in members:
             hit = entry["odds"]
-            lines.append("  %s%s%s%s  %s" % (
-                _row(entry["member"].name, width), _row(text, need_width),
-                _row(entry["line"], line_width),
-                _row("spawns here" if hit else "evolve", 11),
-                "%-8s  %5s" % ("L%s-%s" % (hit[0], hit[1]) if hit else "-",
-                               "%.1f%%" % hit[2] if hit else "-")))
-        return "\n".join(lines)
+            rows.append({
+                "member": entry["member"].name,
+                "needs": " \u00b7 ".join(SHORT[kind] for kind in entry["kinds"]),
+                "line": entry["line"],
+                "how": "spawns here" if hit else "evolve",
+                "levels": "L%s-%s" % (hit[0], hit[1]) if hit else "-",
+                "share": "%.1f%%" % hit[2] if hit else "-",
+            })
+        return headline, rows, ""
 
     def _jump(self, index):
         """A double click hands the zone to the first tab, as the Database tab's list does."""

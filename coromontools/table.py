@@ -28,6 +28,14 @@ from .theme import BAR
 PAYLOAD = "_payload"
 ICON = "_icon"
 
+# THE ORDER THE CALLER GAVE, for a table whose own order IS the answer and no column can express it:
+# the Missing tab's pane lists the picked zone's short Coromon likeliest line first, inside a line in
+# dex order (`missing.members_missing`), and the spawns panes list the commonest encounter first -
+# neither is something a column holds. A sentinel rather than a key of its own so `sort_rows` can tell
+# "keep this list" from "sort by that column" - and clicking any heading still sorts, which is what
+# headings are for.
+NATURAL = object()
+
 # HOW TALL A ROW IS WITH AND WITHOUT AN ICON. 20 px is what a text row has always been; a row drawing
 # an icon is the icon's own height plus this much air, because a 32 px picture in a 20 px row is a
 # picture with its top and bottom cut off.
@@ -104,7 +112,11 @@ def sort_rows(rows, key, desc):
     concatenated so the non-numbers are last in both directions. Sorting the numbers as text
     would put "100" before "95", which is how a ranking of levels stops making sense - and a
     percentage is a number too (see `rank_number`).
+
+    `NATURAL` keeps the list as it stands - see the note beside it.
     """
+    if key is NATURAL:
+        return list(rows)
     numbers, others = [], []
     for row in rows:
         text = row.get(key, "")
@@ -243,7 +255,7 @@ class DataTable(QTableView):
             if column.bar:
                 self.setItemDelegateForColumn(i, BarDelegate(self))
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self._sort_key = sort_key or (columns[0].key if columns else None)
+        self._sort_key = columns[0].key if (sort_key is None and columns) else sort_key
         self._sort_desc = sort_desc
         self.horizontalHeader().sectionClicked.connect(self._header_clicked)
         self.selectionModel().currentRowChanged.connect(self._row_changed)
@@ -364,10 +376,21 @@ class DataTable(QTableView):
 
         NO ROWS IS NOT ONE ROW: an empty table is its header and nothing under it, which is what lets
         an empty location list leave the map the whole column.
+
+        ... AND THE HORIZONTAL BAR WHEN THE COLUMNS DO NOT FIT, because it takes its height out of the
+        viewport exactly as the vertical one takes its width out of the rows (`content_width` counts
+        that one unconditionally). MEASURED, not asked: at the moment a fill measures its own height
+        the bar is not showing yet, so this compares what the columns need against what the viewport
+        has - the comparison `widgets.mono_height` makes for a text pane, for the same reason. Without
+        it a pane fitted to its content hides its own last row behind the bar.
         """
         rows = self.model_.rowCount()
         asked = (self.horizontalHeader().height() + 2 * self.frameWidth()
                  + rows * self.verticalHeader().sectionSize(0))
+        if rows and self.viewport().width():
+            span = self.content_width() - self.verticalScrollBar().sizeHint().width()
+            if span > self.viewport().width():
+                asked += self.horizontalScrollBar().sizeHint().height()
         return max(asked, self.minimumSizeHint().height())
 
     def current_payload(self):

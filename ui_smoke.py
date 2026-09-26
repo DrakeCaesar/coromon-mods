@@ -28,6 +28,7 @@ from PySide6.QtTest import QTest                                  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel        # noqa: E402
 
 import encounters                                           # noqa: E402
+import encounter_zones as ez                                 # noqa: E402
 import skills                                               # noqa: E402
 
 import dex                                                  # noqa: E402
@@ -39,7 +40,7 @@ import coromontools.state as state                          # noqa: E402
 from coromontools import MainWindow, font, icons, mapnames as mn   # noqa: E402
 from coromontools import config                              # noqa: E402
 from coromontools.database_tab import CATEGORIES, SKIN_COLUMN  # noqa: E402
-from coromontools.grind import encounter_lines                # noqa: E402
+from coromontools.grind import encounter_rows                  # noqa: E402
 from coromontools import missing_tab                          # noqa: E402
 from coromontools.table import ICON, sort_rows                # noqa: E402
 from coromontools.theme import apply_theme                  # noqa: E402
@@ -111,20 +112,21 @@ def main():
     # now means something else - and a stale index makes a sort check pass while testing nothing.
     col = lambda key: [c.key for c in grind.table.model_.columns].index(key)     # noqa: E731
 
-    def pane_rows(text):
-        """`[(name, share, [fight, smart, sloth, lazy])]` - the priced lines of a spawns pane.
+    def pane_rows(pane):
+        """`[(name, share, [fight, smart, sloth, lazy])]` - the priced rows of a spawns pane.
 
-        READ BY COLUMNS, NOT BY A SUFFIX. Every priced line ends with the four numbers, and the two
-        tokens before them are the level range ("L55 -60") and the share; a party name may contain
-        spaces, so the name is whatever is left in front. The heading row and an entry the game cannot
-        roll (whose columns are "-") fail the `isdigit` test and drop out - which is the point.
+        READ FROM THE PANE'S OWN TABLE, not from its text: the spawns pane is a `DataTable` now (see
+        `widgets.DetailPane` and the user's "it needs to be an actual table"), so a row's cells are
+        what the model holds. The rows the game cannot roll carry no figures at all and drop out,
+        which is the point - the text version said the same thing by failing an `isdigit` test.
         """
         out = []
-        for line in text.split("\n"):
-            parts = line.split()
-            if len(parts) > 7 and parts[-1].isdigit():
-                out.append((" ".join(parts[:-7]), parts[-5], [int(v) for v in parts[-4:]]))
+        for row in pane.table.model_.rows:
+            figures = [row[key] for key in ("fight", "smart", "sloth", "lazy")]
+            if all(text.isdigit() for text in figures):
+                out.append((row["name"], row["share"], [int(text) for text in figures]))
         return out
+
     check("areas listed", grind.area_list.count() == len(grind.maps), grind.area_list.count())
     # the tick list is imported from the Tk version's state file the first time, which is the
     # point of the migration - so the expectation is "what was saved", not "everything"
@@ -136,7 +138,8 @@ def main():
     rows = grind.table.model_.rowCount()
     check("ranking filled", rows > 50, "%d rows at squad level %d" % (rows, grind.level.value()))
     check("a zone is selected", grind.table.current_row() is not None)
-    check("species pane filled", len(grind.species.toPlainText()) > 20)
+    check("species pane filled", len(grind.species.table.model_.rows) > 0,
+          "%d row(s)" % len(grind.species.table.model_.rows))
     check("map headline", bool(grind.map.headline), grind.map.headline)
     check("map has a plan", grind.map._plan is not None)
     if grind.map._plan:
@@ -148,6 +151,26 @@ def main():
         check("plan draws every patch with a fill and an edge",
               all("fill" in p and "edge" in p for p in plan["patches"]))
         check("legend lists the zones", len(grind.map.legend) > 0, len(grind.map.legend))
+
+    # HOW A ZONE'S SHAPE IS READ OFF THE MAP, in the two cases that differ - see
+    # `encounter_zones.markers` and `layer_under`. A zone whose markers name no layer normally IS those
+    # cells (the caves: 701 of them here); when they are a cell or two that do not even touch, they are
+    # PLACES and each is read as the terrain it stands on, which is the fix for the user's "the hayville
+    # and radiant park water areas are still only shown as individual squares".
+    def zone_shape(*parts):
+        return ez.zone_patches(os.path.join(dex.RES, "maps", *parts))[2]
+
+    pond = zone_shape("amishTown", "amishTown.json")["AMISHTOWN_WATER"]
+    river = zone_shape("luxSolisRoute", "luxSolisRoute.json")["LUXSOLISROUTE_WATER"]
+    cave = zone_shape("electricCave", "electricCave_f1.json")["CAVE_F1_A"]
+    check("a water zone marked by a cell or two that do not touch is read as the water under them",
+          sum(len(patch) for patch in pond["patches"]) > 100 and not pond["unplaced"]
+          and sum(len(patch) for patch in river["patches"]) > 300 and not river["unplaced"],
+          "pond %d tile(s), river %d"
+          % (sum(len(p) for p in pond["patches"]), sum(len(p) for p in river["patches"])))
+    check("... while a zone marked by a run of cells keeps those cells as its shape",
+          not cave["patches"] and len(cave["unplaced"]) > 100,
+          "%d patch(es), %d cell(s)" % (len(cave["patches"]), len(cave["unplaced"])))
 
     # sorting: the numeric column opens high-first, then flips, then comes back
     # IT OPENS ON XP PER FIGHT NOW, because that is the question this tab exists to answer - the user:
@@ -294,25 +317,21 @@ def main():
               % (zone.name, zone.average_level, zone.xp_per_encounter(dex.xp_reward)))
         grind.show_zone(zone)
         pump(app)
-        pane = grind.species.toPlainText()
-
-        def dashes(line):
-            """The four priced columns of a line as they appear, i.e. "-" when there is no figure."""
-            parts = line.split()
-            if "(empty" not in parts:
-                return None
-            return parts[parts.index("(empty") - 4:parts.index("(empty")]
-
+        pane = grind.species
+        # THE ROW THE GAME CANNOT ROLL HAS NO FIGURES AT ALL, and the pane says why once underneath
+        # rather than on the row: the four priced cells are "-" and `rollable` is False.
+        priced = ("fight", "smart", "sloth", "lazy")
+        unpriceable = [row for row in pane.table.model_.rows if not row["rollable"]]
         check("... and the pane refuses to price it",
-              "empty level range" in pane
-              and any(dashes(ln) == ["-", "-", "-", "-"] for ln in pane.splitlines()),
-              [ln for ln in pane.splitlines() if "(empty" in ln][:1])
+              bool(unpriceable) and pane.note.isVisible()
+              and all(row[key] == "-" for row in unpriceable for key in priced),
+              [row["name"] for row in unpriceable][:1])
         check("... while the fights that CAN roll keep their four figures",
               len(pane_rows(pane)) == len([r for r in zone.encounters() if r["rollable"]]),
               len(pane_rows(pane)))
         check("... while the zone's own total is the price of the fights that do happen",
-              "%.0f xp / fight" % zone.xp_per_encounter(dex.xp_reward) in pane,
-              pane.splitlines()[0])
+              "%.0f xp / fight" % zone.xp_per_encounter(dex.xp_reward) in pane.head.text(),
+              pane.head.text())
 
     # the formula's own parts: linear in level, and a one-stage Coromon (place 1 of 1) is base/2
     solo = next((uid for uid in dex._XP_MONSTERS if dex._xp_lines()[uid] == (1, 1)), None)
@@ -349,8 +368,8 @@ def main():
     # untick everything -> the hint, not a blank pane
     grind.set_all(False)
     pump(app)
-    check("empty ranking says why", "Nothing is ticked" in grind.species.toPlainText(),
-          grind.species.toPlainText().splitlines()[:1])
+    check("empty ranking says why", "Nothing is ticked" in grind.species.note.text(),
+          grind.species.note.text().splitlines()[:1])
     check("empty ranking has no rows", grind.table.model_.rowCount() == 0)
     grind.set_all(True)
     pump(app)
@@ -412,10 +431,12 @@ def main():
         pump(app)
         names = ["Crimsonite " + mixed_zone.species.get(uid, uid)
                  for uid in mixed_zone.crimsonite]
-        text = grind.species.toPlainText()
+        listed = [row["name"] for row in grind.species.table.model_.rows]
+        # A SUBSTRING TEST, because a crimsonite forms PARTIES with another one: the row is named
+        # "Crimsonite Otogy + Crimsonite Orotchy", so both forms are on it and neither has a row of
+        # its own - which is the encounter-per-row rule the pane draws by.
         check("the zone's spawns pane names the crimsonite form",
-              all(name in text for name in names)
-              and text.lower().count("crimsonite") >= len(names), names)
+              all(any(name in listed_name for listed_name in listed) for name in names), names)
         grind.show_zone(keep_zone)
         grind.min_share.setValue(keep_share)
         pump(app)
@@ -440,38 +461,39 @@ def main():
         check("... where the per-species view counts a repeated member twice",
               sum(row["share"] for row in group.slots()) > 100.0,
               sum(row["share"] for row in group.slots()))
-        check("... and the pane draws those encounters, one line each",
-              len(encounter_lines(group)) == len(group.encounters()),
-              encounter_lines(group)[:2])
+        check("... and the pane draws those encounters, one row each",
+              len(encounter_rows(group)) == len(group.encounters()),
+              encounter_rows(group)[:2])
         # THE PANE HAS TO EXPLAIN THE RANKING. The column's claim is XP per fight, so the zone's own
         # pane repeats its total and then what each of its fights is worth - otherwise the number the
         # list is sorted by is a number with no visible source.
         grind.show_zone(group)
         pump(app)
-        pane = grind.species.toPlainText()
+        pane = grind.species
         check("the spawns pane names the zone's own xp per fight",
-              "%.0f xp / fight" % group.xp_per_encounter(dex.xp_reward) in pane,
-              pane.splitlines()[0])
+              "%.0f xp / fight" % group.xp_per_encounter(dex.xp_reward) in pane.head.text(),
+              pane.head.text())
         # ... AND SAYS IT IS AN AVERAGE, NAMING THE BEST FIGHT. Without that the headline looks
         # wrong: WATERROUTE_4 reads 4840 while THREE of its five fights are worth more (6101, 4775,
         # 4485) - the user: "weird it still shows the data as WATERROUTE_4 ... 4840 xp / fight ...
-        # 6101 xp". Both figures are recomputed here, and the pane's own lines have to agree with the
+        # 6101 xp". Both figures are recomputed here, and the pane's own rows have to agree with the
         # best it names.
         expected, best, count = group.xp_spread(dex.xp_reward)
         check("... and that the figure is the average over the fights, with the best of them named",
-              "average of %d" % count in pane and "best %.0f" % best in pane
+              "average of %d" % count in pane.head.text() and "best %.0f" % best in pane.head.text()
               and abs(expected - group.xp_per_encounter(dex.xp_reward)) < 0.5,
-              pane.splitlines()[1])
+              pane.head.text())
         rich = pane_rows(pane)
         check("... and every listed fight's own row, group members counted",
               len(rich) == len([r for r in group.encounters() if r["rollable"]]),
               [r[0] for r in rich][:2])
-        listed = [row[2][0] for row in rich]
+        figures = [row[2][0] for row in rich]
         check("... with the best figure being one of those fights, not an average of its own",
-              bool(listed) and abs(max(listed) - best) <= 1,
-              "best %.0f vs the biggest line %s" % (best, max(listed) if listed else "none"))
-        check("... the commonest fight on the first line, as the list is ordered",
-              bool(rich) and rich[0][1] == "%.1f%%" % group.encounters()[0]["share"],
+              bool(figures) and abs(max(figures) - best) <= 1,
+              "best %.0f vs the biggest row %s" % (best, max(figures) if figures else "none"))
+        check("... the commonest fight on the first row, in the model's own order",
+              bool(rich) and rich[0][1] == "%.1f%%" % group.encounters()[0]["share"]
+              and rich[0][0] == group.encounters()[0]["name"],
               rich[:1])
         # THE THREE GEM COLUMNS ARE THE FIGHT SCALED, in the pane as in the table - the user: "after
         # the base XP column, show a column showing how much the coromon holding the Smart Gem would
@@ -481,9 +503,15 @@ def main():
                   and abs(row[2][2] - row[2][0] * 0.5) <= 2
                   and abs(row[2][3] - row[2][0] * 0.2) <= 2 for row in rich),
               [r[2] for r in rich][:2])
-        check("... under a heading row that names all four columns",
-              any(ln.split() == ["level", "share", "fight", "smart", "sloth", "lazy"]
-                  for ln in pane.splitlines()), pane.splitlines()[2:3])
+        check("... under the pane's own column headings, named once",
+              [column.heading for column in pane.table.model_.columns]
+              == ["encounter", "level", "share", "fight", "smart gem", "sloth gem", "lazy gem"],
+              [column.heading for column in pane.table.model_.columns])
+        check("... and its columns never grow past the ceilings declared for them",
+              pane.table.content_width() <= sum(c.width for c in pane.table.model_.columns)
+              + 2 * pane.table.frameWidth() + pane.table.verticalScrollBar().sizeHint().width(),
+              "%d px of columns for %d px of ceilings"
+              % (pane.table.content_width(), sum(c.width for c in pane.table.model_.columns)))
         grind.show_zone(keep_zone)          # leave the tab on the zone the run started with
         pump(app)
 
@@ -528,29 +556,28 @@ def main():
     grind.min_share.setValue(0)        # the two panes are only comparable unfiltered
     grind.show_zone(chosen)
     pump(app, 3)
-    # THE HEADINGS ARE STRIPPED BY SHAPE, NOT BY COUNT: the spawn lines are the ones that start with
-    # the listing's own two-space indent, so adding a line to the first tab's heading (the average and
-    # best line did) cannot silently shift what this compares.
-    first_tab = [line for line in grind.species.toPlainText().split("\n") if line.startswith("  ")]
+    # THE HEADINGS ARE COMPARED AS THE PANES' OWN COLUMNS, not as text: both panes are the same
+    # `DataTable` over the same rows (`grind.SPAWN_COLUMNS` and `grind.encounter_rows`), so "the same"
+    # is now a stronger claim than two strings matching - it is the same columns over the same names.
+    first_tab = [(row["name"], row["share"], row["fight"]) for row in grind.species.table.model_.rows]
     grind.min_share.setValue(keep_share_pct)
-    here = [line for line in database.species.toPlainText().split("\n") if line.startswith("  ")]
+    here = [(row["name"], row["share"], row["fight"]) for row in database.species.table.model_.rows]
     check("picking a location lists what else spawns there, exactly as the first tab does",
           bool(here) and here == first_tab, "%s vs %s" % (first_tab[:1], here[:1]))
     check("... with none of it scrolled out of sight",
-          database.species.verticalScrollBar().maximum() == 0,
-          "scroll range %d" % database.species.verticalScrollBar().maximum())
+          database.species.table.verticalScrollBar().maximum() == 0,
+          "scroll range %d" % database.species.table.verticalScrollBar().maximum())
     # AND THE MAP IS DIRECTLY UNDER THE LAST OF THEM, not half the column: both panes get their own
     # content height and the map takes the rest - the user: "the map section should be directly below
     # the last line in the list, so we can fit a taller map if needed".
     sizes = database.right_split.sizes()
     check("the list and the breakdown are only as tall as their own content",
           abs(sizes[0] - database.locations.content_height()) <= 2
-          and abs(sizes[1] - mono_height(database.species, database.species.toPlainText())) <= 2,
+          and abs(sizes[1] - database.species.table.content_height()) <= 2,
           "list %d/%d px, species %d/%d px"
           % (sizes[0], database.locations.content_height(), sizes[1],
-             mono_height(database.species, database.species.toPlainText())))
-    check("the map takes the rest of the column", sizes[2] > sizes[0] * 2,
-          "list %d, species %d, map %d" % tuple(sizes))
+             database.species.table.content_height()))
+    check("the map takes the rest of the column", sizes[2] > sizes[0] * 2,          "list %d, species %d, map %d" % tuple(sizes))
 
     # ... AND THE GRID IS THE WHOLE DEX: one cell per entry per category, plus one per crimsonite
     # form (which has no dex entry of its own - see `dex.crimsonite_forms`).
@@ -559,6 +586,21 @@ def main():
           len(database.cells) == entries * len(CATEGORIES) + len(dex.crimsonite_forms()),
           "%d cell(s) = %d entries x %d categories + %d form(s)"
           % (len(database.cells), entries, len(CATEGORIES), len(dex.crimsonite_forms())))
+    # THE HEADER ROW IS NOT PART OF THE DEX'S SHAPE. A find box that matches one line (or none) leaves
+    # the grid shorter than the pane it is in, and a QGridLayout hands the height it has left over to
+    # EVERY row - so the header row grew to the height of an icon row: measured 344 px against the
+    # row's 343 with "cubzero" typed in, and 694 with a find that matches nothing. The trailing
+    # stretch row takes the slack instead (`database_tab._build`). The user: "the headers are as big
+    # as the rows - but the rows are only big to fit the big images in them, the headers can be
+    # short, not as tall".
+    database.search.setText("cubzero")
+    pump(app, 3)
+    header_cells = [database.grid.cellRect(0, column).height()
+                    for column in range(database.columns + 1)]
+    check("the grid's header row stays one line tall however short the dex gets",
+          max(header_cells) <= 30 and database.holder.height() > 0, header_cells)
+    database.search.setText("")
+    pump(app, 3)
     with_icon = sum(1 for mon in dex.monsters(with_crimsonite=True)
                     if icons.icon_image(mon) is not None)
     # EVERY ONE of them: the entry that used to be missing artwork was `NORMAL_SPINNER`, which the
@@ -1044,45 +1086,81 @@ def main():
     # here (they are reachable by evolving a stage that does spawn).
     miss.table.selectRow(0)
     pump(app, 3)
-    pane = miss.detail.toPlainText()
     listed = missing_data.members_missing(sample["zone"], sample["missing"])
+    # IT IS A REAL TABLE NOW - the user: "when we print an ascii table like this and similar ... it
+    # needs to be an actual table" - so the checks read its model and its columns rather than the
+    # columns of a monospace pane, and this is the one place the whole path is exercised: the model's
+    # rows, the headings, the sort and the alignment all come from `table.DataTable`.
+    rows = miss.detail.table.model_.rows
     check("the pane names the selected zone and how many Coromon are to catch",
-          sample["zone"].name in pane and "%d line(s) short \u00b7 %d Coromon to catch"
-          % (len(sample["missing_lines"]), len(listed)) in pane, pane.splitlines()[:2])
-    named = [line for line in pane.splitlines()
-             if line.startswith("  ") and line.strip() and line.split()[0] != "Coromon"]
-    check("... with one row per missing Coromon", len(named) == len(listed),
-          "%d row(s) for %d Coromon" % (len(named), len(listed)))
-    check("... under a heading row of its own",
-          [line.split() for line in pane.splitlines() if "needs" in line]
-          == [["Coromon", "needs", "line", "how", "levels", "share"]], pane.splitlines()[2:3])
+          sample["zone"].name in miss.detail_head.text()
+          and "%d line(s) short \u00b7 %d Coromon to catch"
+          % (len(sample["missing_lines"]), len(listed)) in miss.detail_head.text(),
+          miss.detail_head.text())
+    check("... with one row per missing Coromon", len(rows) == len(listed),
+          "%d row(s) for %d Coromon" % (len(rows), len(listed)))
+    check("... under a heading row of its own, as a real table",
+          [column.heading for column in miss.detail.table.model_.columns]
+          == ["Coromon", "needs", "line", "how", "levels", "share"],
+          [column.heading for column in miss.detail.table.model_.columns])
     check("... every one of them named, in the model's own order",
-          [line.split()[0] for line in named] == [entry["member"].name for entry in listed],
-          [line.split()[0] for line in named][:3])
-    row_of = {line.split()[0]: line for line in named}
+          [row["member"] for row in rows] == [entry["member"].name for entry in listed],
+          [row["member"] for row in rows][:3])
+    row_of = {row["member"]: row for row in rows}
     check("... each naming the line it belongs to and every kind it needs",
-          all(entry["line"] in row_of[entry["member"].name]
-              and all(missing_tab.SHORT[kind] in row_of[entry["member"].name]
-                      for kind in entry["kinds"]) for entry in listed), named[:2])
+          all(entry["line"] == row_of[entry["member"].name]["line"]
+              and all(missing_tab.SHORT[kind] in row_of[entry["member"].name]["needs"]
+                      for kind in entry["kinds"]) for entry in listed), rows[:2])
     # ... INCLUDING THE ONES THAT DO NOT SPAWN HERE, which is the whole point of "still listed": a
     # Coromon with no slot of its own is marked `evolve` (catch the kind on a stage that IS here and
     # evolve it), and one with a slot shows the levels and share of that slot.
     evolved = [entry for entry in listed if not entry["odds"]]
     check("... with the ones that do not spawn here marked as evolved, not hidden",
-          len(evolved) == len([line for line in named if line.rstrip().endswith("-")]),
+          all(row_of[entry["member"].name]["how"] == "evolve"
+              and row_of[entry["member"].name]["levels"] == "-"
+              and row_of[entry["member"].name]["share"] == "-" for entry in evolved),
           "%d evolve-only row(s)" % len(evolved))
     check("... and the ones that do spawn here priced off their own slot",
-          all("L%s-%s" % entry["odds"][:2] in row_of[entry["member"].name]
-              and "%.1f%%" % entry["odds"][2] in row_of[entry["member"].name]
+          all(row_of[entry["member"].name]["how"] == "spawns here"
+              and row_of[entry["member"].name]["levels"] == "L%s-%s" % entry["odds"][:2]
+              and row_of[entry["member"].name]["share"] == "%.1f%%" % entry["odds"][2]
               for entry in listed if entry["odds"]), listed[0]["member"].name)
     # THE CASE THE USER REPORTED, found rather than assumed: a Coromon whose name is NOT its line's
-    # base form (Fibio in the Taddle line) has to be printed by name.
+    # base form (Fibio in the Taddle line) has to be listed by name.
     non_base = [entry for entry in listed if entry["member"].name != entry["line"]]
     check("... including a stage that is not the line's base form", bool(non_base),
           [(entry["member"].name, entry["line"]) for entry in non_base][:2])
     check("... the Fibio case: named on its own row under its line",
-          all(entry["member"].name in row_of[entry["member"].name] for entry in non_base),
+          all(row_of[entry["member"].name]["member"] != row_of[entry["member"].name]["line"]
+              for entry in non_base),
           [(entry["member"].name, entry["line"]) for entry in non_base][:2])
+    # SORTING IS THE POINT OF IT BEING A TABLE, and the share column has to rank as a NUMBER: sorted
+    # as text, 9.0% comes out above 12.0%, which is the bug `table.rank_number` exists for. Its
+    # `desc_first` is what the first click opens on, and the rows with no share ("-") stay last
+    # whichever way round it is.
+    share_col = [c.key for c in miss.detail.table.model_.columns].index("share")
+
+    def shares_now():
+        return [float(row["share"][:-1]) for row in miss.detail.table.model_.rows if row["share"] != "-"]
+
+    miss.detail.table._header_clicked(share_col)
+    pump(app, 2)
+    check("... and it sorts when a heading is clicked, a percentage as a number",
+          miss.detail.table.sort_state == ("share", True)
+          and shares_now() == sorted(shares_now(), reverse=True),
+          "%s: %s" % (miss.detail.table.sort_state, shares_now()[:6]))
+    miss.detail.table._header_clicked(share_col)
+    pump(app, 2)
+    check("... and the other way round on the second click",
+          miss.detail.table.sort_state == ("share", False)
+          and shares_now() == sorted(shares_now()),
+          "%s: %s" % (miss.detail.table.sort_state, shares_now()[:6]))
+    check("... a sort never loses or invents a row",
+          sorted(row["member"] for row in miss.detail.table.model_.rows)
+          == sorted(row["member"] for row in rows),
+          "%d row(s) after sorting" % len(miss.detail.table.model_.rows))
+    miss.table.selectRow(0)
+    pump(app, 2)
 
     # THE RIGHT HALF IS THE MAP, the user: "the right half of the missing tab should also show the map
     # with the zone highlighted like the other tabs". It is the same `ZoneMap` widget, so the picked
@@ -1090,10 +1168,13 @@ def main():
     # the map could NOT draw the zone (`set_zone` returning False).
     check("the tab is two columns, the ranking and pane beside the map",
           miss.split.count() == 2
-          and miss.split.widget(0).findChild(type(miss.table)) is miss.table
-          and miss.split.widget(0).findChild(type(miss.detail)) is miss.detail
+          and miss.split.widget(0).isAncestorOf(miss.table)
+          and miss.split.widget(0).isAncestorOf(miss.detail)
           and miss.split.widget(1).findChild(type(miss.map)) is miss.map,
           "%d column(s)" % miss.split.count())
+    check("the pane below the ranking is as wide as the ranking, and no wider",
+          miss.detail.table.width() <= miss.table.width() + 2,
+          "pane %d px, ranking %d px" % (miss.detail.table.width(), miss.table.width()))
     check("neither column can be dragged shut", not miss.split.childrenCollapsible())
     check("picking a row draws that zone on the map",
           miss.map.zone is not None and miss.map.zone.name == sample["zone"].name
@@ -1123,12 +1204,24 @@ def main():
               len({g.family for g in miss.groups_ if not g.caught}),
               sum(1 for g in miss.groups_ if not g.caught)) in miss.summary.text(),
           miss.summary.text())
-    # ... AND A ZONE WITH NOTHING LEFT SAYS SO, rather than an empty pane that reads as a bug.
+    # ... AND A ZONE WITH NOTHING LEFT SAYS SO, rather than an empty grid that reads as a bug: the
+    # table and its note trade places, so there is never a blank table with a heading over it.
     caught_one = next((r for r in miss.rows if not r["missing"]), None)
     if caught_one is not None:
+        miss.show_zone(caught_one["zone"])
+        pump(app, 2)
+        head, detail_rows, message = miss.detail_parts(caught_one["zone"])
         check("a zone with everything caught says so",
-              "already caught" in miss.detail_text(caught_one["zone"]),
-              miss.detail_text(caught_one["zone"]).splitlines()[:2])
+              "already caught" in message and not detail_rows
+              and miss.detail_note.isVisible() and not miss.detail.table.isVisible(),
+              "note %r, table %s" % (message, miss.detail.table.isVisible()))
+        # the zone the ranking is still pointing at - `selectRow(0)` again would not fire, because the
+        # current row never left (the pane was driven by hand above, not by the selection)
+        miss.show_zone(miss.table.current_payload())
+        pump(app, 2)
+        check("... and the table comes back for a zone that has something",
+              miss.detail.table.isVisible() and not miss.detail_note.isVisible(),
+              miss.detail_head.text())
     # the gesture the Database tab has: a double click hands the zone to the first tab
     handed = []
     miss.zoneChosen.connect(handed.append)

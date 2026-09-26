@@ -89,12 +89,12 @@ from PySide6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLab
 from . import icons, mapnames
 from .config import (HIDE_COMPLETE_KEY, ICON_ZOOM, ICON_ZOOM_KEY, ICON_ZOOM_MAX, ICON_ZOOM_MIN,
                      STATE_CAUGHT, STATE_ELSEWHERE, STATE_SEEN, STATE_UNKNOWN)
-from .grind import encounter_lines
+from .grind import NO_LEVEL, SPAWN_COLUMNS, encounter_rows
 from . import mapview
 from .mapview import ZoneMap
 from .table import PAYLOAD, Column, DataTable
 from .text import pretty
-from .widgets import FittedPane, mono_height, mono_text
+from .widgets import DetailPane, FittedPane
 
 try:
     import savefile
@@ -344,14 +344,16 @@ class DatabaseTab(QWidget):
 
         # AND WHAT ELSE SPAWNS THERE, directly under the rows it belongs to - the user: "when we
         # pick a location from the list, right under the list it should also show a breakdown of what
-        # else spawns there, same way as the first tab". Same pane, same columns, same formatter
-        # (`grind.encounter_lines`, imported rather than copied so the two tabs cannot drift), and the
-        # same ENCOUNTER-per-line view: a percentage belongs to the fight the game rolls.
-        # IT IS WHAT MAKES THE ROW MEAN SOMETHING: the picked Coromon is one line of this list, with
+        # else spawns there, same way as the first tab". Same pane, same columns, same rows
+        # (`grind.SPAWN_COLUMNS` and `grind.encounter_rows`, imported rather than copied so the two
+        # tabs cannot drift), and the same ENCOUNTER-per-row view: a percentage belongs to the fight
+        # the game rolls.
+        # IT IS WHAT MAKES THE ROW MEAN SOMETHING: the picked Coromon is one row of this list, with
         # its own share, and the pane shows it against the company it keeps. NOTHING IS FILTERED -
         # the first tab has a "hide encounters under %" control and this pane shows the zone as it is.
-        self.species = mono_text(wrap=False)
-        self.species.setToolTip("what the picked area spawns, most common first")
+        # NO HEADLINE ON THIS ONE: the selected row directly above it already names the area.
+        self.species = DetailPane(SPAWN_COLUMNS, headline=False,
+                                  tooltip="what the picked area spawns, most common first")
 
         self.map = ZoneMap(empty=MAP_EMPTY)
         # THE MAP'S OWN CAPTION, shown only when the map could NOT draw the zone, and the legend
@@ -422,6 +424,14 @@ class DatabaseTab(QWidget):
 
         self._build_header()
         self._build_cells()
+        # ... AND A TRAILING EMPTY ROW TAKES THE SLACK, for the reason the trailing COLUMN does
+        # (`setColumnStretch` above): a QGridLayout hands the height it has left over to EVERY row in
+        # it, so a grid shorter than the pane grows all of them - the header row included. Measured
+        # with "cubzero" in the find box: the header row came out 344 px against the icon row's 343,
+        # and 694 with a find that matches nothing at all. The user: "the headers are as big as the
+        # rows - but the rows are only big to fit the big images in them, the headers can be short,
+        # not as tall". The last row is one past the dex, so nothing else can land in it.
+        self.grid.setRowStretch(self.grid.rowCount(), 1)
         self._apply_zoom()       # the columns and the cells, at the saved scale
 
     def _elide_labels(self):
@@ -472,8 +482,8 @@ class DatabaseTab(QWidget):
         THE RIGHT COLUMN IS NOT AN EVEN SPLIT, which is what a `QSplitter` with equal stretch
         factors gives - the user asked for the point of it instead: "the map section should be
         directly below the last line in the list, so we can fit a taller map if needed". So both
-        panes above the map are put on their own content height (`DataTable.content_height`,
-        `widgets.mono_height`) every time what they hold changes, and the map takes the remainder.
+        panes above the map are put on their own content height (`DataTable.content_height`) every
+        time what they hold changes, and the map takes the remainder.
 
         Called from `show_location`, which is what changes both at once - the rows come from the
         picked Coromon and the species from the picked ROW (see there) - and returns whether it could:
@@ -489,7 +499,7 @@ class DatabaseTab(QWidget):
         if room <= 0:
             return False
         want = [self.locations.content_height(),
-                mono_height(self.species, self.species.toPlainText())]
+                self.species.table.content_height()]
         if sum(want) > room:
             # both keep a share of what there is, so neither is driven to nothing by a long list in
             # the other (they have their own minimums, and Qt applies them either way)
@@ -764,16 +774,26 @@ class DatabaseTab(QWidget):
         the map could NOT answer, which is what `set_zone` returning False means ("no map file",
         "not marked on the map of...", or nothing picked yet).
         """
-        self.species.setPlainText("\n".join(encounter_lines(zone, xp_of=dex.xp_reward))
-                                  if zone is not None else "")
+        self.species.fill(*self.species_parts(zone))
         drew = self.map.set_zone(zone)
         self.map_head.setText("" if drew else self.map.headline)
         self.map_head.setVisible(not drew)
         mapview.fill_legend(self.legend_box, self.map.legend)
         # THE COLUMN IS RE-FITTED LAST, once both panes hold what they are going to hold: the list's
-        # rows come from `set_rows` and the species pane's lines were set at the TOP of this method,
+        # rows come from `set_rows` and the species pane's rows were set at the TOP of this method,
         # so this is the one moment both content heights are current.
         self._fit_column()
+
+    def species_parts(self, zone):
+        """`(headline, rows, note)` for the species pane - no headline, since the row above names it.
+
+        The note is the one thing a row cannot say: an encounter the game rolls no level for has no
+        figures to show at all (see `grind.NO_LEVEL`).
+        """
+        if zone is None:
+            return "", [], ""
+        rows = encounter_rows(zone, xp_of=dex.xp_reward)
+        return "", rows, NO_LEVEL if any(not row["rollable"] for row in rows) else ""
 
     def _jump(self):
         """Hand the double-clicked location to the first tab, where the grinder can use it.

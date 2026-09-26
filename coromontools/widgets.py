@@ -1,16 +1,17 @@
-"""The two small widgets all three tabs share.
+"""The small widgets all three tabs share.
 
-`note` is the small print that explains a number next to the number, and `mono_text` is the
-read-only monospace pane the window uses for text that is really a table: the species list,
-the skill description. Both were repeated as inline tkinter options in the Tk version.
-
-`FittedPane` is the third: the rule for where the separator beside a table goes.
+`note` is the small print that explains a number next to the number, `DetailPane` is the pane under a
+ranking whose body is a table when there is something to list and a line of prose when there is not,
+and `mono_text` is the read-only monospace pane still used for text that is NOT a table - a skill's
+description. `FittedPane` is the last: the rule for where the separator beside a table goes.
 """
 
-from PySide6.QtCore import QEvent, QObject, QTimer
+from PySide6.QtCore import QEvent, QObject, QSize, QTimer
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QFrame, QLabel, QPlainTextEdit
+from PySide6.QtWidgets import (QAbstractItemView, QFrame, QLabel, QPlainTextEdit, QSizePolicy,
+                               QVBoxLayout, QWidget)
 
+from .table import NATURAL, DataTable
 from .theme import FIELD, FG, NOTE
 
 
@@ -27,6 +28,79 @@ def note(text, wrap=None):
     if wrap:
         label.setMaximumWidth(wrap)
     return label
+
+
+class DetailPane(QWidget):
+    """The pane under a ranking: a headline, then a TABLE - or a line of prose when there is nothing.
+
+    WHAT THIS REPLACES, in the user's words: "when we print an ascii table like this and similar ...
+    it needs to be an actual table". Three panes of this window were monospace text areas whose columns
+    were padded with spaces - the Missing tab's per-Coromon breakdown, and the spawns list under both
+    maps - which meant the columns moved with the widest name in the list, nothing could be sorted, and
+    a value could not be copied on its own. They are `DataTable`s now, and this is the one place that
+    builds them, so the three panes are laid out and filled the same way.
+
+    THREE PARTS, because two of them are not rows: the HEADLINE says what the table is about (the zone,
+    and what is left in it), the NOTE stands in for the table when there is nothing to list ("every
+    Coromon of the lines this zone can fill is already caught"), and the table hides with it rather than
+    showing an empty grid under a heading.
+
+    THE TABLE FILLS THE PANE, like the ranking above it: the columns are measured to their own values
+    (`DataTable.fit_columns`), so a pane with room to spare just shows that room to the right of the
+    last column rather than stretching it, and a pane too narrow for the columns scrolls them - which
+    is what the monospace pane this replaces did.
+
+    `sort_key` defaults to `table.NATURAL`, which keeps the order the caller filled in - the panes of
+    this window list things in a ranked order no column can express (likeliest line first, most common
+    spawn first) - and clicking a heading sorts anyway, which is what a heading is for.
+    """
+
+    def __init__(self, columns, sort_key=NATURAL, headline=True, tooltip="", parent=None):
+        super().__init__(parent)
+        box = QVBoxLayout(self)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(2)
+        self.head = None
+        if headline:
+            self.head = QLabel("")
+            self.head.setWordWrap(True)
+            self.head.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            box.addWidget(self.head)
+        self.note = note("", wrap=900)
+        self.note.setVisible(False)
+        box.addWidget(self.note)
+        self.table = DataTable(columns, sort_key=sort_key)
+        # A DISPLAY, NOT A PICKER: what selects is the ranking above, so a highlighted row here would
+        # look like a second selection that does nothing.
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        if tooltip:
+            self.table.setToolTip(tooltip)
+        box.addWidget(self.table, 1)
+        self.rows = []
+
+    def fill(self, headline, rows, message=""):
+        """Show `rows` under `headline` - or `message` instead, when there are no rows."""
+        self.rows = rows
+        if self.head is not None:
+            self.head.setText(headline)
+        self.table.set_rows(rows)
+        self.note.setText(message)
+        self.note.setVisible(bool(message))
+        self.table.setVisible(bool(rows))
+        return bool(rows)
+
+    def sizeHint(self):
+        """`(256, height)` - the width the monospace pane this replaces used to ask for.
+
+        THE TABLE'S OWN WIDTH IS NOT A HINT. Letting it through MOVES THE SEPARATOR beside the pane:
+        the spawns pane sits in a splitter's map column, and its table's 525 px of columns made that
+        column ask for 525 px where a text pane asked for 256 - measured at 1420x800, the map column
+        came out 311 px wide instead of 525, because the splitter then divided the room differently.
+        A change to the pane's CONTENTS must not resize the map next to it. The pane fills whatever
+        width the layout gives it and the table measures its own columns inside that, which is why the
+        width here is a constant and only the height follows the content.
+        """
+        return QSize(256, super().sizeHint().height())
 
 
 def mono_text(wrap=False):
