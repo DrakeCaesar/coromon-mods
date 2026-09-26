@@ -29,18 +29,39 @@ other's - 11 Coromon spawn this way, across six lines, all in the water areas.
 THE SHARES. A species' share of a zone is the sum of the `stepsWithEncounter` weights of the
 encounters holding it, divided by the sum of all the weights in that zone.
 
-That denominator is measured, not chosen. The obvious first guess is to divide by the zone's
-own `stepsUntilSeenAllEncounters`, and it is wrong: measured across all 101 zones the weights
-sum to between 4 and 95, while those fields hold 10 to 4000 (10, 12, 14, ... 200, 300, 4000),
-and the two are equal in exactly 0 of the 101. Dividing by them makes every share too small by
-a factor that differs from zone to zone.
+That denominator is measured, not chosen, and the mechanism behind it is now read out of the
+game's own bytecode (2026-09-26). A zone builds a SHUFFLE BAG of exactly
+`stepsUntilSeenAllEncounters` entries: each encounter contributes `stepsWithEncounter` copies,
+and everything left over is filled with `NO_ENCOUNTER`:
 
-What is NOT verified: that the game draws proportionally to those weights. The encounter roll
-was not reachable from the running game - the zone data is not held by any loaded module - so
-read the shares as relative weights. This is also why the official wiki's percentages can't be
-used to check it: for a zone whose weights are percentage-like the numbers agree, but the
-wiki's "Grass A (South)" groups areas differently from the game's per-map A/B/C/D zones, so
-there is no zone-by-zone comparison to make.
+    for each encounter:  bag:addAmountOfObject(encounter.stepsWithEncounter, encounter)
+    then:                bag:addAmountOfObject(stepsUntilSeenAllEncounters - <sum of weights>, NO_ENCOUNTER)
+
+A draw takes a random entry and REMOVES it, refilling the bag only once it is empty
+(`classes.modules.Shufflebag`; the zone wrapper is in `classes.lists.EncounterZoneList`). So a
+species' share OF ENCOUNTERS is its weight over the sum of weights - what this tool prints - while
+dividing by `stepsUntilSeenAllEncounters` gives its chance PER ROLL. The `NO_ENCOUNTER` filler is
+what reconciles the two magnitudes: the weights sum to 4..95 while the field holds 10 to 4000, and
+`sum(weights) <= stepsUntilSeenAllEncounters` holds in all 101 zones - never a negative pad.
+
+WHAT A ROLL IS depends on the zone, because it is not always a step:
+
+  * LAND. The grass TILES are the zone objects - `grassArea` objects in the map, each carrying a
+    `zoneUID` - and they are an `abstractActionTileZoneArea`, so the roll fires on the player's
+    grid move into/onto them. One bag entry per grass tile entered, multiplied by
+    `battleEffectUtility:mutateAmountOfMonsterRolls` (1 normally; lures raise it). Turning in
+    place, standing still and pacing outside the zone roll nothing. That tile's own
+    `activatedModule` then applies: `repel` blocks the encounter outright, `attract` raises the
+    rolled monster(s) by `math.random(4, 6)` levels.
+  * WATER. `fishingZoneArea` objects are NOT action-tile areas, so walking on water rolls nothing
+    at all. The surfboard's action button finds the `fishingZoneArea` on the player's tile and
+    casts once: ONE bag entry per cast, and a `NO_ENCOUNTER` draw is what the game shows as the
+    "no bite" dialogue. The water zones' high figures here are therefore per CAST, not per step.
+
+What is NOT verified: nothing about the weights now - the draw is read out of the code and the
+zone data is consistent with it. The earlier remark about the wiki still stands: its "Grass A
+(South)" groups areas differently from the game's per-map A/B/C/D zones, so there is no
+zone-by-zone comparison to make.
 
 Usage:
 
