@@ -61,6 +61,11 @@ def _fmt(value):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):
+        # Floats are reachable: loadouts declares `icon_scale = 1.0` and `empty_frame_dim = 0.5`.
+        # Without this the whole file could not be rendered at all, which went unnoticed because
+        # overlay.toml is only written when it is missing.
+        return repr(value)
     if isinstance(value, str):
         return '"%s"' % value
     if isinstance(value, (list, tuple)):

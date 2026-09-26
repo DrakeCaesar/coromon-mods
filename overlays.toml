@@ -260,7 +260,7 @@ enabled = true
 
 [cooldowns]
 # show a m:ss countdown under each running temporary effect's icon in the quick-item row
-enabled = true
+enabled = false
 # label font: outline_8 is the game's small font, outline_10_bold the larger one   (one of:
 # outline_8, outline_10_bold)
 font = "outline_8"
@@ -275,3 +275,15 @@ strip = 60
 # hide the darkness/fog effect on the maps that draw it (electric cave, the electric power tower,
 # the mescher realm, the developer home)
 enabled = true
+
+[bag]
+# show what is left in the encounter bag of the zone you are standing in
+enabled = false
+# where the readout sits on screen   (one of: top-left, top-right, bottom-left, bottom-right)
+corner = "bottom-left"
+# also show the NO_ENCOUNTER entries as a 'nothing' row. With it off the readout only lists the
+# encounters left, which is shorter but hides how close the bag is to refilling
+show_nothing = true
+# most rows to draw, the most likely first. A zone with 12 encounters would otherwise fill the
+# screen; the rows left out are counted on the last line
+max_lines = 8

@@ -27,6 +27,7 @@ themselves, because overlays.toml is generated from SETTINGS.
 from . import (
     area,
     autoroll,
+    bag,
     config,
     cooldowns,
     core,
@@ -65,6 +66,7 @@ FEATURES = [
     dialog,
     cooldowns,
     fog,
+    bag,
 ]
 
 __all__ = [
